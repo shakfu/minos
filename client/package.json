@@ -1,0 +1,19 @@
+{
+  "name": "minos-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Web desktop front end for the minos server",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "happy-dom": "^20.12.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
+  }
+}

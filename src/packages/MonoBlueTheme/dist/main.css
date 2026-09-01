@@ -1,0 +1,468 @@
+/*
+ * Mono Blue - a minimal OS.js theme.
+ *
+ * Layout comes from the client, gui, dialogs and panels stylesheets. This file
+ * sets colour and edges only: flat surfaces, hard 1px rules, no gradients and
+ * no shadows. Blue marks one thing -- what is selected, focused or active.
+ */
+
+:root {
+  --mb-bg: #fff;
+  --mb-fg: #000;
+  --mb-line: #000;
+  --mb-fill: #f2f2f2;
+  --mb-dim: #767676;
+  --mb-dim-line: #bdbdbd;
+  --mb-chrome-bg: #fff;
+  --mb-chrome-fg: #000;
+  --mb-accent: #0047ff;
+  --mb-accent-fg: #fff;
+}
+
+.osjs-root {
+  color: var(--mb-fg);
+  scrollbar-width: thin;
+  scrollbar-color: var(--mb-fg) var(--mb-bg);
+}
+
+/* Scrollbars */
+
+::-webkit-scrollbar {
+  width: 0.75em;
+  height: 0.75em;
+}
+
+::-webkit-scrollbar-button {
+  display: none;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-track-piece,
+::-webkit-scrollbar-corner,
+::-webkit-resizer {
+  background: var(--mb-bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--mb-fg);
+  border: 2px solid var(--mb-bg);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--mb-accent);
+}
+
+/* Panel */
+
+.osjs-panel {
+  background: var(--mb-chrome-bg);
+  color: var(--mb-chrome-fg);
+  border-bottom: 1px solid var(--mb-accent);
+}
+
+.osjs-panel-item--clickable {
+  cursor: pointer;
+}
+
+.osjs-panel-item--clickable:hover {
+  background: var(--mb-accent);
+  color: var(--mb-accent-fg);
+}
+
+.osjs-panel-item[data-name="windows"] > div[data-focused="false"] > * {
+  opacity: 0.5;
+}
+
+.osjs-panel-item[data-name="windows"] > div[data-focused="true"] {
+  box-shadow: inset 0 -2px 0 var(--mb-accent);
+}
+
+/* Windows */
+
+.osjs-window {
+  background: var(--mb-bg);
+  border: 1px solid var(--mb-line);
+  border-radius: 0;
+}
+
+.osjs-window[data-focused="false"] {
+  border-color: var(--mb-dim-line);
+}
+
+.osjs-window[data-loading="true"] {
+  pointer-events: none;
+}
+
+.osjs-window[data-loading="true"]::after {
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.osjs-window-header {
+  padding: 0.5em;
+  background: var(--mb-chrome-bg);
+  color: var(--mb-chrome-fg);
+  border-bottom: 1px solid var(--mb-accent);
+}
+
+.osjs-window[data-focused="false"] .osjs-window-header {
+  color: var(--mb-dim);
+  border-bottom-color: var(--mb-dim-line);
+}
+
+.osjs-window-title {
+  text-align: left;
+}
+
+.osjs-window-icon {
+  margin-right: 0.5em;
+}
+
+/*
+ * Window buttons are drawn from the two pseudo elements the base stylesheet
+ * sizes for us, so the theme needs no glyph assets. They inherit the header
+ * colour, which is what dims them on an unfocused window.
+ */
+
+.osjs-window-button > div::before,
+.osjs-window-button > div::after {
+  content: "";
+  position: absolute;
+  box-sizing: border-box;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.osjs-window-button[data-action="minimize"] > div::before {
+  width: 0.8em;
+  height: 1px;
+  margin-top: 0.35em;
+  background: currentColor;
+}
+
+.osjs-window-button[data-action="maximize"] > div::before {
+  width: 0.8em;
+  height: 0.8em;
+  border: 1px solid currentColor;
+}
+
+.osjs-window-button[data-action="close"] > div::before,
+.osjs-window-button[data-action="close"] > div::after {
+  width: 0.9em;
+  height: 1px;
+  background: currentColor;
+}
+
+.osjs-window-button[data-action="close"] > div::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.osjs-window-button[data-action="close"] > div::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+
+.osjs-window-button[data-action="close"]:hover > div::before,
+.osjs-window-button[data-action="close"]:hover > div::after,
+.osjs-window-button[data-action="minimize"]:hover > div::before {
+  background: var(--mb-accent);
+}
+
+.osjs-window-button[data-action="maximize"]:hover > div::before {
+  border-color: var(--mb-accent);
+}
+
+/* Menus */
+
+.osjs-gui-menu ul {
+  background: var(--mb-chrome-bg);
+  color: var(--mb-chrome-fg);
+  border: 1px solid var(--mb-line);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 15%);
+}
+
+.osjs-gui-menu li:hover > div > span {
+  background: var(--mb-accent);
+  color: var(--mb-accent-fg);
+}
+
+.osjs-gui-menu .osjs__disabled {
+  opacity: 0.5;
+}
+
+.osjs-gui-menubar > div {
+  cursor: pointer;
+}
+
+.osjs-gui-menubar > div:hover {
+  background: var(--mb-accent);
+  color: var(--mb-accent-fg);
+}
+
+/* Buttons */
+
+.osjs-gui-button > button {
+  border: 1px solid var(--mb-line);
+  border-radius: 0;
+  background: var(--mb-bg);
+  color: var(--mb-fg);
+  font: inherit;
+}
+
+.osjs-gui-button > button:hover:not(:disabled) {
+  border-color: var(--mb-accent);
+  color: var(--mb-accent);
+}
+
+.osjs-gui-button > button:focus {
+  outline: 2px solid var(--mb-accent);
+  outline-offset: -2px;
+}
+
+.osjs-gui-button > button:active:not(:disabled),
+.osjs-gui-button > button[active="true"]:not(:disabled) {
+  background: var(--mb-accent);
+  border-color: var(--mb-accent);
+  color: var(--mb-accent-fg);
+  outline: 0 none;
+}
+
+.osjs-gui-button > button:disabled {
+  color: var(--mb-dim);
+  border-color: var(--mb-dim-line);
+}
+
+/* Text fields */
+
+.osjs-gui-field input,
+.osjs-gui-field select,
+.osjs-gui-field textarea,
+.osjs-gui-input input,
+.osjs-gui-input select,
+.osjs-gui-input textarea {
+  border: 1px solid var(--mb-line);
+  border-radius: 0;
+  background: var(--mb-bg);
+  color: var(--mb-fg);
+  font: inherit;
+}
+
+.osjs-gui-field input:focus,
+.osjs-gui-field select:focus,
+.osjs-gui-field textarea:focus,
+.osjs-gui-input input:focus,
+.osjs-gui-input select:focus,
+.osjs-gui-input textarea:focus {
+  border-color: var(--mb-accent);
+  outline: 2px solid var(--mb-accent);
+  outline-offset: -2px;
+}
+
+.osjs-gui-field input:disabled,
+.osjs-gui-field select:disabled,
+.osjs-gui-field textarea:disabled,
+.osjs-gui-input input:disabled,
+.osjs-gui-input select:disabled,
+.osjs-gui-input textarea:disabled {
+  color: var(--mb-dim);
+  border-color: var(--mb-dim-line);
+}
+
+/* Toggles. The base stylesheet marks a checked box with an emoji; replace it
+ * with a plain accent block, round for radios. */
+
+.osjs-gui-toggle-field > label > span.osjs-toggle-input::before {
+  border: 1px solid var(--mb-line);
+  background: var(--mb-bg);
+}
+
+.osjs-gui-toggle-field > label > span.osjs-toggle-input::after {
+  content: "";
+  width: 0.6em;
+  height: 0.6em;
+  background: var(--mb-accent);
+}
+
+.osjs-gui-toggle-field > label > input[type="radio"] + span.osjs-toggle-input::before,
+.osjs-gui-toggle-field > label > input[type="radio"] + span.osjs-toggle-input::after {
+  border-radius: 100%;
+}
+
+/* Range */
+
+.osjs-gui-range-field > input[type="range"] {
+  width: 100%;
+  height: 2em;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.osjs-gui-range-field > input[type="range"]::-webkit-slider-runnable-track {
+  height: 2px;
+  border: 0;
+  background: var(--mb-line);
+  cursor: pointer;
+}
+
+.osjs-gui-range-field > input[type="range"]::-webkit-slider-thumb {
+  width: 1em;
+  height: 1em;
+  margin-top: -0.5em;
+  border: 0;
+  border-radius: 0;
+  background: var(--mb-accent);
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.osjs-gui-range-field > input[type="range"]::-moz-range-track {
+  height: 2px;
+  border: 0;
+  background: var(--mb-line);
+  cursor: pointer;
+}
+
+.osjs-gui-range-field > input[type="range"]::-moz-range-thumb {
+  width: 1em;
+  height: 1em;
+  border: 0;
+  border-radius: 0;
+  background: var(--mb-accent);
+  cursor: pointer;
+}
+
+/* Tabs */
+
+.osjs-gui-tabs-header > div {
+  border: 1px solid var(--mb-line);
+  background: var(--mb-fill);
+}
+
+.osjs-gui-tabs-header > div.osjs__active {
+  background: var(--mb-bg);
+  border-bottom-color: var(--mb-bg);
+}
+
+.osjs-gui-tabs-panes {
+  margin-top: -1px;
+}
+
+.osjs-gui-tabs-panes > div {
+  border: 1px solid var(--mb-line);
+  background: var(--mb-bg);
+}
+
+/* List view */
+
+.osjs-gui-list-view-wrapper {
+  border: 1px solid var(--mb-line);
+  background: var(--mb-bg);
+  color: var(--mb-fg);
+}
+
+.osjs-gui-list-view-wrapper:focus {
+  outline: 2px solid var(--mb-accent);
+  outline-offset: -2px;
+}
+
+.osjs-gui-list-view-wrapper:disabled {
+  color: var(--mb-dim);
+}
+
+.osjs-gui-list-view-header {
+  border: 0;
+  border-bottom: 1px solid var(--mb-line);
+  background: var(--mb-fill);
+}
+
+.osjs-gui-list-view .rows:not([data-zebra="false"]) > div:nth-child(odd):not(.osjs__active) {
+  background: var(--mb-fill);
+}
+
+.osjs-gui-list-view .osjs__active {
+  background: var(--mb-accent);
+  color: var(--mb-accent-fg);
+}
+
+/* Icon views */
+
+.osjs-gui-icon-view-wrapper {
+  border: 1px solid var(--mb-line);
+  background: var(--mb-bg);
+  color: var(--mb-fg);
+}
+
+.osjs-gui-icon-view-wrapper:focus {
+  outline: 2px solid var(--mb-accent);
+  outline-offset: -2px;
+}
+
+.osjs-gui-icon-view-wrapper .osjs__active .osjs__image,
+.osjs-gui-icon-view-wrapper .osjs__active .osjs__label {
+  background: var(--mb-accent);
+  color: var(--mb-accent-fg);
+}
+
+.osjs-desktop-iconview__entry--selected .osjs-desktop-iconview__entry__icon,
+.osjs-desktop-iconview__entry--selected .osjs-desktop-iconview__entry__label {
+  background: var(--mb-accent);
+  color: var(--mb-accent-fg);
+}
+
+/* Boxes, expanders, progress */
+
+.osjs-gui-box-styled {
+  border: 1px solid var(--mb-line);
+  background: var(--mb-bg);
+  color: var(--mb-fg);
+}
+
+.osjs-gui-expander-header {
+  border: 0;
+  border-bottom: 1px solid var(--mb-line);
+  background: var(--mb-fill);
+}
+
+.osjs-gui-progressbar-wrapper {
+  border: 1px solid var(--mb-line);
+  background: var(--mb-bg);
+  color: var(--mb-fg);
+}
+
+.osjs-gui-progressbar-value {
+  background: var(--mb-accent);
+}
+
+/* Notifications and search */
+
+.osjs-notification {
+  background: var(--mb-chrome-bg);
+  color: var(--mb-chrome-fg);
+  border: 1px solid var(--mb-line);
+  border-left: 3px solid var(--mb-accent);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 15%);
+}
+
+.osjs-notification .osjs-notification-title {
+  font-weight: 700;
+}
+
+.osjs-notification .osjs-notification-message {
+  margin-top: 1em;
+}
+
+.osjs-search-input {
+  border: 0;
+  background: var(--mb-bg);
+  color: var(--mb-fg);
+}
+
+.osjs-search-result:hover,
+.osjs-search-result.osjs__active {
+  background: var(--mb-accent);
+  color: var(--mb-accent-fg);
+}

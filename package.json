@@ -1,0 +1,51 @@
+{
+  "name": "minos",
+  "version": "0.1.0",
+  "description": "OS.js client served by a Python backend",
+  "private": true,
+  "license": "BSD-2-Clause",
+  "scripts": {
+    "build": "webpack",
+    "watch": "webpack --watch",
+    "package:discover": "osjs-cli package:discover",
+    "stylelint": "stylelint 'src/client/*.scss' 'src/packages/**/dist/*.css'"
+  },
+  "devDependencies": {
+    "@osjs/dev-meta": "^2.1.0",
+    "html-webpack-plugin": "^3.2.0",
+    "source-map-loader": "^0.2.4"
+  },
+  "dependencies": {
+    "@osjs/calculator-application": "^1.2.8",
+    "@osjs/cli": "^3.1.3",
+    "@osjs/client": "^3.7.1",
+    "@osjs/dialogs": "^3.1.0",
+    "@osjs/filemanager-application": "^1.6.2",
+    "@osjs/freedesktop-sounds": "^3.0.3",
+    "@osjs/gnome-icons": "^4.0.5",
+    "@osjs/gui": "^4.0.36",
+    "@osjs/panels": "^3.0.31",
+    "@osjs/preview-application": "^1.1.17",
+    "@osjs/standard-theme": "^4.0.9",
+    "@osjs/textpad-application": "^1.2.7",
+    "hyperapp": "^1.2.10",
+    "typeface-roboto": "^0.0.75"
+  },
+  "babel": {
+    "presets": [
+      [
+        "@babel/preset-env",
+        {}
+      ]
+    ],
+    "plugins": [
+      "@babel/plugin-transform-runtime"
+    ]
+  },
+  "stylelint": {
+    "extends": "@osjs/stylelint-config",
+    "rules": {
+      "no-descending-specificity": null
+    }
+  }
+}

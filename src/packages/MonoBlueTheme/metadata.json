@@ -1,0 +1,13 @@
+{
+  "type": "theme",
+  "name": "MonoBlueTheme",
+  "title": {
+    "en_EN": "Mono Blue"
+  },
+  "description": {
+    "en_EN": "Black and white with a single blue accent"
+  },
+  "files": [
+    "main.css"
+  ]
+}
