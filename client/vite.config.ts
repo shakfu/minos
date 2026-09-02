@@ -1,14 +1,13 @@
 import {defineConfig} from 'vitest/config'
 
-// dist/ is shared with the OS.js reference build, which writes flat files at
-// the root plus apps/, themes/, icons/ and fonts/. Vite keeps to assets/, so
-// the two do not collide -- but emptying the directory would wipe the other
-// build, and the manifest and packages along with it.
+// dist/ is served by Flask as plain static files, and is also the read-only
+// osjs:/ mountpoint. This is now the only build that writes there, so the
+// directory is emptied on each one.
 export default defineConfig({
   base: '/',
   build: {
     outDir: '../dist',
-    emptyOutDir: false,
+    emptyOutDir: true,
     sourcemap: true
   },
   server: {

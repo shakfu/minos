@@ -14,11 +14,9 @@ def app(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     dist.mkdir()
     (dist / "index.html").write_text("<html>minos</html>")
-    (dist / "metadata.json").write_text("[]")
 
     monkeypatch.setenv("MINOS_DIST", str(dist))
     monkeypatch.setenv("MINOS_VFS", str(tmp_path / "vfs"))
-    monkeypatch.setenv("MINOS_WATCH_DIST", "0")
 
     from server import config
 

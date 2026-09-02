@@ -49,9 +49,9 @@ def test_broadcast_reaches_every_connection(sockets, registry):
     first = connect(sockets, registry)
     second = connect(sockets, registry)
 
-    assert registry.broadcast("osjs/dist:changed", ["/osjs.css"]) == 2
+    assert registry.broadcast("osjs/vfs:watch:change", ["home:/"]) == 2
     assert first.ws.sent == second.ws.sent
-    assert first.ws.sent[0] == {"name": "osjs/dist:changed", "params": ["/osjs.css"]}
+    assert first.ws.sent[0] == {"name": "osjs/vfs:watch:change", "params": ["home:/"]}
 
 
 def test_broadcast_to_user_skips_other_users(sockets, registry):

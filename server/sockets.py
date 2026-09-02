@@ -1,15 +1,13 @@
-"""WebSocket transport for the OS.js client.
+"""WebSocket transport for the desktop client.
 
 The client opens one socket to `/` and multiplexes named messages over it as
-JSON `{name, params}` frames. The server pushes broadcasts (hot reload, package
-manifest changes, keepalive pings); the client sends application messages back.
+JSON `{name, params}` frames. The server pushes a handshake and keepalive
+pings; the client sends application messages back.
 """
 
 import json
 import logging
-import os
 import threading
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -143,63 +141,3 @@ def serve(registry, ws, user, ping_interval, session_max_age):
                 dispatch(connection, raw)
     finally:
         registry.remove(connection)
-
-
-class DistWatcher:
-    """Polls the build output and pushes reload signals to connected clients.
-
-    Only the top level of dist/ is scanned. That covers the `npm run watch`
-    loop, which is what the signal exists for; package directories below it are
-    symlinks into node_modules and are not followed.
-    """
-
-    def __init__(self, registry, root, interval=1.0):
-        self.registry = registry
-        self.root = root
-        self.interval = interval
-        self._stamps = self._scan()
-
-    def _scan(self):
-        stamps = {}
-        try:
-            entries = list(os.scandir(self.root))
-        except OSError:
-            return stamps
-
-        for entry in entries:
-            if not entry.name.endswith((".js", ".css")) and entry.name != "metadata.json":
-                continue
-            try:
-                if not entry.is_file():
-                    continue
-                stat = entry.stat()
-            except OSError:
-                continue
-            stamps[entry.name] = (stat.st_mtime_ns, stat.st_size)
-        return stamps
-
-    def poll(self):
-        """Broadcast a signal for each changed file. Returns the names sent."""
-        current = self._scan()
-        changed = [name for name, stamp in current.items() if self._stamps.get(name) != stamp]
-        self._stamps = current
-
-        for name in changed:
-            if name == "metadata.json":
-                self.registry.broadcast("osjs/packages:metadata:changed")
-            else:
-                self.registry.broadcast("osjs/dist:changed", [f"/{name}"])
-        return changed
-
-    def start(self):
-        thread = threading.Thread(target=self._loop, name="dist-watcher", daemon=True)
-        thread.start()
-        return thread
-
-    def _loop(self):
-        while True:
-            time.sleep(self.interval)
-            try:
-                self.poll()
-            except Exception:
-                logger.warning("Dist watcher poll failed", exc_info=True)

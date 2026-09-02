@@ -19,10 +19,6 @@ SESSION_LIFETIME = timedelta(hours=12)
 # Seconds of client silence before the server sends a keepalive frame.
 WS_PING_INTERVAL = 30
 
-# Poll dist/ and push hot-reload signals over the websocket.
-WATCH_DIST = os.environ.get("MINOS_WATCH_DIST", "1") == "1"
-WATCH_INTERVAL = 1.0
-
 # Cookie signing key. Override in any deployment that is not a local demo.
 SECRET_KEY = os.environ.get("MINOS_SECRET", "minos-development-secret")
 

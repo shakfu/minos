@@ -3,37 +3,31 @@
 A web desktop: a Python backend, and a TypeScript front end built on it.
 
 It started as the [OS.js](https://www.os-js.org) v3 client against a Python
-server that reimplements the contract OS.js expects. That client is still here,
-unchanged, as a working reference. The front end under `client/` is the
-replacement being written against the same backend.
+server that reimplements the contract OS.js expects. That client has since been
+removed; `client/` is the replacement, written from scratch against the same
+backend. The server still speaks the OS.js wire format -- route shapes, `osjs/*`
+websocket message names, and the `osjs:` mountpoint are all kept as-is.
 
 ## Run
 
 ```
 make client   # build the minos front end -> dist/index.html
-make osjs     # build the OS.js reference client -> dist/osjs.html
 make serve    # Flask on http://127.0.0.1:8000
 ```
 
-- minos: http://127.0.0.1:8000/
-- OS.js reference: http://127.0.0.1:8000/osjs.html
-
-Log in as `demo` / `demo`.
+Then http://127.0.0.1:8000/, logging in as `demo` / `demo`.
 
 ```
 make test     # typecheck, vitest, pytest
-make lint     # stylelint over the OS.js theme CSS
 make dev      # Vite with hot reload, proxying the API to a running `make serve`
 ```
 
-Both builds write into `dist/`. Vite keeps to `assets/`; the OS.js build writes
-flat files at the root plus `apps/`, `themes/`, `icons/`, `sounds/` and
-`fonts/`. They only ever contended for `index.html`, so the OS.js page is
-emitted as `osjs.html` instead and neither build cleans the directory.
+`make dev` opens a browser on http://localhost:5173/. `BROWSER=none make dev`
+starts the server without one.
 
-The reference client is a single file rather than a directory because Flask
-serves `dist/` as plain static files and only maps `/` to an index, so a bare
-`/osjs/` would be a 404.
+`serve`, `dev` and `test` install what they need first. That needs
+[uv](https://docs.astral.sh/uv/) for the Python venv and npm for the client;
+where the node install ships without npm, the Makefile falls back to corepack's.
 
 ## Layout
 
@@ -42,8 +36,7 @@ serves `dist/` as plain static files and only maps `/` to an index, so a bare
 | `client/` | The minos front end. TypeScript, Vite, no UI framework. |
 | `server/` | Flask app, VFS, websocket, config. |
 | `tests/` | pytest suite against the Flask test client. |
-| `src/` | The OS.js reference client: bootstrap, CLI config, local packages. |
-| `dist/` | Build output for both clients. Generated. |
+| `dist/` | Build output. Generated. |
 | `vfs/` | User home directories. Generated. |
 
 ## Front end
@@ -64,36 +57,17 @@ Two things worth knowing:
 - `core/api.ts` is the only module that knows the wire format. The tests in
   `client/tests/api.test.ts` pin every URL and body shape, so a drift from the
   frozen server contract fails there rather than in the browser.
-- Both clients write to one settings file, so `Session.patchDesktop` merges into
-  a `minos/desktop` key and writes the whole object back. A blind overwrite
-  would drop the OS.js client's theme and session.
+- `Session.patchDesktop` merges into a `minos/desktop` key and writes the whole
+  settings object back rather than overwriting it. Homes created under the old
+  client still carry `osjs/*` keys, and a blind overwrite would drop them.
 
 `WindowManager` takes its workspace rect as an injected function rather than
 measuring the DOM, which is what makes the geometry testable without layout.
 
-## Theming
-
-Right-click the desktop for **Select Theme** and **Select Wallpaper**. The choice
-saves through `POST /settings` and re-applies live, with no reload.
-
-The desktop default is a flat white fill, set in `src/client/config.js`.
-Wallpaper is a desktop setting rather than part of a theme -- the desktop writes
-it as an inline style, which a theme stylesheet cannot override without
-`!important`, and that would break Select Wallpaper.
-
-Two themes are discovered: `StandardTheme` from npm, and `MonoBlueTheme` in
-`src/packages/MonoBlueTheme/` -- flat white surfaces, hard 1px black rules, and
-blue reserved for what is selected, focused or active. It is plain CSS with no
-build step and no `main.js`; see its README for why `dist/` is the source.
-
-`no-descending-specificity` is off in the stylelint config. It flags ordering
-across unrelated components -- a scrollbar rule after `:root`, a tab rule after
-a menubar rule -- that cannot conflict.
-
 ## API
 
-The client talks to these routes. Shapes match `@osjs/server` so the stock
-client needs no patching.
+The client talks to these routes. Shapes still match `@osjs/server`: the
+contract is frozen, and `core/api.ts` is pinned to it by its tests.
 
 | Route | Purpose |
 |-|-|
@@ -119,25 +93,23 @@ Server to client:
 
 - `osjs/core:connected` on connect, carrying the session lifetime.
 - `osjs/core:ping` after 30 seconds of client silence.
-- `osjs/dist:changed` when a top-level `.js` or `.css` file in `dist/` changes.
-  The client hot-reloads matching stylesheets, so `npm run watch` in one
-  terminal restyles the running desktop without a refresh.
-- `osjs/packages:metadata:changed` when `dist/metadata.json` changes, which
-  makes the client re-read the package manifest after `package:discover`.
+
+Nothing else is pushed. `Registry.broadcast` and `broadcast_to_user` are there
+for handlers to use, but no server-side code calls them. Hot reload during
+development is Vite's, through `make dev`.
 
 Client to server: only `osjs/application:socket:message` is accepted. Every
-other `osjs*` name is refused, so a page cannot forge core events. Messages
-route to handlers registered by package name:
+other `osjs*` name is refused, so a page cannot forge core events. A frame
+carries `{pid, name, args}`, and `name` selects the handler:
 
 ```python
 from server.sockets import register_application_handler
 
-register_application_handler("Textpad", lambda conn, respond, args: respond("pong"))
+register_application_handler("Echo", lambda conn, respond, args: respond(*args))
 ```
 
-Only `dist/` top level is polled, not the package directories under it, which
-are symlinks into `node_modules`. Rebuilding a single application therefore
-does not push `osjs/packages:package:changed`.
+`respond` answers the one connection, quoting the `pid` back so the caller can
+match the reply to its request.
 
 ## Scope
 
@@ -148,7 +120,8 @@ This is a demo, not a deployment.
 - The Flask development server handles the websocket. It is threaded, which is
   enough for a demo; anything real wants gunicorn with a gevent worker.
 - No VFS change notifications. `osjs/vfs:watch:change` has no consumer in the
-  installed client packages, so nothing watches the user filesystem.
-- No server-side application handlers ship with the project, so packages that
-  need a backend (`metadata.json` `server` field) will not work until one is
-  registered.
+  client, so nothing watches the user filesystem.
+- No server-side application handlers ship with the project. `register_application_handler`
+  is there, but nothing calls it and the client sends no application messages.
+- Apps are compiled into the one bundle and registered statically in
+  `client/src/apps/index.ts`. Nothing is loaded at runtime.

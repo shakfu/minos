@@ -186,10 +186,6 @@ def main():
 
     config.VFS_ROOT.mkdir(parents=True, exist_ok=True)
     app = create_app()
-
-    if config.WATCH_DIST:
-        sockets.DistWatcher(app.extensions["sockets"], config.DIST, config.WATCH_INTERVAL).start()
-
     app.run(host=config.HOST, port=config.PORT)
 
 

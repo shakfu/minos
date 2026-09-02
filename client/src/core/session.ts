@@ -10,7 +10,7 @@ import {api, ApiError, type Settings, type UserProfile} from './api'
 
 const PROFILE_KEY = 'minos.profile'
 
-/** Settings live beside the OS.js client's in one file, so we own one key. */
+/** The settings file is a flat object of namespaces, so we own one key. */
 const NAMESPACE = 'minos/desktop'
 
 /** The Flask session is rolling, so an idle desktop still needs to touch it. */
@@ -84,9 +84,9 @@ export class Session {
   }
 
   /**
-   * Merge into our namespace and write the whole file back. The OS.js client
-   * keeps its own keys in the same object, so a blind overwrite would drop
-   * that user's theme and session.
+   * Merge into our namespace and write the whole file back. Other namespaces
+   * live in the same object -- the retired OS.js client left `osjs/*` keys in
+   * existing homes -- so a blind overwrite would drop them.
    */
   async patchDesktop(patch: DesktopSettings): Promise<void> {
     this.#settings = {...this.#settings, [NAMESPACE]: {...this.desktop, ...patch}}

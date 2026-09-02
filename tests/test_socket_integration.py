@@ -71,13 +71,13 @@ def test_a_broadcast_reaches_a_live_client(app, server):
         # receiving it means the broadcast below cannot miss it.
         client.receive(timeout=5)
         assert len(app.extensions["sockets"]) == 1
-        app.extensions["sockets"].broadcast("osjs/dist:changed", ["/osjs.css"])
+        app.extensions["sockets"].broadcast("osjs/vfs:watch:change", ["home:/"])
 
         frame = json.loads(client.receive(timeout=5))
     finally:
         client.close()
 
-    assert frame == {"name": "osjs/dist:changed", "params": ["/osjs.css"]}
+    assert frame == {"name": "osjs/vfs:watch:change", "params": ["home:/"]}
 
 
 def test_an_application_message_round_trips(app, server):
