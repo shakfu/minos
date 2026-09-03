@@ -5,6 +5,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {openFileManager} from '../src/apps/FileManager'
 import type {FileEntry} from '../src/core/api'
+import type {ChatClient} from '../src/core/chat'
 import {Session} from '../src/core/session'
 import {WindowManager} from '../src/wm/WindowManager'
 
@@ -62,12 +63,16 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+// The file manager never opens a conversation; the context type just
+// requires a client, so a stub stands in for one.
+const chat = {} as ChatClient
+
 const start = async (): Promise<HTMLElement> => {
   const wm = new WindowManager(root, () => ({x: 0, y: 0, width: 1000, height: 600}))
   const session = new Session()
   await session.restore()
 
-  openFileManager({wm, session})
+  openFileManager({wm, session, chat})
 
   const body = root.querySelector<HTMLElement>('.files')
   if (body === null) {
@@ -183,7 +188,7 @@ describe('an empty directory', () => {
     const session = new Session()
     await session.restore()
 
-    openFileManager({wm, session})
+    openFileManager({wm, session, chat})
 
     const body = root.querySelector<HTMLElement>('.files')
     await vi.waitFor(() => expect(body?.querySelector('.files-empty')?.textContent).toBe('Nothing here'))

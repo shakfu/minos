@@ -17,6 +17,7 @@ def app(tmp_path, monkeypatch):
 
     monkeypatch.setenv("MINOS_DIST", str(dist))
     monkeypatch.setenv("MINOS_VFS", str(tmp_path / "vfs"))
+    monkeypatch.setenv("MINOS_RUN", str(tmp_path / "run"))
 
     from server import config
 
@@ -27,6 +28,15 @@ def app(tmp_path, monkeypatch):
     from server import sockets as sockets_module
 
     importlib.reload(sockets_module)
+    from server import timeline as timeline_module
+
+    importlib.reload(timeline_module)
+    from server import bus as bus_module
+
+    importlib.reload(bus_module)
+    from server import chat as chat_module
+
+    importlib.reload(chat_module)
     from server import app as app_module
 
     importlib.reload(app_module)
@@ -34,7 +44,13 @@ def app(tmp_path, monkeypatch):
     (tmp_path / "vfs").mkdir()
     instance = app_module.create_app()
     instance.config["TESTING"] = True
-    return instance
+    yield instance
+
+    # Each app owns a bus and, being first in its own MINOS_RUN, a proxy. Left
+    # running they would pile up threads across the suite.
+    service = instance.extensions["chat"]
+    service.bus.stop()
+    service.broker.stop()
 
 
 @pytest.fixture

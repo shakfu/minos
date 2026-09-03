@@ -4,13 +4,24 @@ Route map mirrors what @osjs/client requests: /ping, /login, /logout,
 /settings and /vfs/<method>. Everything else is the built client in dist/.
 """
 
+import atexit
 import json
 import logging
+import uuid
 
-from flask import Flask, jsonify, request, send_file, send_from_directory, session
+from flask import (
+    Flask,
+    current_app,
+    jsonify,
+    request,
+    send_file,
+    send_from_directory,
+    session,
+)
 from flask_sock import Sock
 
-from . import config, sockets, vfs
+from . import bus as bus_module
+from . import chat, config, sockets, timeline, vfs
 from .vfs import VfsError
 
 logger = logging.getLogger(__name__)
@@ -20,6 +31,18 @@ SETTINGS_PATH = "home:/.osjs/settings.json"
 # Methods the client sends as GET with query parameters; the rest are JSON POSTs.
 GET_METHODS = {"capabilities", "exists", "stat", "readdir", "readfile"}
 
+# Mutations worth announcing on the system stream. The stream is the machine
+# half of the chat design: a producer the server owns, arriving in the same
+# window as a conversation.
+ANNOUNCED_METHODS = {
+    "writefile": "wrote",
+    "mkdir": "created",
+    "unlink": "deleted",
+    "touch": "touched",
+    "rename": "renamed",
+    "copy": "copied",
+}
+
 
 def create_app():
     app = Flask(__name__, static_folder=str(config.DIST), static_url_path="")
@@ -27,11 +50,52 @@ def create_app():
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     app.permanent_session_lifetime = config.SESSION_LIFETIME
 
-    app.extensions["sockets"] = sockets.Registry()
+    registry = sockets.Registry()
+    app.extensions["sockets"] = registry
+    app.extensions["chat"] = start_messaging(registry)
 
     register_routes(app)
     register_socket(app)
     return app
+
+
+def start_messaging(registry):
+    """Bring up the timeline, the bus and the Chat handler.
+
+    The proxy is started here rather than by the Makefile so that `make serve`
+    stays one command: the first process to come up claims it, and any further
+    worker finds it claimed and simply connects.
+    """
+    timeline.init()
+
+    worker = uuid.uuid4().hex[:8]
+    timeline.clear_worker(worker)
+    atexit.register(release_worker, worker)
+
+    broker = bus_module.Broker()
+    broker.start()
+    bus = bus_module.Bus()
+    service = chat.ChatService(bus, registry)
+    bus.start(service.deliver)
+
+    chat.ensure_system_stream()
+    sockets.register_application_handler("Chat", service.handle)
+
+    service.worker = worker
+    service.broker = broker
+    return service
+
+
+def release_worker(worker):
+    """Drop this worker's presence rows on the way out.
+
+    Swallows everything: it runs at interpreter shutdown, where the store may
+    already be gone and where an exception helps nobody.
+    """
+    try:
+        timeline.clear_worker(worker)
+    except Exception:  # pragma: no cover - shutdown path
+        logger.debug("Could not clear presence for worker %s", worker, exc_info=True)
 
 
 def current_user():
@@ -121,7 +185,9 @@ def register_routes(app):
             upload = request.files.get("upload")
             if upload is None:
                 raise VfsError("Missing upload field")
-            return jsonify(vfs.writefile(username, request.form.get("path"), upload.stream))
+            written = vfs.writefile(username, request.form.get("path"), upload.stream)
+            announce(method, username, request.form.get("path"))
+            return jsonify(written)
 
         fields = request.args if method in GET_METHODS else (request.get_json(silent=True) or {})
         options = parse_options(fields.get("options"))
@@ -155,7 +221,22 @@ def register_routes(app):
         if handler is None:
             raise VfsError(f"No such VFS method: {method}", 404)
 
-        return jsonify(handler())
+        result = handler()
+        announce(method, username, fields.get("path") or fields.get("to"))
+        return jsonify(result)
+
+
+def announce(method, username, path):
+    """Report a filesystem change on the system stream.
+
+    Only a mutation that succeeded gets here, and a failure to publish is
+    swallowed: a stream is a convenience and must never be able to fail a
+    request that has already been carried out.
+    """
+    verb = ANNOUNCED_METHODS.get(method)
+    service = current_app.extensions.get("chat")
+    if verb is not None and service is not None and path:
+        chat.publish_system_event(service, f"{username} {verb} {path}")
 
 
 def register_socket(app):
@@ -166,6 +247,7 @@ def register_socket(app):
     """
     sock = Sock(app)
     registry = app.extensions["sockets"]
+    service = app.extensions["chat"]
     max_age = int(config.SESSION_LIFETIME.total_seconds() * 1000)
 
     @sock.route("/")
@@ -175,7 +257,19 @@ def register_socket(app):
             ws.close(1008, "Not authenticated")
             return
 
-        sockets.serve(registry, ws, user, config.WS_PING_INTERVAL, max_age)
+        # Presence is a row rather than a set in memory, so the roster is right
+        # across workers. `sockets.serve` needs to know none of this: the
+        # subscriptions are keyed by this websocket and released below.
+        username = user.get("username")
+        presence_id = timeline.arrive(username, service.worker)
+        service.connect(ws)
+        service.announce_presence(username, True)
+        try:
+            sockets.serve(registry, ws, user, config.WS_PING_INTERVAL, max_age)
+        finally:
+            service.disconnect(ws)
+            timeline.depart(presence_id)
+            service.announce_presence(username, False)
 
 
 def main():
@@ -185,6 +279,7 @@ def main():
         raise SystemExit(f"No client build in {config.DIST}. Run 'make client' first.")
 
     config.VFS_ROOT.mkdir(parents=True, exist_ok=True)
+    config.RUN_DIR.mkdir(parents=True, exist_ok=True)
     app = create_app()
     app.run(host=config.HOST, port=config.PORT)
 

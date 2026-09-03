@@ -4,6 +4,7 @@
 
 import './style.css'
 import {APPS, type AppContext} from './apps'
+import {ChatClient} from './core/chat'
 import {Session} from './core/session'
 import {ServerSocket, type ServerMessage} from './core/socket'
 import {showLogin} from './ui/Login'
@@ -18,10 +19,17 @@ const logout = (session: Session): void => {
     .then(() => window.location.reload())
 }
 
+const HANDLED = new Set([
+  // Keepalive traffic; the panel already reflects the connection through the
+  // socket's own open and close.
+  'osjs/core:connected',
+  'osjs/core:ping',
+  // Claimed by ChatClient, which subscribes to the socket itself.
+  'osjs/application:socket:message'
+])
+
 const onServerMessage = (message: ServerMessage): void => {
-  // osjs/core:connected and osjs/core:ping are keepalive traffic; the panel
-  // already reflects the connection through the socket's own open and close.
-  if (message.name !== 'osjs/core:connected' && message.name !== 'osjs/core:ping') {
+  if (!HANDLED.has(message.name)) {
     console.debug('Unhandled server message', message.name, message.params)
   }
 }
@@ -39,11 +47,15 @@ const startDesktop = (root: HTMLElement, session: Session): void => {
     height: desktop.clientHeight
   }))
 
-  const context: AppContext = {wm: manager, session}
+  // The socket comes first: the chat client subscribes to it, and the app
+  // context carries that client to every window that needs a conversation.
+  const socket = new ServerSocket()
+  const chat = new ChatClient(socket)
+
+  const context: AppContext = {wm: manager, session, chat}
   const panel = new Panel(context, () => logout(session))
   root.replaceChildren(panel.el, desktop)
 
-  const socket = new ServerSocket()
   socket.bus.on('open', () => panel.setConnected(true))
   socket.bus.on('close', () => panel.setConnected(false))
   socket.bus.on('message', onServerMessage)

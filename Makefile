@@ -39,4 +39,4 @@ test: install
 	$(VENV)/bin/pytest -q
 
 clean:
-	rm -rf $(VENV) client/node_modules dist
+	rm -rf $(VENV) client/node_modules dist .run
