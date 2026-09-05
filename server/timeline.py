@@ -19,11 +19,19 @@ lets a window show either one.
 
 import contextlib
 import json
+import logging
 import sqlite3
 import time
 import uuid
 
 from . import config
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - POSIX only, and this is Linux
+    fcntl = None
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS rooms (
@@ -231,8 +239,14 @@ def history(room_id, since=0, limit=None):
     """Messages after `since`, oldest first.
 
     Capped at the tail rather than the head: a client that has been away for a
-    thousand messages wants the recent ones, and the gap it still has is
-    reported so it knows the reply is partial.
+    thousand messages wants the recent ones, not the oldest thousand.
+
+    That cap is not a window a caller can page through -- asking again from the
+    same cursor returns the same slice -- so a reply short of the room's end is
+    a gap that will not be filled. It is detectable, which is the point: the
+    first sequence returned sits above the caller's cursor, and `chat._history`
+    reports `lastSeq` alongside. The client marks the shortfall in the log
+    rather than closing it silently.
     """
     limit = min(limit or config.HISTORY_LIMIT, config.HISTORY_LIMIT)
     with _connect() as connection:
@@ -279,15 +293,103 @@ def depart(presence_id):
 
 
 def clear_worker(worker):
-    """Drop a worker's presence rows.
-
-    Called when a worker starts and when it stops. A worker killed outright
-    leaves its rows behind until it comes back under the same id, which is the
-    price of not running a heartbeat.
-    """
+    """Drop a worker's presence rows. Called when a worker stops."""
     with _connect() as connection:
         with _write(connection):
             connection.execute("DELETE FROM presence WHERE worker = ?", (worker,))
+
+
+# -- worker liveness ----------------------------------------------------------
+#
+# Presence is a row per connection rather than a heartbeat, so a worker killed
+# outright leaves its rows behind and the roster shows phantoms forever. Clearing
+# them needs a liveness signal, and the kernel already provides one: a POSIX lock
+# is dropped when its holder dies. Each worker holds a lock beside the database
+# for as long as it runs, and a starting worker sweeps the locks it can take --
+# which are exactly the ones whose holder is gone. Same reasoning as the bus
+# broker's claim, for the same reason: a leftover file cannot be told from a live
+# peer, but a lock can.
+
+WORKER_LOCK_PREFIX = "worker-"
+WORKER_LOCK_SUFFIX = ".lock"
+
+
+def _worker_lock_path(worker):
+    return config.RUN_DIR / f"{WORKER_LOCK_PREFIX}{worker}{WORKER_LOCK_SUFFIX}"
+
+
+class WorkerLease:
+    """One worker's claim on its own presence rows, held for its lifetime."""
+
+    def __init__(self, worker=None):
+        self.worker = worker or uuid.uuid4().hex[:8]
+        self._handle = None
+
+    def claim(self):
+        """Take the lock naming this worker as live. Call before sweeping."""
+        config.RUN_DIR.mkdir(parents=True, exist_ok=True)
+        if fcntl is None:  # pragma: no cover - POSIX only
+            return self.worker
+
+        handle = open(_worker_lock_path(self.worker), "w")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:  # pragma: no cover - the id is a fresh uuid
+            handle.close()
+            raise
+        self._handle = handle
+        return self.worker
+
+    def release(self):
+        """Drop this worker's rows and its lock. Safe to call more than once."""
+        try:
+            clear_worker(self.worker)
+        except Exception:  # pragma: no cover - shutdown path
+            logger.debug("Could not clear presence for %s", self.worker, exc_info=True)
+
+        if self._handle is not None:
+            try:
+                _worker_lock_path(self.worker).unlink()
+            except OSError:  # pragma: no cover - already gone
+                pass
+            self._handle.close()
+            self._handle = None
+
+
+def sweep_dead_workers():
+    """Clear presence rows left behind by workers that are no longer running.
+
+    A lock this process can take is one nobody holds, so its worker is gone.
+    Two workers starting at once may sweep the same dead one; the delete is
+    idempotent, so the race costs a duplicated statement and nothing else.
+    """
+    if fcntl is None:  # pragma: no cover - POSIX only
+        return []
+
+    reclaimed = []
+    for path in sorted(config.RUN_DIR.glob(f"{WORKER_LOCK_PREFIX}*{WORKER_LOCK_SUFFIX}")):
+        worker = path.name[len(WORKER_LOCK_PREFIX) : -len(WORKER_LOCK_SUFFIX)]
+        try:
+            handle = open(path, "r+")
+        except OSError:  # pragma: no cover - swept by someone else
+            continue
+
+        with handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                continue  # Still held: that worker is alive and owns its rows.
+
+            clear_worker(worker)
+            reclaimed.append(worker)
+            try:
+                path.unlink()
+            except OSError:  # pragma: no cover - swept by someone else
+                pass
+
+    if reclaimed:
+        logger.info("Reclaimed presence for %d stopped worker(s)", len(reclaimed))
+    return reclaimed
 
 
 def online():

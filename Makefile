@@ -9,12 +9,12 @@ NPM := $(shell command -v npm >/dev/null 2>&1 && echo npm || echo 'corepack npm@
 
 install: $(VENV)/bin/pytest client/node_modules
 
-$(VENV)/bin/pytest: server/requirements.txt
+$(VENV)/bin/pytest: pyproject.toml
 	@command -v uv >/dev/null 2>&1 || { \
 	  echo "uv is required: https://docs.astral.sh/uv/getting-started/installation/"; \
 	  exit 1; }
 	uv venv $(VENV)
-	uv pip install --python $(PY) -r server/requirements.txt
+	uv pip install --python $(PY) -r pyproject.toml --group dev
 	@touch $@
 
 client/node_modules: client/package.json

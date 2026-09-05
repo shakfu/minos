@@ -16,14 +16,6 @@ logger = logging.getLogger(__name__)
 # osjs/core:logged-in and drive server-side handlers that trust them.
 APPLICATION_MESSAGE = "osjs/application:socket:message"
 
-# Package name -> handler(connection, respond, args). The OS.js equivalent of a
-# package's server script. Empty until a package registers one.
-APPLICATION_HANDLERS = {}
-
-
-def register_application_handler(name, handler):
-    APPLICATION_HANDLERS[name] = handler
-
 
 class Connection:
     """One connected client. Sends are serialised so frames cannot interleave."""
@@ -40,11 +32,23 @@ class Connection:
 
 
 class Registry:
-    """The set of live connections, and the fan-out over them."""
+    """The set of live connections, the fan-out over them, and the handlers.
+
+    The handler map belongs here rather than to the module so that it is scoped
+    to one application. As a global it was shared by every app in the process,
+    so a second one silently took over the first one's handlers -- which the
+    tests had to work around by clearing it between cases.
+    """
 
     def __init__(self):
         self._connections = set()
         self._lock = threading.Lock()
+        # Package name -> handler(connection, respond, args). The OS.js
+        # equivalent of a package's server script. Empty until one registers.
+        self.application_handlers = {}
+
+    def register_application_handler(self, name, handler):
+        self.application_handlers[name] = handler
 
     def __len__(self):
         with self._lock:
@@ -78,7 +82,7 @@ class Registry:
         return self.broadcast(name, params, lambda c: c.user.get("username") == username)
 
 
-def dispatch(connection, raw):
+def dispatch(registry, connection, raw):
     """Route one inbound frame. Malformed and forged frames are dropped."""
     try:
         message = json.loads(raw)
@@ -100,10 +104,10 @@ def dispatch(connection, raw):
         logger.debug("No handler for socket message %s", name)
         return False
 
-    return _handle_application_message(connection, params)
+    return _handle_application_message(registry, connection, params)
 
 
-def _handle_application_message(connection, params):
+def _handle_application_message(registry, connection, params):
     if not params or not isinstance(params[0], dict):
         return False
 
@@ -111,7 +115,7 @@ def _handle_application_message(connection, params):
     name = params[0].get("name")
     args = params[0].get("args") or []
 
-    handler = APPLICATION_HANDLERS.get(name)
+    handler = registry.application_handlers.get(name)
     if handler is None:
         logger.debug("Application %s has no server handler", name)
         return False
@@ -119,7 +123,19 @@ def _handle_application_message(connection, params):
     def respond(*response):
         connection.send(APPLICATION_MESSAGE, [{"pid": pid, "args": list(response)}])
 
-    handler(connection, respond, args)
+    # A handler is application code reached by a client-supplied payload, and an
+    # exception here would unwind through serve() and close the socket -- so one
+    # bad field would cost a client its connection rather than earning an error
+    # reply. The guard belongs at the dispatch point so it covers every handler
+    # rather than the fields one of them happens to validate.
+    try:
+        handler(connection, respond, args)
+    except Exception:
+        logger.exception("Application handler %s failed", name)
+        try:
+            respond({"error": "Request failed"})
+        except Exception:  # pragma: no cover - the peer is already gone
+            logger.debug("Could not report a handler failure", exc_info=True)
     return True
 
 
@@ -138,6 +154,6 @@ def serve(registry, ws, user, ping_interval, session_max_age):
             if raw is None:
                 connection.send("osjs/core:ping")
             else:
-                dispatch(connection, raw)
+                dispatch(registry, connection, raw)
     finally:
         registry.remove(connection)

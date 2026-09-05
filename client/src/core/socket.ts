@@ -20,12 +20,22 @@ type SocketEvents = {
 
 const RECONNECT_DELAY = 3000
 
+/** Ceiling on the backoff, so a long outage still reconnects promptly. */
+const RECONNECT_MAX = 60_000
+
+/**
+ * Policy violation: the server closes with this when the upgrade carries no
+ * session. Retrying cannot fix that, so the socket stops instead of hammering.
+ */
+const POLICY_VIOLATION = 1008
+
 export class ServerSocket {
   readonly bus = new Bus<SocketEvents>()
 
   #socket: WebSocket | null = null
   #retry: ReturnType<typeof setTimeout> | null = null
   #wanted = false
+  #delay = RECONNECT_DELAY
 
   get connected(): boolean {
     return this.#socket?.readyState === WebSocket.OPEN
@@ -33,6 +43,7 @@ export class ServerSocket {
 
   connect(): void {
     this.#wanted = true
+    this.#delay = RECONNECT_DELAY
     this.#open()
   }
 
@@ -56,7 +67,11 @@ export class ServerSocket {
     const socket = new WebSocket(url)
     this.#socket = socket
 
-    socket.addEventListener('open', () => this.bus.emit('open', null))
+    socket.addEventListener('open', () => {
+      // A connection that lasted is not part of the previous outage.
+      this.#delay = RECONNECT_DELAY
+      this.bus.emit('open', null)
+    })
 
     socket.addEventListener('message', event => {
       try {
@@ -67,11 +82,21 @@ export class ServerSocket {
       }
     })
 
-    socket.addEventListener('close', () => {
+    socket.addEventListener('close', event => {
       this.#socket = null
       this.bus.emit('close', null)
+
+      // The session is gone, and no amount of retrying will bring it back. The
+      // page reloads into the login screen on its own once something touches
+      // the API; until then, stop rather than reconnect every few seconds.
+      if (event.code === POLICY_VIOLATION) {
+        this.#wanted = false
+        return
+      }
+
       if (this.#wanted) {
-        this.#retry = setTimeout(() => this.#open(), RECONNECT_DELAY)
+        this.#retry = setTimeout(() => this.#open(), this.#delay)
+        this.#delay = Math.min(this.#delay * 2, RECONNECT_MAX)
       }
     })
   }

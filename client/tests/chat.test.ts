@@ -206,3 +206,71 @@ describe('delivery', () => {
     expect(chat.room('r9')?.title).toBe('Design')
   })
 })
+
+describe('a backfill the server had to cap', () => {
+  let socket: FakeSocket
+  let chat: ChatClient
+
+  beforeEach(() => {
+    socket = new FakeSocket()
+    chat = new ChatClient(socket.as())
+  })
+
+  /** Drive a room to a cursor, then provoke a repair with a far-ahead seq. */
+  const openGap = async (): Promise<Message[]> => {
+    const seen: Message[] = []
+    chat.bus.on('message', m => seen.push(m))
+
+    socket.push(message(1, 'one'))
+    // A jump the client cannot explain: it asks for what it missed.
+    socket.push(message(900, 'far ahead'))
+    await vi.waitFor(() => expect(socket.lastRequest('history')).toBeDefined())
+    return seen
+  }
+
+  it('marks the shortfall rather than closing the gap silently', async () => {
+    const seen = await openGap()
+
+    // The server answers with the newest slice only: 898-900, not 2-900.
+    socket.reply(socket.lastRequest('history').pid, {
+      messages: [message(898, 'a'), message(899, 'b'), message(900, 'c')],
+      lastSeq: 900
+    })
+    await vi.waitFor(() => expect(seen.length).toBeGreaterThan(3))
+
+    const marker = seen.find(m => m.kind === 'event')
+    expect(marker).toBeDefined()
+    // 2..897 were never delivered and never will be: 896 messages.
+    expect(marker?.body).toBe('896 earlier message(s) not shown')
+    expect(seen.filter(m => m.kind === 'text').map(m => m.seq)).toEqual([1, 898, 899, 900])
+  })
+
+  it('says nothing when the reply is contiguous with the cursor', async () => {
+    const seen: Message[] = []
+    chat.bus.on('message', m => seen.push(m))
+
+    socket.push(message(1, 'one'))
+    socket.push(message(4, 'jumped'))
+    await vi.waitFor(() => expect(socket.lastRequest('history')).toBeDefined())
+
+    socket.reply(socket.lastRequest('history').pid, {
+      messages: [message(2, 'a'), message(3, 'b'), message(4, 'c')],
+      lastSeq: 4
+    })
+    await vi.waitFor(() => expect(seen.map(m => m.seq)).toEqual([1, 2, 3, 4]))
+
+    // Nothing was missed, so nothing is announced.
+    expect(seen.some(m => m.kind === 'event')).toBe(false)
+  })
+
+  it('leaves the cursor where the slice ends', async () => {
+    const seen = await openGap()
+    socket.reply(socket.lastRequest('history').pid, {
+      messages: [message(900, 'c')],
+      lastSeq: 900
+    })
+    await vi.waitFor(() => expect(seen.some(m => m.seq === 900)).toBe(true))
+
+    expect(chat.cursor('r1')).toBe(900)
+  })
+})

@@ -213,6 +213,23 @@ class Bus:
             sockets[endpoint] = socket
         return socket
 
+    def release_thread(self):
+        """Close the sockets this thread opened.
+
+        `threading.local` drops its values when the thread ends, but a ZeroMQ
+        socket is not reclaimed by being garbage collected -- it holds a file
+        descriptor until it is closed. flask-sock runs a thread per websocket
+        and every one of them publishes, so without this each connection would
+        cost the process an fd for good. Called from the socket route's teardown,
+        which runs in the connection's own thread.
+        """
+        sockets = getattr(self._local, "sockets", None)
+        if not sockets:
+            return
+        for socket in sockets.values():
+            socket.close(0)
+        sockets.clear()
+
     # -- the two threads that own sockets -------------------------------------
 
     def _sender(self, inbox):
@@ -271,11 +288,16 @@ class Bus:
                             del counts[topic]
 
                 if subscriber in ready:
-                    topic, raw = subscriber.recv_multipart()
+                    # The unpack is inside the guard with the decode: a frame of
+                    # the wrong shape would otherwise raise ValueError here and
+                    # take the relay thread down, silently ending delivery for
+                    # every client on this worker. The bus is unauthenticated,
+                    # so the frame shape is not ours to assume.
                     try:
+                        topic, raw = subscriber.recv_multipart()
                         payload = timeline.decode(raw)
                     except ValueError:
-                        logger.warning("Discarding malformed bus frame on %s", topic)
+                        logger.warning("Discarding malformed bus frame", exc_info=True)
                         continue
                     if self._on_message is not None:
                         self._on_message(topic, payload)

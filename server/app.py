@@ -7,7 +7,6 @@ Route map mirrors what @osjs/client requests: /ping, /login, /logout,
 import atexit
 import json
 import logging
-import uuid
 
 from flask import (
     Flask,
@@ -43,6 +42,20 @@ ANNOUNCED_METHODS = {
     "copy": "copied",
 }
 
+# Types the browser may render in place. Anything else a user has uploaded is
+# handed over as a download instead, because a document served inline from this
+# origin can script it: it reaches the whole /vfs API with the viewer's cookie.
+# SVG is excluded deliberately -- it is an image that carries script.
+INLINE_MIME_PREFIXES = ("image/",)
+INLINE_MIME_EXACT = {"text/plain"}
+NEVER_INLINE = {"image/svg+xml"}
+
+
+def may_render_inline(mime):
+    if mime in NEVER_INLINE:
+        return False
+    return mime in INLINE_MIME_EXACT or mime.startswith(INLINE_MIME_PREFIXES)
+
 
 def create_app():
     app = Flask(__name__, static_folder=str(config.DIST), static_url_path="")
@@ -68,9 +81,13 @@ def start_messaging(registry):
     """
     timeline.init()
 
-    worker = uuid.uuid4().hex[:8]
-    timeline.clear_worker(worker)
-    atexit.register(release_worker, worker)
+    # Claim before sweeping, so a worker starting alongside this one cannot
+    # mistake our own lock for a dead worker's and clear the rows we are about
+    # to write.
+    lease = timeline.WorkerLease()
+    lease.claim()
+    timeline.sweep_dead_workers()
+    atexit.register(release_worker, lease)
 
     broker = bus_module.Broker()
     broker.start()
@@ -79,23 +96,26 @@ def start_messaging(registry):
     bus.start(service.deliver)
 
     chat.ensure_system_stream()
-    sockets.register_application_handler("Chat", service.handle)
+    registry.register_application_handler("Chat", service.handle)
 
-    service.worker = worker
+    service.worker = lease.worker
+    service.lease = lease
     service.broker = broker
     return service
 
 
-def release_worker(worker):
-    """Drop this worker's presence rows on the way out.
+def release_worker(lease):
+    """Drop this worker's presence rows and its lock on the way out.
 
     Swallows everything: it runs at interpreter shutdown, where the store may
-    already be gone and where an exception helps nobody.
+    already be gone and where an exception helps nobody. A worker that never
+    reaches this -- a kill -9 -- is reclaimed by the next one to start, which
+    finds this worker's lock unheld.
     """
     try:
-        timeline.clear_worker(worker)
+        lease.release()
     except Exception:  # pragma: no cover - shutdown path
-        logger.debug("Could not clear presence for worker %s", worker, exc_info=True)
+        logger.debug("Could not release worker %s", lease.worker, exc_info=True)
 
 
 def current_user():
@@ -124,6 +144,38 @@ def parse_options(raw):
 
 
 def register_routes(app):
+    @app.after_request
+    def security_headers(response):
+        """Headers that apply to everything, uploads included.
+
+        The policy is the second layer under the disposition rule above: even if
+        a document does get rendered from this origin, `script-src 'self'` means
+        the script it carries inline does not run. The built client has no inline
+        script or style, so nothing here needs relaxing for it.
+
+        `connect-src` names this request's own host explicitly rather than
+        relying on `'self'` to cover the websocket, because the socket is ws://
+        while the page is http://.
+        """
+        host = request.host
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "; ".join(
+                [
+                    "default-src 'self'",
+                    "img-src 'self' data: blob:",
+                    f"connect-src 'self' ws://{host} wss://{host}",
+                    "object-src 'none'",
+                    "base-uri 'self'",
+                    "form-action 'self'",
+                    "frame-ancestors 'none'",
+                ]
+            ),
+        )
+        return response
+
     @app.errorhandler(VfsError)
     def on_vfs_error(error):
         return jsonify(error=str(error)), error.status
@@ -172,8 +224,18 @@ def register_routes(app):
             except (OSError, ValueError):
                 return jsonify({})
 
+        # The file is a flat object of namespaces, and patchDesktop merges into
+        # it precisely so a client does not drop another's keys. A payload of
+        # any other shape would destroy them, so it is refused rather than
+        # stored.
+        payload = request.get_json(silent=True)
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise VfsError("Settings must be a JSON object")
+
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(request.get_json(silent=True) or {}))
+        target.write_text(json.dumps(payload))
         return jsonify(True)
 
     @app.route("/vfs/<method>", methods=["GET", "POST"])
@@ -194,11 +256,16 @@ def register_routes(app):
 
         if method == "readfile":
             target = vfs.readfile(username, fields.get("path"), options)
+            mime = vfs.guess_mime(target)
+            # The mime is still reported as the contract requires; only the
+            # disposition changes. The client reads text through fetch and images
+            # through <img>, neither of which a disposition affects, so nothing
+            # in the UI depends on this being inline.
             return send_file(
                 target,
-                mimetype=vfs.guess_mime(target),
+                mimetype=mime,
                 conditional=True,
-                as_attachment=bool(options.get("download")),
+                as_attachment=bool(options.get("download")) or not may_render_inline(mime),
                 download_name=target.name,
             )
 

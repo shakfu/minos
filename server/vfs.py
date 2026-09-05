@@ -208,10 +208,18 @@ def search(username, root, pattern, options=None):
 
     base = _virtual_parent(root)
     glob = pattern if any(c in pattern for c in "*?[") else f"*{pattern}*"
+
+    # Match first, then sort, then stat. Sorting the whole walk before looking
+    # at it meant every path in the tree was ordered to find a hundred, and
+    # `sorted()` consumed the generator whole; matching is a name comparison
+    # with no syscall behind it. The order and the resulting slice are the same.
+    matches = sorted(
+        child for child in target.rglob("*")
+        if fnmatch.fnmatch(child.name.lower(), glob.lower())
+    )
+
     results = []
-    for child in sorted(target.rglob("*")):
-        if not fnmatch.fnmatch(child.name.lower(), glob.lower()):
-            continue
+    for child in matches:
         relative = child.relative_to(target).as_posix()
         try:
             results.append(file_iter(f"{base}/{relative}", child))

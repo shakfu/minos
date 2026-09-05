@@ -30,6 +30,19 @@ ROOM = "room"
 PRESENCE = "presence"
 
 
+def _cursor(value):
+    """A client-supplied cursor, as a non-negative integer.
+
+    Anything unparseable means the caller holds nothing, which is what a cursor
+    of zero says. A bad value is not worth an error: the reply is a backfill
+    either way, and the client's own cursor decides what it keeps.
+    """
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 class ChatService:
     """Server-side state for one worker process.
 
@@ -86,6 +99,9 @@ class ChatService:
     def disconnect(self, ws):
         for topic in self._subscriptions.pop(id(ws), ()):
             self.bus.unsubscribe(topic)
+        # Last use of the bus from this thread: the unsubscribes above went out
+        # through its PUSH sockets, so they are only free to close now.
+        self.bus.release_thread()
 
     def announce_presence(self, username, online):
         self._publish(
@@ -121,6 +137,11 @@ class ChatService:
             respond({"error": str(error)})
 
     def _require_member(self, room_id, username):
+        # Room ids arrive from the client and reach SQLite as a bound parameter,
+        # which rejects anything but a scalar. An id of the wrong type is not a
+        # room that exists, so it gets the answer a missing one gets.
+        if not isinstance(room_id, str):
+            raise PermissionError(f"No such room: {room_id!r}")
         room = timeline.room(room_id)
         if room is None:
             raise PermissionError(f"No such room: {room_id}")
@@ -145,9 +166,17 @@ class ChatService:
 
     def _history(self, connection, username, request):
         room_id = request.get("room")
-        self._require_member(room_id, username)
-        since = int(request.get("since") or 0)
-        return {"room": room_id, "since": since, "messages": timeline.history(room_id, since)}
+        room = self._require_member(room_id, username)
+        since = _cursor(request.get("since"))
+        # `lastSeq` is what makes a truncated reply detectable: the cap is on the
+        # tail, so a client further behind than the limit gets the newest slice
+        # and would otherwise have no way to know it skipped the rest.
+        return {
+            "room": room_id,
+            "since": since,
+            "lastSeq": room["lastSeq"],
+            "messages": timeline.history(room_id, since),
+        }
 
     def _send(self, connection, username, request):
         room_id = request.get("room")

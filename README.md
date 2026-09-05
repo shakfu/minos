@@ -86,10 +86,14 @@ Hot reload during development is Vite's, through `make dev`.
 Client to server: only `osjs/application:socket:message` is accepted. Every other `osjs*` name is refused, so a page cannot forge core events. A frame carries `{pid, name, args}`, and `name` selects the handler:
 
 ```python
-from server.sockets import register_application_handler
+registry = app.extensions["sockets"]
 
-register_application_handler("Echo", lambda conn, respond, args: respond(*args))
+registry.register_application_handler("Echo", lambda conn, respond, args: respond(*args))
 ```
+
+Handlers belong to one application rather than to the process, so two apps in a
+single interpreter -- which the test suite does routinely -- cannot take over
+each other's.
 
 `respond` answers the one connection, quoting the `pid` back so the caller can match the reply to its request. `server/chat.py` is the one handler that ships; the section below is what it does.
 
@@ -149,7 +153,9 @@ This is a demo, not a deployment.
 
 - VFS changes are announced onto the `system` stream, but only the ones a request made. Nothing watches the filesystem itself, and `osjs/vfs:watch:change` still has no consumer.
 
-- Presence is a row per connection rather than a heartbeat. A worker killed outright leaves its rows behind until it starts again under the same id and clears them.
+- Every account is a member of the `system` stream, so one user's file paths are visible to all of them -- `demo wrote home:/notes.txt` shows up in alice's window. That is deliberate here, because a stream nobody else can see demonstrates nothing, and filenames are often the sensitive part. Scope the audience to the acting user before this carries anyone's real files.
+
+- Presence is a row per connection rather than a heartbeat. A worker killed outright leaves its rows behind until the next worker starts and reclaims them: each worker holds a `flock` on `.run/worker-<id>.lock` while it runs, so a lock that can be taken belongs to a worker that is gone. Between the kill and that restart the roster still shows its users as online.
 
 - The bus is not authenticated. Anything that can reach the `ipc://` sockets in `.run/` can publish to any room, so a multi-host deployment wants `tcp://` with CURVE rather than the defaults.
 

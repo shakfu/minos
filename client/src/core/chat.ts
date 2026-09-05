@@ -53,6 +53,12 @@ interface SyncReply {
   rooms: Room[]
 }
 
+interface HistoryReply {
+  messages: Message[]
+  /** What the room holds. A reply is partial when this is above the cursor. */
+  lastSeq?: number
+}
+
 type ChatEvents = {
   message: Message
   room: Room
@@ -138,8 +144,8 @@ export class ChatClient {
     return reply
   }
 
-  history(room: string, since = 0): Promise<{messages: Message[]}> {
-    return this.#request<{messages: Message[]}>({op: 'history', room, since})
+  history(room: string, since = 0): Promise<HistoryReply> {
+    return this.#request<HistoryReply>({op: 'history', room, since})
   }
 
   send(room: string, body: string): Promise<{seq: number}> {
@@ -247,7 +253,28 @@ export class ChatClient {
     }
     this.#repairing.add(room)
     try {
-      const {messages} = await this.history(room, this.cursor(room))
+      const before = this.cursor(room)
+      const {messages} = await this.history(room, before)
+      const first = messages[0]
+
+      // A backfill is capped at the *tail*, so a client far enough behind gets
+      // the newest slice rather than the whole gap -- asking again from the
+      // cursor would only return the same slice, so there is nothing to loop
+      // over. What the cursor must not do is jump the shortfall in silence:
+      // those messages were never delivered and nothing else would ever
+      // mention them. Rendering an unbounded history into the log would be
+      // worse than saying how much is missing, so the gap is marked instead.
+      if (first !== undefined && first.seq > before + 1) {
+        this.bus.emit('message', {
+          room,
+          seq: first.seq - 1,
+          author: 'system',
+          kind: 'event',
+          body: `${first.seq - before - 1} earlier message(s) not shown`,
+          at: first.at
+        })
+      }
+
       for (const message of messages) {
         if (message.seq > this.cursor(room)) {
           this.#cursors.set(message.room, message.seq)

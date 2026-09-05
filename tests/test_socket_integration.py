@@ -81,9 +81,8 @@ def test_a_broadcast_reaches_a_live_client(app, server):
 
 
 def test_an_application_message_round_trips(app, server):
-    from server import sockets
-
-    sockets.register_application_handler(
+    registry = app.extensions["sockets"]
+    registry.register_application_handler(
         "Echo", lambda connection, respond, args: respond(*args)
     )
     client = open_socket(server, login(server))
@@ -100,7 +99,7 @@ def test_an_application_message_round_trips(app, server):
         frame = json.loads(client.receive(timeout=5))
     finally:
         client.close()
-        sockets.APPLICATION_HANDLERS.pop("Echo", None)
+        registry.application_handlers.pop("Echo", None)
 
     assert frame == {
         "name": "osjs/application:socket:message",

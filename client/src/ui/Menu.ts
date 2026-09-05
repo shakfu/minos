@@ -18,6 +18,9 @@ let open: HTMLElement | null = null
 export const closeMenu = (): void => {
   open?.remove()
   open = null
+  window.removeEventListener('pointerdown', onPointerDown)
+  window.removeEventListener('keydown', onKeyDown)
+  window.removeEventListener('blur', closeMenu)
 }
 
 export const showMenu = (items: MenuItem[], at: {x: number; y: number}): void => {
@@ -56,10 +59,16 @@ export const showMenu = (items: MenuItem[], at: {x: number; y: number}): void =>
   menu.style.visibility = 'visible'
 
   // Deferred, so the click or contextmenu that opened this does not close it.
+  //
+  // Registered without `once`, which removes a listener on the first event of
+  // its type rather than the first dismissing one: a pointerdown on the menu's
+  // own padding, or any key that is not Escape, would otherwise consume the
+  // handler and leave the menu with no way to be dismissed. closeMenu takes
+  // them all off instead.
   setTimeout(() => {
-    window.addEventListener('pointerdown', onPointerDown, {once: true})
-    window.addEventListener('keydown', onKeyDown, {once: true})
-    window.addEventListener('blur', closeMenu, {once: true})
+    window.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('blur', closeMenu)
   }, 0)
 }
 

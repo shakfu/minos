@@ -30,7 +30,6 @@ class FakeWebsocket:
 def sockets(app):
     from server import sockets as module
 
-    module.APPLICATION_HANDLERS.clear()
     return module
 
 
@@ -87,7 +86,7 @@ def test_removed_connections_stop_receiving(sockets, registry):
     ["not json", "[]", '{"params": []}', '{"name": 1}', '{"name": "x", "params": "no"}'],
 )
 def test_malformed_frames_are_dropped(sockets, registry, frame):
-    assert sockets.dispatch(connect(sockets, registry), frame) is False
+    assert sockets.dispatch(registry, connect(sockets, registry), frame) is False
 
 
 @pytest.mark.parametrize(
@@ -96,10 +95,10 @@ def test_malformed_frames_are_dropped(sockets, registry, frame):
 )
 def test_forged_internal_messages_are_refused(sockets, registry, name):
     called = []
-    sockets.register_application_handler("Textpad", lambda *a: called.append(a))
+    registry.register_application_handler("Textpad", lambda *a: called.append(a))
     frame = json.dumps({"name": name, "params": [{"pid": 1, "name": "Textpad", "args": []}]})
 
-    assert sockets.dispatch(connect(sockets, registry), frame) is False
+    assert sockets.dispatch(registry, connect(sockets, registry), frame) is False
     assert called == []
 
 
@@ -107,7 +106,7 @@ def test_application_message_without_a_handler_is_ignored(sockets, registry):
     frame = json.dumps(
         {"name": "osjs/application:socket:message", "params": [{"pid": 1, "name": "Nope"}]}
     )
-    assert sockets.dispatch(connect(sockets, registry), frame) is False
+    assert sockets.dispatch(registry, connect(sockets, registry), frame) is False
 
 
 def test_application_message_reaches_its_handler(sockets, registry):
@@ -117,7 +116,7 @@ def test_application_message_reaches_its_handler(sockets, registry):
         seen["args"] = args
         respond("pong", 42)
 
-    sockets.register_application_handler("Textpad", handler)
+    registry.register_application_handler("Textpad", handler)
     connection = connect(sockets, registry)
     frame = json.dumps(
         {
@@ -126,7 +125,7 @@ def test_application_message_reaches_its_handler(sockets, registry):
         }
     )
 
-    assert sockets.dispatch(connection, frame) is True
+    assert sockets.dispatch(registry, connection, frame) is True
     assert seen["args"] == ["ping"]
     assert connection.ws.sent == [
         {
@@ -153,3 +152,86 @@ def test_serve_pings_when_the_client_is_silent(sockets, registry):
         sockets.serve(registry, ws, {"username": "demo"}, ping_interval=30, session_max_age=1000)
 
     assert ws.names() == ["osjs/core:connected", "osjs/core:ping", "osjs/core:ping"]
+
+
+def test_a_handler_that_raises_does_not_close_the_socket(sockets, registry):
+    """A handler is reached by a client-supplied payload.
+
+    Letting it raise would unwind through serve() and drop the connection, so
+    one bad field would cost a client its socket instead of earning an error.
+    """
+    registry.register_application_handler("Boom", _raise)
+    connection = connect(sockets, registry)
+    frame = json.dumps(
+        {
+            "name": "osjs/application:socket:message",
+            "params": [{"pid": 9, "name": "Boom", "args": []}],
+        }
+    )
+
+    assert sockets.dispatch(registry, connection, frame) is True
+    assert connection.ws.sent == [
+        {"name": "osjs/application:socket:message", "params": [{"pid": 9, "args": [{"error": "Request failed"}]}]}
+    ]
+    assert len(registry) == 1
+
+
+def _raise(connection, respond, args):
+    raise ValueError("invalid literal for int()")
+
+
+def test_a_handler_that_answers_then_raises_keeps_its_answer(sockets, registry):
+    """The reply already sent is the caller's; the error is an extra frame.
+
+    The client drops a pid the moment it resolves, so the second frame is
+    ignored there rather than overwriting a good answer.
+    """
+
+    def answer_then_fail(connection, respond, args):
+        respond({"ok": True})
+        raise RuntimeError("after the fact")
+
+    registry.register_application_handler("Late", answer_then_fail)
+    connection = connect(sockets, registry)
+    frame = json.dumps(
+        {
+            "name": "osjs/application:socket:message",
+            "params": [{"pid": 4, "name": "Late", "args": []}],
+        }
+    )
+
+    assert sockets.dispatch(registry, connection, frame) is True
+    assert connection.ws.sent[0]["params"][0]["args"] == [{"ok": True}]
+
+
+def test_handlers_are_scoped_to_one_application(sockets):
+    """As a module global these were shared by every app in the process.
+
+    A second application silently took over the first one's handlers, which is
+    why the tests used to have to clear the map between cases.
+    """
+    first = sockets.Registry()
+    second = sockets.Registry()
+
+    first.register_application_handler("Only", lambda *a: None)
+
+    assert "Only" in first.application_handlers
+    assert second.application_handlers == {}
+
+
+def test_a_frame_finds_no_handler_registered_on_another_registry(sockets):
+    reached = []
+    mine = sockets.Registry()
+    theirs = sockets.Registry()
+    theirs.register_application_handler("Textpad", lambda *a: reached.append(a))
+
+    connection = connect(sockets, mine)
+    frame = json.dumps(
+        {
+            "name": "osjs/application:socket:message",
+            "params": [{"pid": 1, "name": "Textpad", "args": []}],
+        }
+    )
+
+    assert sockets.dispatch(mine, connection, frame) is False
+    assert reached == []

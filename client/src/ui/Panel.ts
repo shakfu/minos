@@ -8,7 +8,7 @@
 import {APPS, type AppContext} from '../apps'
 import type {WindowManager} from '../wm/WindowManager'
 import type {Window} from '../wm/Window'
-import {SEPARATOR, showMenu} from './Menu'
+import {showMenu} from './Menu'
 
 export class Panel {
   readonly el = document.createElement('header')
@@ -80,7 +80,7 @@ export class Panel {
     button.textContent = this.#context.session.username
     button.addEventListener('click', () => {
       const box = button.getBoundingClientRect()
-      showMenu([SEPARATOR, {label: 'Log out', onSelect: onLogout}], {x: box.left, y: box.bottom})
+      showMenu([{label: 'Log out', onSelect: onLogout}], {x: box.left, y: box.bottom})
     })
     return button
   }

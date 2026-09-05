@@ -1,4 +1,0 @@
-flask>=3.0
-flask-sock>=0.7
-pytest>=8.0
-pyzmq>=26

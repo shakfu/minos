@@ -104,3 +104,55 @@ def test_presence_is_shared_state_not_a_set_in_memory(timeline):
 
     timeline.clear_worker("w2")
     assert timeline.online() == []
+
+
+def test_a_stopped_worker_releases_its_presence(timeline):
+    """The clean path: a lease dropped on the way out takes its rows with it."""
+    lease = timeline.WorkerLease()
+    lease.claim()
+    timeline.arrive("demo", lease.worker)
+
+    assert timeline.online() == ["demo"]
+
+    lease.release()
+    assert timeline.online() == []
+
+
+def test_a_killed_worker_is_reclaimed_by_the_next_one(timeline):
+    """The whole point of the lease.
+
+    A worker killed outright never runs its own cleanup, so its rows outlive it
+    and the roster shows a phantom. The kernel drops its lock, though, which is
+    how the next worker to start can tell it apart from one still running.
+    """
+    dead = timeline.WorkerLease()
+    dead.claim()
+    timeline.arrive("ghost", dead.worker)
+
+    # kill -9: the process is gone, so the lock goes with it. Closing the handle
+    # without releasing the lease is exactly that, minus the rows being dropped.
+    dead._handle.close()
+    dead._handle = None
+
+    assert timeline.online() == ["ghost"]
+    assert timeline.sweep_dead_workers() == [dead.worker]
+    assert timeline.online() == []
+
+
+def test_a_sweep_leaves_a_running_worker_alone(timeline):
+    """A lock still held is a worker still serving; its roster must survive."""
+    alive = timeline.WorkerLease()
+    alive.claim()
+    timeline.arrive("demo", alive.worker)
+
+    assert timeline.sweep_dead_workers() == []
+    assert timeline.online() == ["demo"]
+
+    alive.release()
+
+
+def test_releasing_a_lease_twice_is_harmless(timeline):
+    lease = timeline.WorkerLease()
+    lease.claim()
+    lease.release()
+    lease.release()

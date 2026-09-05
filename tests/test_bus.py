@@ -131,3 +131,63 @@ def test_a_second_broker_defers_to_the_one_holding_the_lock(app):
     from server import bus as module
 
     assert module.Broker().start() is False
+
+
+def test_a_frame_of_the_wrong_shape_does_not_kill_the_relay(bus, listening):
+    """The relay is the only delivery path a worker has.
+
+    An unpack that raises would end its thread and silence every client on this
+    worker, and the bus is unauthenticated -- so the shape is not ours to
+    assume.
+    """
+    from server import bus as module
+
+    topic = module.room_topic("shapes")
+    bus.subscribe(topic)
+    time.sleep(PROPAGATION)
+
+    # One part where two are expected, then three: neither is a valid frame.
+    bus._push(bus._outbound).send_multipart([b"send", topic])
+    bus._push(bus._outbound).send_multipart([b"send", topic, b"{}", b"extra"])
+    time.sleep(PROPAGATION)
+
+    # The relay survived both and still delivers.
+    bus.publish(topic, {"still": "alive"})
+    assert wait_for(lambda: any(p == {"still": "alive"} for _, p in listening))
+
+
+def test_a_frame_with_undecodable_json_does_not_kill_the_relay(bus, listening):
+    from server import bus as module
+
+    topic = module.room_topic("garbage")
+    bus.subscribe(topic)
+    time.sleep(PROPAGATION)
+
+    bus._push(bus._outbound).send_multipart([b"send", topic, b"not json"])
+    time.sleep(PROPAGATION)
+
+    bus.publish(topic, {"still": "alive"})
+    assert wait_for(lambda: any(p == {"still": "alive"} for _, p in listening))
+
+
+def test_a_thread_releases_its_publisher_sockets(bus):
+    """Each websocket thread opens PUSH sockets; nothing else closes them.
+
+    A ZeroMQ socket is not reclaimed by garbage collection -- it holds a file
+    descriptor until closed -- so without this each connection cost the process
+    an fd for good.
+    """
+    opened = {}
+
+    def publish_then_release():
+        bus.publish(b"probe|", {"x": 1})
+        opened["during"] = len(bus._local.sockets)
+        bus.release_thread()
+        opened["after"] = len(bus._local.sockets)
+
+    thread = threading.Thread(target=publish_then_release)
+    thread.start()
+    thread.join()
+
+    assert opened["during"] >= 1
+    assert opened["after"] == 0

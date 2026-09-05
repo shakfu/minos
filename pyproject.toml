@@ -1,0 +1,41 @@
+[project]
+name = "minos"
+version = "0.1.0"
+description = "A web desktop: a Python backend, and a TypeScript front end built on it."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+
+# What the server needs to run. A deployment installs these alone:
+#
+#     uv pip install -r pyproject.toml
+#
+# The Makefile builds one venv for the whole checkout and adds the dev group to
+# it, so `make serve` locally has the test tooling too; the separation here is
+# what keeps it out of anywhere the server is actually deployed.
+dependencies = [
+    "flask>=3.0",
+    "flask-sock>=0.7",
+    "pyzmq>=26",
+]
+
+# Test-only tooling, as a PEP 735 group rather than an extra: these are never
+# something an installer of this project would want, only something its own
+# suite needs. `make test` pulls the group in on top of the dependencies above.
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    # Arrives with flask-sock in practice, but tests/test_socket_integration.py
+    # imports it directly to drive a real websocket client, so it is declared
+    # rather than relied on.
+    "simple-websocket>=1.0",
+]
+
+# There is no build backend on purpose. Nothing installs minos as a package: the
+# server runs from the repository root as `python -m server.app`, and the tests
+# put that root on sys.path themselves. This file declares dependencies and
+# configures tooling; it does not describe a distribution.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -47,10 +47,12 @@ def app(tmp_path, monkeypatch):
     yield instance
 
     # Each app owns a bus and, being first in its own MINOS_RUN, a proxy. Left
-    # running they would pile up threads across the suite.
+    # running they would pile up threads across the suite. The lease holds an
+    # open lock file, so it is released here rather than waiting for atexit.
     service = instance.extensions["chat"]
     service.bus.stop()
     service.broker.stop()
+    service.lease.release()
 
 
 @pytest.fixture
