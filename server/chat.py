@@ -6,12 +6,25 @@ seam: it maps operation names to messaging calls, turns a `MessagingError` into
 the error shape the client expects, and fans deliveries out over the connection
 registry as `osjs/application:socket:message` frames.
 
+Two things this layer owns rather than `messaging/`:
+
+- **Who is an administrator.** The messaging layer takes it as an argument, so
+  the question of who counts stays with the host that has the accounts. Here it
+  is a name in `config.ADMINS`, carried on the session profile's `groups`.
+
+- **Occupancy for the life of a connection.** A user who is *in* a room holds an
+  occupancy row, and a transient room dies once its last one is released. A
+  connection that drops must therefore release everything it held, or a room
+  nobody is in stays alive forever. The rows are keyed by websocket for exactly
+  that reason.
+
 The chat feature is shaped around the websocket because that is the one
 extension point the frozen OS.js HTTP contract leaves open -- so none of this
 touches the route map.
 """
 
 import logging
+import threading
 
 from messaging import Messaging, MessagingError, Timeline
 
@@ -22,6 +35,17 @@ logger = logging.getLogger(__name__)
 APPLICATION = "Chat"
 APPLICATION_MESSAGE = "osjs/application:socket:message"
 
+# How often to look for transient rooms whose grace period has run out. The
+# deletion is a promise to the people who spoke in one, so the check has to run
+# whether or not anybody is connected -- which is why it is a thread here rather
+# than something a request happens to trigger.
+SWEEP_INTERVAL = 15.0
+
+
+def is_admin(user):
+    """Administrators are named on the profile, which the session carries."""
+    return "admin" in (user.get("groups") or [])
+
 
 def build(bus, registry):
     """Assemble the messaging layer against this server's transport."""
@@ -29,6 +53,7 @@ def build(bus, registry):
         db_path=config.TIMELINE_DB,
         run_dir=config.RUN_DIR,
         history_limit=config.HISTORY_LIMIT,
+        grace=config.ROOM_GRACE,
     ).init()
 
     def deliver(audience, event):
@@ -53,6 +78,14 @@ class ChatHandler:
     def __init__(self, service):
         self.service = service
         self.timeline = service.timeline
+        self.worker = None
+        # Websocket -> the occupancy rows it holds. A connection can be in more
+        # than one room at once, and all of them are released together when it
+        # goes away.
+        self._occupancies = {}
+        self._lock = threading.Lock()
+        self._sweeper = None
+        self._stopping = threading.Event()
 
     # The socket route drives these, and neither it nor `sockets` needs to know
     # what a subscription is. A connection's websocket identifies the
@@ -61,52 +94,115 @@ class ChatHandler:
         self.service.connect(id(ws))
 
     def disconnect(self, ws):
+        with self._lock:
+            held = self._occupancies.pop(id(ws), set())
+        for occupancy in held:
+            try:
+                self.service.exit(occupancy)
+            except Exception:  # pragma: no cover - teardown must not raise
+                logger.debug("Could not release occupancy %s", occupancy, exc_info=True)
         self.service.disconnect(id(ws))
 
     def announce_presence(self, username, online):
         self.service.announce_presence(username, online)
 
-    def ensure_system_stream(self):
-        """The one room nobody creates: machine events, everyone a member."""
-        return self.service.ensure_stream(
-            config.SYSTEM_STREAM, "System", sorted(config.USERS)
+    # -- the sweep ------------------------------------------------------------
+
+    def start_sweeper(self):
+        """Run the transient-room sweep until the process stops."""
+
+        def run():
+            while not self._stopping.wait(SWEEP_INTERVAL):
+                try:
+                    self.service.sweep()
+                except Exception:  # pragma: no cover - a sweep must not die
+                    logger.debug("Transient room sweep failed", exc_info=True)
+
+        self._sweeper = threading.Thread(target=run, name="room-sweep", daemon=True)
+        self._sweeper.start()
+        return self._sweeper
+
+    def stop_sweeper(self):
+        self._stopping.set()
+        if self._sweeper is not None:
+            self._sweeper.join(timeout=2)
+            self._sweeper = None
+
+    # -- the system channel ---------------------------------------------------
+
+    def ensure_system_channel(self):
+        """The one space nobody is invited to: machine events, everyone subscribed.
+
+        A channel rather than a room, because nothing typed goes into it: the
+        server is its only producer and its audience may only read.
+        """
+        return self.service.ensure_channel(
+            config.SYSTEM_CHANNEL, "System", sorted(config.USERS)
         )
 
     def publish_system_event(self, text):
-        """Announce a server-side event on the system stream.
+        """Announce a server-side event on the system channel.
 
-        The machine half of the design: a stream produced by the server rather
-        than typed by anyone, arriving in the same window type as a chat. A
-        failure to publish is swallowed -- a stream must never be able to fail a
-        request that has already been carried out.
+        A failure to publish is swallowed -- a channel must never be able to fail
+        a request that has already been carried out.
         """
-        self.service.post_event_quietly(config.SYSTEM_STREAM, text, set(config.USERS))
+        self.service.post_event_quietly(
+            config.SYSTEM_CHANNEL, text, set(config.USERS)
+        )
+
+    # -- dispatch -------------------------------------------------------------
 
     def handle(self, connection, respond, args):
         """Route one `osjs/application:socket:message` frame."""
         request = args[0] if args and isinstance(args[0], dict) else {}
         operation = request.get("op")
-        username = connection.user.get("username")
+        user = connection.user
+        username = user.get("username")
+        admin = is_admin(user)
         subscriber = id(connection.ws)
+        service = self.service
 
         operations = {
-            "sync": lambda: self.service.sync(username, subscriber),
-            "history": lambda: self.service.history(
+            "sync": lambda: service.sync(username, admin, subscriber),
+            "history": lambda: service.history(
                 username, request.get("room"), request.get("since")
             ),
-            "send": lambda: self.service.send(
+            "send": lambda: service.send(
                 username, request.get("room"), request.get("body")
             ),
-            "open": lambda: self.service.open_room(
-                username, request.get("members"), request.get("title"), subscriber
+            "open": lambda: service.open_room(
+                username,
+                request.get("invite"),
+                request.get("title"),
+                request.get("retention") or "persisted",
+                subscriber,
             ),
-            "invite": lambda: self.service.invite(
-                username, request.get("room"), request.get("username")
+            "create": lambda: service.create_room(
+                username, admin, request.get("title"), request.get("invite"), subscriber
             ),
-            "leave": lambda: self.service.leave(username, request.get("room")),
-            "merge": lambda: self.service.merge(
-                username, request.get("room"), request.get("into")
+            "invite": lambda: service.invite(
+                username, admin, request.get("room"), request.get("principal")
             ),
+            "uninvite": lambda: service.uninvite(
+                username, admin, request.get("room"), request.get("principal")
+            ),
+            "leave": lambda: service.leave(username, request.get("room")),
+            "enter": lambda: self._enter(connection, username, request.get("room")),
+            "exit": lambda: self._exit(connection, request.get("occupancy")),
+            "read": lambda: service.mark_read(
+                username, request.get("room"), request.get("seq")
+            ),
+            "group.create": lambda: service.create_group(
+                admin, request.get("name"), request.get("members")
+            ),
+            "group.assign": lambda: service.assign_group(
+                admin, request.get("group"), request.get("username")
+            ),
+            "group.unassign": lambda: service.unassign_group(
+                admin, request.get("group"), request.get("username")
+            ),
+            "subscribe": lambda: service.subscribe(username, request.get("channel")),
+            "unsubscribe": lambda: service.unsubscribe(username, request.get("channel")),
         }
 
         call = operations.get(operation)
@@ -118,3 +214,20 @@ class ChatHandler:
             respond(call())
         except MessagingError as error:
             respond({"error": str(error)})
+
+    def _enter(self, connection, username, room_id):
+        """Take a place in a room, remembering it against this connection."""
+        reply = self.service.enter(username, room_id, self.worker, id(connection.ws))
+        with self._lock:
+            self._occupancies.setdefault(id(connection.ws), set()).add(reply["occupancy"])
+        return reply
+
+    def _exit(self, connection, occupancy):
+        with self._lock:
+            held = self._occupancies.get(id(connection.ws), set())
+            if occupancy not in held:
+                # Not this connection's to release. Releasing another's would
+                # let one client end a room somebody else is sitting in.
+                raise MessagingError("Not in that room")
+            held.discard(occupancy)
+        return self.service.exit(occupancy)

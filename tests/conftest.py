@@ -44,6 +44,7 @@ def app(tmp_path, monkeypatch):
     # running they would pile up threads across the suite. The lease holds an
     # open lock file, so it is released here rather than waiting for atexit.
     handler = instance.extensions["chat"]
+    handler.stop_sweeper()
     handler.bus.stop()
     handler.broker.stop()
     handler.lease.release()

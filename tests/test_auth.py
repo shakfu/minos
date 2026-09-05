@@ -12,7 +12,9 @@ def test_login_returns_profile_with_required_fields(client):
     profile = client.post("/login", json={"username": "demo", "password": "demo"}).get_json()
     assert profile["username"] == "demo"
     assert profile["id"]
-    assert profile["groups"] == []
+    # `groups` carries the one role this server has. demo is in config.ADMINS,
+    # which is what lets a demo found a permanent room at all.
+    assert profile["groups"] == ["admin"]
 
 
 def test_login_seeds_home_directory(auth):

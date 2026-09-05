@@ -5,7 +5,7 @@ PY := $(VENV)/bin/python
 # provides a working one, so fall back to it when npm is not on PATH.
 NPM := $(shell command -v npm >/dev/null 2>&1 && echo npm || echo 'corepack npm@11')
 
-.PHONY: install client serve dev test clean
+.PHONY: install client serve dev tui test clean
 
 install: $(VENV)/bin/pytest client/node_modules
 
@@ -27,6 +27,11 @@ client: client/node_modules
 
 serve: install
 	$(PY) -m server.app
+
+## The terminal client, against a running `make serve`.
+## MINOS_SERVER overrides the address; --user skips the username prompt.
+tui: install
+	$(PY) -m tui
 
 ## Vite with hot reload, proxying the API to a running `make serve`.
 ## --open launches a browser; BROWSER=none skips it.

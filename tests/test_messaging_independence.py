@@ -91,8 +91,8 @@ def test_a_conversation_works_with_no_server_at_all(tmp_path):
         roster=lambda: {"ada", "grace"},
     )
 
-    room = service.open_room("ada", members=["grace"], title="Pair")
-    assert room["members"] == ["ada", "grace"]
+    room = service.open_room("ada", invitees=["grace"], title="Pair")
+    assert room["audience"] == ["ada", "grace"]
 
     assert service.send("ada", room["id"], "hello")["seq"] == 1
     assert service.send("grace", room["id"], "hi")["seq"] == 2
@@ -105,7 +105,7 @@ def test_a_conversation_works_with_no_server_at_all(tmp_path):
         service.send("mallory", room["id"], "let me in")
 
 
-def test_a_stream_is_a_room_with_a_producer(tmp_path):
+def test_a_channel_is_a_room_with_a_producer(tmp_path):
     import messaging
 
     timeline = messaging.Timeline(db_path=tmp_path / "t.db", run_dir=tmp_path).init()
@@ -114,11 +114,16 @@ def test_a_stream_is_a_room_with_a_producer(tmp_path):
         timeline, bus, deliver=lambda *a: None, roster=lambda: {"ada"}
     )
 
-    stream = service.ensure_stream("system", "System", ["ada"])
-    assert stream["kind"] == messaging.STREAM
+    channel = service.ensure_channel("system", "System", ["ada"])
+    assert channel["kind"] == messaging.CHANNEL
+    assert channel["audience"] == ["ada"]
 
-    # Declaring it again is the same room, so a host can do it on every boot.
-    assert service.ensure_stream("system", "System", ["ada"])["id"] == stream["id"]
+    # Declaring it again is the same channel, so a host can do it on every boot.
+    assert service.ensure_channel("system", "System", ["ada"])["id"] == channel["id"]
+
+    # A subscriber reads; writing is the producer's alone.
+    with pytest.raises(messaging.MessagingError):
+        service.send("ada", channel["id"], "can I post here")
 
 
 def test_two_stores_do_not_share_state(tmp_path):
@@ -128,7 +133,7 @@ def test_two_stores_do_not_share_state(tmp_path):
     first = messaging.Timeline(db_path=tmp_path / "one.db", run_dir=tmp_path).init()
     second = messaging.Timeline(db_path=tmp_path / "two.db", run_dir=tmp_path).init()
 
-    room = first.create_room("Only in the first", ["ada"])
+    room = first.create_room("Only in the first", created_by="ada")
 
     assert first.room(room["id"]) is not None
     assert second.room(room["id"]) is None

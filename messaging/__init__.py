@@ -41,13 +41,29 @@ the roster of who exists is supplied by the host, and refusals are
 """
 
 from .bus import Broker, Bus, PRESENCE_TOPIC, room_topic, run_broker
-from .service import MESSAGE, PRESENCE, ROOM, Messaging, MessagingError, cursor
+from .service import (
+    GROUP_EVENT,
+    MESSAGE,
+    PRESENCE,
+    ROOM_EVENT,
+    ROOM_GONE,
+    Messaging,
+    MessagingError,
+    cursor,
+)
 from .timeline import (
-    CHAT,
+    ADMIN,
+    CHANNEL,
+    DEFAULT_GRACE,
     DEFAULT_HISTORY_LIMIT,
     EVENT,
-    STREAM,
+    PERSISTED,
+    PRINCIPAL_GROUP,
+    PRINCIPAL_USER,
+    ROOM,
     TEXT,
+    TRANSIENT,
+    USER,
     Timeline,
     WorkerLease,
     decode,
@@ -55,19 +71,28 @@ from .timeline import (
 )
 
 __all__ = [
+    "ADMIN",
     "Broker",
     "Bus",
-    "CHAT",
+    "CHANNEL",
+    "DEFAULT_GRACE",
     "DEFAULT_HISTORY_LIMIT",
     "EVENT",
+    "GROUP_EVENT",
     "MESSAGE",
     "Messaging",
     "MessagingError",
+    "PERSISTED",
     "PRESENCE",
     "PRESENCE_TOPIC",
+    "PRINCIPAL_GROUP",
+    "PRINCIPAL_USER",
     "ROOM",
-    "STREAM",
+    "ROOM_EVENT",
+    "ROOM_GONE",
     "TEXT",
+    "TRANSIENT",
+    "USER",
     "Timeline",
     "WorkerLease",
     "cursor",

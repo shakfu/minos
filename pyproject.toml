@@ -18,6 +18,10 @@ dependencies = [
     "flask>=3.0",
     "flask-sock>=0.7",
     "pyzmq>=26",
+    # The websocket client. It arrives with flask-sock in practice, but `tui/`
+    # imports it directly to speak to the server from outside a browser, so it
+    # is declared rather than relied on.
+    "simple-websocket>=1.0",
 ]
 
 # Test-only tooling, as a PEP 735 group rather than an extra: these are never
@@ -26,16 +30,13 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
-    # Arrives with flask-sock in practice, but tests/test_socket_integration.py
-    # imports it directly to drive a real websocket client, so it is declared
-    # rather than relied on.
-    "simple-websocket>=1.0",
 ]
 
 # There is no build backend on purpose. Nothing installs minos as a package: the
-# server runs from the repository root as `python -m server.app`, and the tests
-# put that root on sys.path themselves. This file declares dependencies and
-# configures tooling; it does not describe a distribution.
+# server runs from the repository root as `python -m server.app`, the terminal
+# client as `python -m tui`, and the tests put that root on sys.path themselves.
+# This file declares dependencies and configures tooling; it does not describe a
+# distribution.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

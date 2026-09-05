@@ -95,7 +95,12 @@ def start_messaging(registry):
     handler.timeline.sweep_dead_workers()
     atexit.register(release_worker, lease)
 
-    handler.ensure_system_stream()
+    handler.ensure_system_channel()
+
+    # Transient rooms are deleted a grace period after their last occupant
+    # leaves, and that has to happen whether or not anyone is connected -- it is
+    # a promise to the people who spoke in one, not a housekeeping convenience.
+    handler.start_sweeper()
     registry.register_application_handler(chat.APPLICATION, handler.handle)
 
     handler.worker = lease.worker
@@ -202,7 +207,11 @@ def register_routes(app):
             "id": username,
             "username": username,
             "name": username,
-            "groups": [],
+            # `groups` is the frozen profile shape, and it is where this server
+            # carries the one role it has. The chat layer reads it from here
+            # rather than consulting config, so a session that was issued
+            # before a change keeps the rights it was issued with.
+            "groups": ["admin"] if username in config.ADMINS else [],
         }
         vfs.ensure_home(username)
         session.permanent = True
@@ -343,8 +352,16 @@ def register_socket(app):
 def main():
     logging.basicConfig(level=logging.INFO)
 
+    # A missing browser build is no longer fatal: the terminal client needs the
+    # API and the websocket, not a bundle, so a server with no dist/ is a
+    # perfectly good server for it. Anyone expecting a page still gets told why
+    # they will not get one.
     if not (config.DIST / "index.html").is_file():
-        raise SystemExit(f"No client build in {config.DIST}. Run 'make client' first.")
+        logger.warning(
+            "No client build in %s; serving the API only. Run 'make client' for "
+            "the browser front end, or use 'make tui'.",
+            config.DIST,
+        )
 
     config.VFS_ROOT.mkdir(parents=True, exist_ok=True)
     config.RUN_DIR.mkdir(parents=True, exist_ok=True)

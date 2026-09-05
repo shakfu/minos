@@ -1,8 +1,11 @@
-"""The timeline store, and the sequence numbers the delivery design rests on."""
+"""The timeline store: sequence numbers, grants, occupancy and retention."""
 
 import threading
+import time
 
 import pytest
+
+from messaging import timeline as timeline_module
 
 
 @pytest.fixture
@@ -11,9 +14,18 @@ def timeline(app):
     return app.extensions["chat"].timeline
 
 
+def room(timeline, title="Room", **kwargs):
+    kwargs.setdefault("created_by", "demo")
+    kwargs.setdefault("grants", [("user", "demo")])
+    return timeline.create_room(title, **kwargs)
+
+
+# -- sequence numbers ---------------------------------------------------------
+
+
 def test_sequence_starts_at_one_and_is_per_room(timeline):
-    first = timeline.create_room("First", ["demo"])
-    second = timeline.create_room("Second", ["demo"])
+    first = room(timeline, "First")
+    second = room(timeline, "Second")
 
     assert timeline.append(first["id"], "demo", "a")["seq"] == 1
     assert timeline.append(first["id"], "demo", "b")["seq"] == 2
@@ -25,131 +37,220 @@ def test_concurrent_appends_never_reuse_a_sequence(timeline):
 
     Several worker processes publish at once, so the number cannot come from a
     publisher. Threads here stand in for those processes; what matters is that
-    the read of MAX(seq) and the insert are one transaction.
+    the read of the high-water mark and the insert are one transaction.
     """
-    room = timeline.create_room("Busy", ["demo"])
+    busy = room(timeline, "Busy")
     seen = []
     lock = threading.Lock()
 
-    def append(index):
-        message = timeline.append(room["id"], "demo", f"message {index}")
-        with lock:
-            seen.append(message["seq"])
+    def append():
+        for _ in range(10):
+            message = timeline.append(busy["id"], "demo", "x")
+            with lock:
+                seen.append(message["seq"])
 
-    threads = [threading.Thread(target=append, args=(i,)) for i in range(24)]
+    threads = [threading.Thread(target=append) for _ in range(4)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
 
-    assert sorted(seen) == list(range(1, 25))
+    assert sorted(seen) == list(range(1, 41))
+
+
+def test_the_high_water_mark_survives_losing_the_messages(timeline):
+    """The reason the mark is stored rather than derived from MAX(seq).
+
+    Nothing in the core removes a message without removing its room, so this
+    cannot happen yet. It is exactly what retention would do, and a room that
+    reissued a sequence a client had already seen would have its new messages
+    silently dropped as stale -- so the guarantee is pinned here rather than
+    discovered later.
+    """
+    quiet = room(timeline, "Quiet")
+    for _ in range(5):
+        timeline.append(quiet["id"], "demo", "x")
+
+    with timeline._connect() as connection:
+        connection.execute("DELETE FROM messages WHERE room_id = ?", (quiet["id"],))
+
+    assert timeline.room(quiet["id"])["lastSeq"] == 5
+    assert timeline.append(quiet["id"], "demo", "after")["seq"] == 6
 
 
 def test_history_returns_only_what_follows_the_cursor(timeline):
-    room = timeline.create_room("Room", ["demo"])
-    for index in range(5):
-        timeline.append(room["id"], "demo", str(index))
+    talk = room(timeline, "Talk")
+    for body in ("a", "b", "c"):
+        timeline.append(talk["id"], "demo", body)
 
-    tail = timeline.history(room["id"], since=3)
-    assert [message["seq"] for message in tail] == [4, 5]
-    assert [message["body"] for message in tail] == ["3", "4"]
+    assert [m["body"] for m in timeline.history(talk["id"], since=1)] == ["b", "c"]
+    assert timeline.history(talk["id"], since=3) == []
 
 
-def test_history_keeps_the_tail_when_it_has_to_choose(timeline, monkeypatch):
-    monkeypatch.setattr(timeline, "history_limit", 3)
-    room = timeline.create_room("Room", ["demo"])
+def test_history_keeps_the_tail_when_it_has_to_choose(timeline):
+    """A client far behind wants the recent messages, not the oldest ones."""
+    talk = room(timeline, "Long")
     for index in range(10):
-        timeline.append(room["id"], "demo", str(index))
+        timeline.append(talk["id"], "demo", str(index))
 
-    assert [message["seq"] for message in timeline.history(room["id"])] == [8, 9, 10]
-
-
-def test_membership_is_the_room(timeline):
-    room = timeline.create_room("Pair", ["demo", "alice"])
-    assert room["members"] == ["alice", "demo"]
-
-    assert timeline.add_members(room["id"], ["bob", "alice"]) == ["bob"]
-    assert timeline.room(room["id"])["members"] == ["alice", "bob", "demo"]
-
-    assert timeline.remove_member(room["id"], "alice") is True
-    assert timeline.is_member(room["id"], "alice") is False
+    tail = timeline.history(talk["id"], since=0, limit=3)
+    assert [m["body"] for m in tail] == ["7", "8", "9"]
 
 
-def test_rooms_for_lists_only_the_users_own(timeline):
-    mine = timeline.create_room("Mine", ["demo"])
-    timeline.create_room("Theirs", ["alice"])
-
-    assert [room["id"] for room in timeline.rooms_for("demo")] == [mine["id"], "system"]
+# -- grants and groups --------------------------------------------------------
 
 
-def test_room_description_carries_the_last_sequence(timeline):
-    room = timeline.create_room("Room", ["demo"])
-    timeline.append(room["id"], "demo", "one")
-    timeline.append(room["id"], "demo", "two")
+def test_a_grant_to_a_user_admits_exactly_that_user(timeline):
+    private = room(timeline, "Private", grants=[("user", "demo")])
 
-    assert timeline.room(room["id"])["lastSeq"] == 2
-
-
-def test_presence_is_shared_state_not_a_set_in_memory(timeline):
-    first = timeline.arrive("demo", worker="w1")
-    timeline.arrive("alice", worker="w2")
-
-    assert timeline.online() == ["alice", "demo"]
-
-    timeline.depart(first)
-    assert timeline.online() == ["alice"]
-
-    timeline.clear_worker("w2")
-    assert timeline.online() == []
+    assert timeline.has_access(private["id"], "demo")
+    assert not timeline.has_access(private["id"], "alice")
 
 
-def test_a_stopped_worker_releases_its_presence(timeline):
-    """The clean path: a lease dropped on the way out takes its rows with it."""
-    lease = timeline.lease()
-    lease.claim()
-    timeline.arrive("demo", lease.worker)
+def test_a_grant_to_a_group_follows_the_group(timeline):
+    """Why groups exist, and the reason to be careful editing one.
 
-    assert timeline.online() == ["demo"]
-
-    lease.release()
-    assert timeline.online() == []
-
-
-def test_a_killed_worker_is_reclaimed_by_the_next_one(timeline):
-    """The whole point of the lease.
-
-    A worker killed outright never runs its own cleanup, so its rows outlive it
-    and the roster shows a phantom. The kernel drops its lock, though, which is
-    how the next worker to start can tell it apart from one still running.
+    The grant names the group, not the people in it at the time, so a later
+    assignment admits someone with no second invitation -- and an unassignment
+    revokes them from every room the group was invited to.
     """
-    dead = timeline.lease()
-    dead.claim()
-    timeline.arrive("ghost", dead.worker)
+    team = timeline.create_group("Team", members=["alice"])
+    shared = room(timeline, "Shared", grants=[("group", team["id"])])
 
-    # kill -9: the process is gone, so the lock goes with it. Closing the handle
-    # without releasing the lease is exactly that, minus the rows being dropped.
-    dead._handle.close()
-    dead._handle = None
+    assert timeline.has_access(shared["id"], "alice")
+    assert not timeline.has_access(shared["id"], "bob")
 
-    assert timeline.online() == ["ghost"]
-    assert timeline.sweep_dead_workers() == [dead.worker]
-    assert timeline.online() == []
+    timeline.assign_group(team["id"], "bob")
+    assert timeline.has_access(shared["id"], "bob")
 
-
-def test_a_sweep_leaves_a_running_worker_alone(timeline):
-    """A lock still held is a worker still serving; its roster must survive."""
-    alive = timeline.lease()
-    alive.claim()
-    timeline.arrive("demo", alive.worker)
-
-    assert timeline.sweep_dead_workers() == []
-    assert timeline.online() == ["demo"]
-
-    alive.release()
+    timeline.unassign_group(team["id"], "alice")
+    assert not timeline.has_access(shared["id"], "alice")
 
 
-def test_releasing_a_lease_twice_is_harmless(timeline):
-    lease = timeline.lease()
-    lease.claim()
-    lease.release()
-    lease.release()
+def test_the_audience_unions_direct_and_group_grants(timeline):
+    team = timeline.create_group("Team", members=["alice", "bob"])
+    shared = room(
+        timeline, "Shared", grants=[("user", "demo"), ("group", team["id"])]
+    )
+
+    assert timeline.room(shared["id"])["audience"] == ["alice", "bob", "demo"]
+
+
+def test_rooms_for_lists_every_room_a_grant_admits(timeline):
+    team = timeline.create_group("Team", members=["alice"])
+    direct = room(timeline, "Direct", grants=[("user", "alice")])
+    through = room(timeline, "Through a group", grants=[("group", team["id"])])
+    room(timeline, "Not hers", grants=[("user", "bob")])
+
+    titles = {r["title"] for r in timeline.rooms_for("alice")}
+    assert titles == {direct["title"], through["title"]}
+
+
+def test_a_channel_answers_to_subscriptions_rather_than_grants(timeline):
+    channel = timeline.create_room(
+        "News", created_by="system", kind=timeline_module.CHANNEL
+    )
+    assert not timeline.has_access(channel["id"], "alice")
+
+    timeline.subscribe(channel["id"], "alice")
+    assert timeline.has_access(channel["id"], "alice")
+    # The application already declares a System channel and subscribes
+    # everyone, so this asserts on membership rather than the whole list.
+    assert "News" in {c["title"] for c in timeline.channels_for("alice")}
+
+    # A channel is not a room, and does not show up as one.
+    assert timeline.rooms_for("alice") == []
+
+
+# -- occupancy and retention --------------------------------------------------
+
+
+def test_occupancy_is_not_access(timeline):
+    """Being invited and being present are different facts."""
+    meeting = room(timeline, "Meeting", grants=[("user", "demo")])
+
+    assert timeline.has_access(meeting["id"], "demo")
+    assert timeline.occupants_of(meeting["id"]) == []
+
+    occupancy = timeline.enter(meeting["id"], "demo", worker="w1")
+    assert timeline.occupants_of(meeting["id"]) == ["demo"]
+
+    timeline.exit(occupancy)
+    assert timeline.occupants_of(meeting["id"]) == []
+    assert timeline.has_access(meeting["id"], "demo")
+
+
+def test_a_transient_room_starts_its_clock_when_the_last_occupant_leaves(timeline):
+    meeting = room(timeline, "Standup", retention=timeline_module.TRANSIENT)
+    first = timeline.enter(meeting["id"], "demo", worker="w1")
+    second = timeline.enter(meeting["id"], "alice", worker="w1")
+
+    timeline.exit(first)
+    assert timeline.expired_transient_rooms(now=time.time() + 10_000) == []
+
+    timeline.exit(second)
+    assert timeline.expired_transient_rooms(now=time.time() + 10_000) == [meeting["id"]]
+
+
+def test_re_entering_during_the_grace_period_rescues_the_room(timeline):
+    """The whole reason for a grace period: a reload must not destroy a room."""
+    meeting = room(timeline, "Standup", retention=timeline_module.TRANSIENT)
+    occupancy = timeline.enter(meeting["id"], "demo", worker="w1")
+    timeline.exit(occupancy)
+
+    timeline.enter(meeting["id"], "demo", worker="w1")
+    assert timeline.expired_transient_rooms(now=time.time() + 10_000) == []
+
+
+def test_the_sweep_only_takes_rooms_past_the_grace(timeline):
+    timeline.grace = 60.0
+    meeting = room(timeline, "Standup", retention=timeline_module.TRANSIENT)
+    occupancy = timeline.enter(meeting["id"], "demo", worker="w1")
+    timeline.exit(occupancy)
+
+    assert timeline.sweep_transient() == []
+    assert timeline.sweep_transient(now=time.time() + 61) == [meeting["id"]]
+    assert timeline.room(meeting["id"]) is None
+
+
+def test_a_persisted_room_is_never_swept(timeline):
+    kept = room(timeline, "Kept", retention=timeline_module.PERSISTED)
+    occupancy = timeline.enter(kept["id"], "demo", worker="w1")
+    timeline.exit(occupancy)
+
+    assert timeline.sweep_transient(now=time.time() + 10_000) == []
+    assert timeline.room(kept["id"]) is not None
+
+
+def test_a_swept_room_takes_its_history_with_it(timeline):
+    """Transient means transient: nothing is kept, and nothing can rescue it."""
+    meeting = room(timeline, "Standup", retention=timeline_module.TRANSIENT)
+    timeline.append(meeting["id"], "demo", "said in confidence")
+    occupancy = timeline.enter(meeting["id"], "demo", worker="w1")
+    timeline.exit(occupancy)
+
+    timeline.sweep_transient(now=time.time() + 10_000)
+    assert timeline.history(meeting["id"]) == []
+    assert timeline.rooms_for("demo") == []
+
+
+def test_a_dead_worker_releases_the_rooms_it_was_sitting_in(timeline):
+    """A killed worker must not keep a transient room alive with phantoms."""
+    meeting = room(timeline, "Standup", retention=timeline_module.TRANSIENT)
+    timeline.enter(meeting["id"], "demo", worker="gone")
+
+    assert timeline.expired_transient_rooms(now=time.time() + 10_000) == []
+    timeline.clear_worker("gone")
+    assert timeline.expired_transient_rooms(now=time.time() + 10_000) == [meeting["id"]]
+
+
+# -- read state ---------------------------------------------------------------
+
+
+def test_the_read_cursor_only_moves_forward(timeline):
+    talk = room(timeline, "Talk")
+    timeline.mark_read(talk["id"], "demo", 5)
+    timeline.mark_read(talk["id"], "demo", 2)
+
+    assert timeline.read_cursors("demo") == {talk["id"]: 5}
+    assert timeline.read_cursors("alice") == {}

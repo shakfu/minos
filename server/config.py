@@ -27,8 +27,14 @@ WS_PING_INTERVAL = 30
 SECRET_KEY = os.environ.get("MINOS_SECRET", "minos-development-secret")
 
 # Demo credentials. Replace with a real adapter before exposing the server.
-# Three accounts, because a one-user desktop cannot demonstrate a conversation.
+# Three accounts, because one user cannot demonstrate a conversation.
 USERS = {"demo": "demo", "alice": "alice", "bob": "bob"}
+
+# Who may found a permanent room, invite to one, and manage groups. The name is
+# carried on the session profile's `groups`, so the rest of the server asks the
+# profile rather than this set. A demo needs at least one, or nothing
+# institutional can be created at all.
+ADMINS = {"demo"}
 
 # Files written into a home directory the first time its owner logs in.
 HOME_TEMPLATE = {".desktop/.shortcuts.json": "[]"}
@@ -63,6 +69,13 @@ BUS_XPUB = os.environ.get("MINOS_BUS_XPUB", f"ipc://{RUN_DIR / 'bus-xpub'}")
 # any single backfill.
 HISTORY_LIMIT = 200
 
-# The stream every user is a member of, carrying machine events rather than
-# typed messages.
-SYSTEM_STREAM = "system"
+# The channel every user subscribes to, carrying machine events rather than
+# typed messages. A channel rather than a room: the server is its only producer
+# and its audience may only read.
+SYSTEM_CHANNEL = "system"
+
+# How long a transient room outlives its last occupant. Short enough that the
+# promise of deletion means something, long enough that a reload or a dropped
+# connection does not destroy a live conversation. Users are relying on this,
+# so it is documented rather than merely configured.
+ROOM_GRACE = float(os.environ.get("MINOS_ROOM_GRACE", "120"))

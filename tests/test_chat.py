@@ -34,6 +34,9 @@ class FakeWebsocket:
     def messages(self):
         return [event for event in self.pushes() if event.get("type") == "message"]
 
+    def of_type(self, type_):
+        return [event for event in self.pushes() if event.get("type") == type_]
+
 
 @pytest.fixture
 def service(app):
@@ -42,14 +45,22 @@ def service(app):
 
 
 @pytest.fixture
-def desktops(app, service):
-    """A live websocket for each demo account, synced and subscribed."""
-    from server import sockets
+def clients(app, service):
+    """A live websocket per demo account, synced and subscribed.
+
+    demo is in `config.ADMINS`; alice and bob are not. That asymmetry is the
+    point of several tests below, so it is set up once here.
+    """
+    from server import config, sockets
 
     registry = app.extensions["sockets"]
     sessions = {}
     for username in ("demo", "alice", "bob"):
-        connection = sockets.Connection(FakeWebsocket(), {"username": username})
+        profile = {
+            "username": username,
+            "groups": ["admin"] if username in config.ADMINS else [],
+        }
+        connection = sockets.Connection(FakeWebsocket(), profile)
         registry.add(connection)
         service.connect(connection.ws)
         sessions[username] = connection
@@ -76,233 +87,357 @@ def wait_for(predicate, timeout=3):
     return False
 
 
-def test_sync_reports_the_roster_and_who_is_connected(service, desktops):
-    reply = call(service, desktops["demo"], op="sync")
+# -- sync and delivery --------------------------------------------------------
+
+
+def test_sync_reports_the_roster_groups_and_channels(service, clients):
+    reply = call(service, clients["demo"], op="sync")
 
     assert reply["me"] == "demo"
+    assert reply["isAdmin"] is True
     assert [user["username"] for user in reply["users"]] == ["alice", "bob", "demo"]
-    assert [room["id"] for room in reply["rooms"]] == ["system"]
+    # The system channel is a channel, not a room; nobody is invited to it.
+    assert reply["rooms"] == []
+    assert [channel["id"] for channel in reply["channels"]] == ["system"]
 
 
-def test_a_message_reaches_the_other_member(service, desktops):
-    room = call(service, desktops["demo"], op="open", members=["alice"], title="Pair")
+def test_sync_does_not_call_an_ordinary_user_an_admin(service, clients):
+    assert call(service, clients["alice"], op="sync")["isAdmin"] is False
+
+
+def test_a_message_reaches_the_other_participant(service, clients):
+    room = call(service, clients["demo"], op="open", invite=["alice"], title="Pair")
     time.sleep(PROPAGATION)
 
-    assert call(service, desktops["demo"], op="send", room=room["id"], body="hello")["seq"] == 1
+    assert call(service, clients["demo"], op="send", room=room["id"], body="hello")["seq"] == 1
 
-    assert wait_for(lambda: desktops["alice"].ws.messages())
-    delivered = desktops["alice"].ws.messages()[-1]
+    assert wait_for(lambda: clients["alice"].ws.messages())
+    delivered = clients["alice"].ws.messages()[-1]
     assert delivered["body"] == "hello"
     assert delivered["author"] == "demo"
     assert delivered["seq"] == 1
 
 
-def test_a_message_reaches_nobody_outside_the_room(service, desktops):
-    room = call(service, desktops["demo"], op="open", members=["alice"])
+def test_a_message_reaches_nobody_outside_the_room(service, clients):
+    room = call(service, clients["demo"], op="open", invite=["alice"])
     time.sleep(PROPAGATION)
-    call(service, desktops["demo"], op="send", room=room["id"], body="private")
+    call(service, clients["demo"], op="send", room=room["id"], body="private")
 
-    assert wait_for(lambda: desktops["alice"].ws.messages())
+    assert wait_for(lambda: clients["alice"].ws.messages())
     time.sleep(PROPAGATION)
-    assert desktops["bob"].ws.messages() == []
+    assert clients["bob"].ws.messages() == []
 
 
-def test_a_one_to_one_becomes_a_group_by_adding_a_name(service, desktops):
-    """The window's membership is the conversation; nothing is created."""
-    room = call(service, desktops["demo"], op="open", members=["alice"])
+def test_someone_not_invited_cannot_read_the_room(service, clients):
+    room = call(service, clients["demo"], op="open", invite=["alice"])
+
+    refusal = call(service, clients["bob"], op="history", room=room["id"], since=0)
+    assert "error" in refusal
+
+
+# -- rooms are places ---------------------------------------------------------
+
+
+def test_two_rooms_may_hold_the_same_people(service, clients):
+    """A room is a place, not a set of people.
+
+    Under the retired model this was impossible by definition, and the client
+    had to search for an existing pair before opening one. Now it is ordinary,
+    and the two rooms keep separate histories.
+    """
+    first = call(service, clients["demo"], op="open", invite=["alice"], title="One")
+    second = call(service, clients["demo"], op="open", invite=["alice"], title="Two")
     time.sleep(PROPAGATION)
 
-    reply = call(service, desktops["demo"], op="invite", room=room["id"], username="bob")
-    assert reply["room"]["members"] == ["alice", "bob", "demo"]
+    assert first["id"] != second["id"]
+    assert first["audience"] == second["audience"] == ["alice", "demo"]
 
-    # Bob was not subscribed to a room he was not in, so the news that he is
-    # now in one has to arrive on the presence topic.
-    assert wait_for(
-        lambda: any(
-            event.get("type") == "room" and event["room"]["id"] == room["id"]
-            for event in desktops["bob"].ws.pushes()
-        )
+    call(service, clients["demo"], op="send", room=first["id"], body="only here")
+    assert call(service, clients["demo"], op="history", room=second["id"])["messages"] == []
+
+
+def test_inviting_someone_leaves_the_same_room(service, clients):
+    room = call(service, clients["demo"], op="open", invite=["alice"], title="Pair")
+    call(service, clients["demo"], op="send", room=room["id"], body="before")
+
+    grown = call(
+        service, clients["demo"], op="invite", room=room["id"], principal="bob"
+    )["room"]
+
+    assert grown["id"] == room["id"]
+    assert grown["audience"] == ["alice", "bob", "demo"]
+    # History belongs to the place, so the new participant sees all of it.
+    bodies = [
+        m["body"]
+        for m in call(service, clients["bob"], op="history", room=room["id"])["messages"]
+    ]
+    assert "before" in bodies
+
+
+# -- authority ----------------------------------------------------------------
+
+
+def test_only_an_admin_may_found_a_permanent_room(service, clients):
+    refusal = call(service, clients["alice"], op="create", title="Engineering")
+    assert "error" in refusal
+
+    room = call(service, clients["demo"], op="create", title="Engineering")
+    assert room["authority"] == "admin"
+    assert room["retention"] == "persisted"
+
+
+def test_a_participant_cannot_invite_to_an_admin_room(service, clients):
+    """An institutional room's membership is an administrative fact."""
+    room = call(service, clients["demo"], op="create", title="Engineering",
+                invite=["alice"])
+    time.sleep(PROPAGATION)
+
+    refusal = call(
+        service, clients["alice"], op="invite", room=room["id"], principal="bob"
+    )
+    assert "error" in refusal
+
+    allowed = call(
+        service, clients["demo"], op="invite", room=room["id"], principal="bob"
+    )
+    assert "bob" in allowed["room"]["audience"]
+
+
+def test_any_participant_may_invite_to_a_user_room(service, clients):
+    """Permissive on purpose: alice could raise her own room with the same people."""
+    room = call(service, clients["demo"], op="open", invite=["alice"], title="Ad hoc")
+    time.sleep(PROPAGATION)
+
+    grown = call(
+        service, clients["alice"], op="invite", room=room["id"], principal="bob"
+    )
+    assert "bob" in grown["room"]["audience"]
+
+
+def test_only_an_admin_may_manage_groups(service, clients):
+    assert "error" in call(service, clients["alice"], op="group.create", name="Team")
+
+    group = call(service, clients["demo"], op="group.create", name="Team")
+    assert group["name"] == "Team"
+
+
+# -- groups as principals -----------------------------------------------------
+
+
+def test_inviting_a_group_admits_its_members(service, clients):
+    group = call(
+        service, clients["demo"], op="group.create", name="Team", members=["alice"]
+    )
+    room = call(service, clients["demo"], op="create", title="Team room")
+    grown = call(
+        service,
+        clients["demo"],
+        op="invite",
+        room=room["id"],
+        principal={"kind": "group", "id": group["id"]},
+    )["room"]
+
+    assert grown["audience"] == ["alice", "demo"]
+
+
+def test_a_later_assignment_admits_without_a_second_invitation(service, clients):
+    """The grant tracks the group, which is the whole reason groups exist."""
+    group = call(service, clients["demo"], op="group.create", name="Team")
+    room = call(service, clients["demo"], op="create", title="Team room")
+    call(
+        service,
+        clients["demo"],
+        op="invite",
+        room=room["id"],
+        principal={"kind": "group", "id": group["id"]},
     )
 
+    assert "error" in call(service, clients["bob"], op="history", room=room["id"])
 
-def test_merging_two_windows_unions_their_membership(service, desktops):
-    source = call(service, desktops["demo"], op="open", members=["alice"], title="Design")
-    target = call(service, desktops["demo"], op="open", members=["bob"], title="Build")
+    call(service, clients["demo"], op="group.assign", group=group["id"], username="bob")
+    assert "messages" in call(service, clients["bob"], op="history", room=room["id"])
+
+
+def test_unassigning_from_a_group_revokes_the_rooms_it_carried(service, clients):
+    """The other half of the same coin, and the reason to edit a group carefully."""
+    group = call(
+        service, clients["demo"], op="group.create", name="Team", members=["bob"]
+    )
+    room = call(service, clients["demo"], op="create", title="Team room")
+    call(
+        service,
+        clients["demo"],
+        op="invite",
+        room=room["id"],
+        principal={"kind": "group", "id": group["id"]},
+    )
+    assert "messages" in call(service, clients["bob"], op="history", room=room["id"])
+
+    call(
+        service, clients["demo"], op="group.unassign", group=group["id"], username="bob"
+    )
+    assert "error" in call(service, clients["bob"], op="history", room=room["id"])
+
+
+def test_a_room_reached_through_a_group_cannot_be_left(service, clients):
+    """Leaving would be undone the moment the grant was re-evaluated."""
+    group = call(
+        service, clients["demo"], op="group.create", name="Team", members=["alice"]
+    )
+    room = call(service, clients["demo"], op="create", title="Team room")
+    call(
+        service,
+        clients["demo"],
+        op="invite",
+        room=room["id"],
+        principal={"kind": "group", "id": group["id"]},
+    )
+
+    assert "error" in call(service, clients["alice"], op="leave", room=room["id"])
+
+
+def test_leaving_gives_up_a_personal_grant(service, clients):
+    room = call(service, clients["demo"], op="open", invite=["alice"], title="Pair")
     time.sleep(PROPAGATION)
 
-    reply = call(service, desktops["demo"], op="merge", room=source["id"], into=target["id"])
-
-    assert reply["room"]["members"] == ["alice", "bob", "demo"]
-
-    # History is not renumbered, so both rooms keep their own cursors and each
-    # gets a marker instead.
-    left = call(service, desktops["demo"], op="history", room=source["id"])
-    assert [message["body"] for message in left["messages"]] == ["demo merged this into Build"]
+    assert call(service, clients["alice"], op="leave", room=room["id"])["ok"]
+    assert "error" in call(service, clients["alice"], op="history", room=room["id"])
 
 
-def test_a_non_member_cannot_read_a_room(service, desktops):
-    room = call(service, desktops["demo"], op="open", members=["alice"])
-
-    assert call(service, desktops["bob"], op="history", room=room["id"]) == {
-        "error": "Not a member of that room"
-    }
-    assert call(service, desktops["bob"], op="send", room=room["id"], body="hi") == {
-        "error": "Not a member of that room"
-    }
+# -- occupancy and retention --------------------------------------------------
 
 
-def test_history_answers_from_a_cursor(service, desktops):
-    """The repair path: a client that saw a gap asks for what it missed."""
-    room = call(service, desktops["demo"], op="open", members=["alice"])
-    for index in range(4):
-        call(service, desktops["demo"], op="send", room=room["id"], body=f"m{index}")
+def test_entering_and_leaving_a_room_is_not_being_invited_to_it(service, clients):
+    room = call(service, clients["demo"], op="open", invite=["alice"], title="Meeting")
 
-    reply = call(service, desktops["demo"], op="history", room=room["id"], since=2)
-    assert [message["seq"] for message in reply["messages"]] == [3, 4]
+    entered = call(service, clients["demo"], op="enter", room=room["id"])
+    assert entered["ok"]
+    assert service.timeline.occupants_of(room["id"]) == ["demo"]
 
-
-def test_leaving_removes_the_member_and_marks_the_room(service, desktops):
-    room = call(service, desktops["demo"], op="open", members=["alice"])
-    call(service, desktops["alice"], op="leave", room=room["id"])
-
-    assert call(service, desktops["demo"], op="history", room=room["id"])["messages"][-1][
-        "body"
-    ] == "alice left"
-    assert call(service, desktops["alice"], op="history", room=room["id"]) == {
-        "error": "Not a member of that room"
-    }
+    call(service, clients["demo"], op="exit", occupancy=entered["occupancy"])
+    assert service.timeline.occupants_of(room["id"]) == []
+    # Still invited: occupancy ended, access did not.
+    assert "messages" in call(service, clients["demo"], op="history", room=room["id"])
 
 
-def test_an_unknown_operation_is_refused(service, desktops):
-    assert call(service, desktops["demo"], op="drop-tables") == {
-        "error": "No such chat operation: drop-tables"
-    }
-
-
-def test_a_filesystem_change_arrives_on_the_system_stream(auth, service, desktops):
-    """The machine half: a producer the server owns, in the same window type."""
-    from conftest import upload
-
-    assert upload(auth, "home:/note.txt", b"hi").status_code == 200
-
-    assert wait_for(
-        lambda: any(
-            message["body"] == "demo wrote home:/note.txt"
-            for message in desktops["demo"].ws.messages()
-        )
+def test_a_connection_releases_the_rooms_it_was_sitting_in(service, clients):
+    """A dropped socket must not keep a transient room alive forever."""
+    room = call(
+        service, clients["demo"], op="open", title="Standup", retention="transient"
     )
-    assert desktops["demo"].ws.messages()[-1]["room"] == "system"
+    call(service, clients["demo"], op="enter", room=room["id"])
+    assert service.timeline.occupants_of(room["id"]) == ["demo"]
+
+    service.disconnect(clients["demo"].ws)
+    assert service.timeline.occupants_of(room["id"]) == []
 
 
-def test_a_malformed_cursor_is_answered_not_fatal(service, desktops):
-    """`since` arrives from the client and used to reach int() unguarded.
+def test_one_client_cannot_release_another_clients_place(service, clients):
+    room = call(service, clients["demo"], op="open", invite=["alice"], title="Meeting")
+    time.sleep(PROPAGATION)
+    entered = call(service, clients["demo"], op="enter", room=room["id"])
 
-    An unparseable cursor means the caller holds nothing, which is a backfill
-    from zero -- not a reason to lose the connection.
+    refusal = call(
+        service, clients["alice"], op="exit", occupancy=entered["occupancy"]
+    )
+    assert "error" in refusal
+    assert service.timeline.occupants_of(room["id"]) == ["demo"]
+
+
+def test_a_transient_room_is_swept_once_its_grace_has_passed(service, clients):
+    room = call(
+        service, clients["demo"], op="open", title="Standup", retention="transient"
+    )
+    call(service, clients["demo"], op="send", room=room["id"], body="said in the room")
+    entered = call(service, clients["demo"], op="enter", room=room["id"])
+    call(service, clients["demo"], op="exit", occupancy=entered["occupancy"])
+
+    service.timeline.grace = 0.0
+    assert service.service.sweep() == [room["id"]]
+
+    assert service.timeline.room(room["id"]) is None
+    assert "error" in call(service, clients["demo"], op="history", room=room["id"])
+
+
+def test_a_swept_room_is_announced_so_clients_can_drop_it(service, clients):
+    room = call(
+        service, clients["demo"], op="open", title="Standup", retention="transient"
+    )
+    entered = call(service, clients["demo"], op="enter", room=room["id"])
+    call(service, clients["demo"], op="exit", occupancy=entered["occupancy"])
+
+    service.timeline.grace = 0.0
+    service.service.sweep()
+
+    assert wait_for(lambda: clients["demo"].ws.of_type("roomGone"))
+    assert clients["demo"].ws.of_type("roomGone")[-1]["room"] == room["id"]
+
+
+# -- channels -----------------------------------------------------------------
+
+
+def test_a_channel_is_read_only_to_its_audience(service, clients):
+    refusal = call(service, clients["alice"], op="send", room="system", body="hello")
+    assert refusal["error"] == "A channel is read-only"
+
+
+def test_the_server_publishes_to_the_system_channel(service, clients):
+    service.publish_system_event("demo wrote home:/notes.txt")
+
+    assert wait_for(lambda: clients["alice"].ws.messages())
+    assert clients["alice"].ws.messages()[-1]["body"] == "demo wrote home:/notes.txt"
+
+
+def test_unsubscribing_drops_the_channel(service, clients):
+    call(service, clients["alice"], op="unsubscribe", channel="system")
+    assert call(service, clients["alice"], op="sync")["channels"] == []
+
+
+# -- read state ---------------------------------------------------------------
+
+
+def test_the_read_cursor_is_the_servers_and_comes_back_on_sync(service, clients):
+    room = call(service, clients["demo"], op="open", invite=["alice"], title="Pair")
+    call(service, clients["demo"], op="send", room=room["id"], body="one")
+    call(service, clients["demo"], op="send", room=room["id"], body="two")
+
+    call(service, clients["demo"], op="read", room=room["id"], seq=2)
+
+    assert call(service, clients["demo"], op="sync")["read"][room["id"]] == 2
+    # It is per person, not per room.
+    assert call(service, clients["alice"], op="sync")["read"] == {}
+
+
+def test_an_unknown_operation_is_refused_by_name(service, clients):
+    assert "No such chat operation" in call(service, clients["demo"], op="merge")["error"]
+
+
+def test_a_permanent_room_name_is_unique(service, clients):
+    """A name exists to be referred to, so two of them help nobody.
+
+    Case is ignored for the same reason: "post it in Engineering" has to resolve
+    to one room, and two differing only in capitalisation would not help anyone
+    tell them apart.
     """
-    room = call(service, desktops["demo"], op="open", members=["alice"])
-    call(service, desktops["demo"], op="send", room=room["id"], body="hello")
+    call(service, clients["demo"], op="create", title="Engineering")
 
-    reply = call(service, desktops["demo"], op="history", room=room["id"], since="not-a-number")
-
-    assert reply["since"] == 0
-    assert [message["body"] for message in reply["messages"]] == ["hello"]
+    refusal = call(service, clients["demo"], op="create", title="engineering")
+    assert "already exists" in refusal["error"]
 
 
-def test_a_negative_cursor_is_clamped(service, desktops):
-    room = call(service, desktops["demo"], op="open", members=["alice"])
-    assert call(service, desktops["demo"], op="history", room=room["id"], since=-5)["since"] == 0
+def test_ad_hoc_rooms_may_share_a_title(service, clients):
+    """Their title describes who is in them rather than naming them.
 
-
-@pytest.mark.parametrize("room_id", [{"a": 1}, ["x"], 17, None])
-def test_a_room_id_of_the_wrong_type_is_refused(service, desktops, room_id):
-    """These reached SQLite as a bound parameter and raised out of the handler."""
-    reply = call(service, desktops["demo"], op="history", room=room_id)
-    assert "error" in reply
-
-
-def test_a_bad_payload_leaves_the_connection_usable(service, desktops):
-    """The point of the guard: the next request still works."""
-    call(service, desktops["demo"], op="history", room={"not": "a room"})
-
-    assert call(service, desktops["demo"], op="sync")["me"] == "demo"
-
-
-def test_disconnecting_releases_the_threads_bus_sockets(service, app):
-    """flask-sock runs a thread per websocket and every one of them publishes.
-
-    The route's teardown is the only place that knows the thread is finished, so
-    it is where the sockets it opened are closed.
+    Requiring these to differ would be membership-as-identity coming back: two
+    conversations between the same people are two conversations.
     """
-    import threading
+    first = call(service, clients["demo"], op="open", invite=["alice"])
+    second = call(service, clients["demo"], op="open", invite=["alice"])
 
-    from server import sockets
-
-    counts = {}
-
-    def one_connection():
-        connection = sockets.Connection(FakeWebsocket(), {"username": "demo"})
-        app.extensions["sockets"].add(connection)
-        service.connect(connection.ws)
-        counts["during"] = len(service.bus._local.sockets)
-        service.disconnect(connection.ws)
-        counts["after"] = len(service.bus._local.sockets)
-
-    thread = threading.Thread(target=one_connection)
-    thread.start()
-    thread.join()
-
-    assert counts["during"] >= 1
-    assert counts["after"] == 0
+    assert first["title"] == second["title"] == "alice, demo"
+    assert first["id"] != second["id"]
 
 
-def test_history_reports_what_the_room_holds(service, desktops, monkeypatch):
-    """A capped reply is only detectable if the client is told the room's end.
-
-    Without `lastSeq` a client further behind than the limit takes the newest
-    slice, moves its cursor past the shortfall, and never learns it skipped the
-    rest -- the one case sequence numbers exist to catch.
-    """
-    monkeypatch.setattr(service.timeline, "history_limit", 3)
-    room = call(service, desktops["demo"], op="open", members=["alice"])
-    for index in range(10):
-        call(service, desktops["demo"], op="send", room=room["id"], body=f"m{index}")
-
-    reply = call(service, desktops["demo"], op="history", room=room["id"])
-
-    assert reply["lastSeq"] == 10
-    assert [message["seq"] for message in reply["messages"]] == [8, 9, 10]
-
-
-def test_a_capped_reply_starts_above_the_cursor(service, desktops, monkeypatch):
-    """The cap is on the tail, so it is not a window a client can page through.
-
-    Asking again from the same cursor returns the same slice. What makes the
-    shortfall recoverable is that it is visible: the first sequence returned is
-    more than one past the cursor, which is how the client knows to mark it
-    rather than close the gap in silence.
-    """
-    monkeypatch.setattr(service.timeline, "history_limit", 3)
-    room = call(service, desktops["demo"], op="open", members=["alice"])
-    for index in range(10):
-        call(service, desktops["demo"], op="send", room=room["id"], body=f"m{index}")
-
-    first = call(service, desktops["demo"], op="history", room=room["id"], since=0)
-    again = call(service, desktops["demo"], op="history", room=room["id"], since=0)
-
-    assert [m["seq"] for m in first["messages"]] == [8, 9, 10]
-    assert [m["seq"] for m in again["messages"]] == [8, 9, 10]  # no forward progress
-    assert first["messages"][0]["seq"] > first["since"] + 1  # the gap, detectable
-
-
-def test_an_uncapped_reply_is_contiguous_with_the_cursor(service, desktops):
-    """The ordinary case: a small gap comes back whole, with nothing to mark."""
-    room = call(service, desktops["demo"], op="open", members=["alice"])
-    for index in range(4):
-        call(service, desktops["demo"], op="send", room=room["id"], body=f"m{index}")
-
-    reply = call(service, desktops["demo"], op="history", room=room["id"], since=1)
-
-    assert [m["seq"] for m in reply["messages"]] == [2, 3, 4]
-    assert reply["messages"][0]["seq"] == reply["since"] + 1
-    assert reply["lastSeq"] == 4
+def test_an_ad_hoc_room_does_not_block_a_permanent_name(service, clients):
+    call(service, clients["demo"], op="open", title="Engineering")
+    assert "error" not in call(service, clients["demo"], op="create", title="Engineering")
