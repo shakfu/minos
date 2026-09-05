@@ -29,10 +29,11 @@ import os
 import threading
 import time
 import uuid
+from pathlib import Path
 
 import zmq
 
-from . import config, timeline
+from .timeline import decode, encode
 
 logger = logging.getLogger(__name__)
 
@@ -67,20 +68,21 @@ class Broker:
     files before binding.
     """
 
-    def __init__(self, xsub=None, xpub=None):
-        self.xsub = xsub or config.BUS_XSUB
-        self.xpub = xpub or config.BUS_XPUB
+    def __init__(self, xsub, xpub, run_dir):
+        self.xsub = xsub
+        self.xpub = xpub
+        self.run_dir = Path(run_dir)
         self._lock_file = None
         self._context = None
 
     def claim(self):
-        config.RUN_DIR.mkdir(parents=True, exist_ok=True)
+        self.run_dir.mkdir(parents=True, exist_ok=True)
         try:
             import fcntl
         except ImportError:  # pragma: no cover - POSIX only, and this is Linux
             return True
 
-        self._lock_file = open(config.RUN_DIR / "broker.lock", "w")
+        self._lock_file = open(self.run_dir / "broker.lock", "w")
         try:
             fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -141,9 +143,9 @@ class Bus:
     sockets outright.
     """
 
-    def __init__(self, xsub=None, xpub=None):
-        self.xsub = xsub or config.BUS_XSUB
-        self.xpub = xpub or config.BUS_XPUB
+    def __init__(self, xsub, xpub):
+        self.xsub = xsub
+        self.xpub = xpub
 
         self._context = zmq.Context.instance()
         self._id = uuid.uuid4().hex[:8]
@@ -189,7 +191,7 @@ class Bus:
     # -- the public API, callable from any thread -----------------------------
 
     def publish(self, topic, payload):
-        self._push(self._outbound).send_multipart([b"send", topic, timeline.encode(payload)])
+        self._push(self._outbound).send_multipart([b"send", topic, encode(payload)])
 
     def subscribe(self, topic):
         self._push(self._control).send_multipart([b"sub", topic])
@@ -295,7 +297,7 @@ class Bus:
                     # so the frame shape is not ours to assume.
                     try:
                         topic, raw = subscriber.recv_multipart()
-                        payload = timeline.decode(raw)
+                        payload = decode(raw)
                     except ValueError:
                         logger.warning("Discarding malformed bus frame", exc_info=True)
                         continue
@@ -308,14 +310,14 @@ class Bus:
             control.close(0)
 
 
-def run_broker():
-    """Entry point for a standalone proxy: `python -m server.bus`."""
+def run_broker(xsub, xpub, run_dir):
+    """Run a standalone proxy until killed.
+
+    Hosts wire their own entry point around this; the module takes its
+    endpoints rather than reading them from anywhere global.
+    """
     logging.basicConfig(level=logging.INFO)
-    broker = Broker()
+    broker = Broker(xsub, xpub, run_dir)
     if not broker.start():
         raise SystemExit("Another process already owns the message bus")
     threading.Event().wait()
-
-
-if __name__ == "__main__":
-    run_broker()

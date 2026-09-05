@@ -50,7 +50,7 @@ def listening(bus):
 
 
 def test_a_published_message_comes_back_on_its_topic(bus, listening):
-    from server import bus as module
+    from messaging import bus as module
 
     topic = module.room_topic("abc")
     bus.subscribe(topic)
@@ -69,7 +69,7 @@ def test_a_topic_filter_is_exact_not_a_prefix(bus, listening):
     topics are terminated. Without the terminator the wrong room's traffic
     arrives silently, and only once someone has eleven rooms.
     """
-    from server import bus as module
+    from messaging import bus as module
 
     bus.subscribe(module.room_topic("1"))
     time.sleep(PROPAGATION)
@@ -88,7 +88,7 @@ def test_every_thread_may_publish(bus, listening):
     A shared PUB socket would interleave the parts of a multipart frame, so a
     failure here shows up as a torn or missing message rather than an error.
     """
-    from server import bus as module
+    from messaging import bus as module
 
     topic = module.room_topic("threads")
     bus.subscribe(topic)
@@ -108,7 +108,7 @@ def test_every_thread_may_publish(bus, listening):
 
 def test_unsubscribing_one_of_two_watchers_keeps_delivery(bus, listening):
     """Two windows on one room: closing the first must not silence the second."""
-    from server import bus as module
+    from messaging import bus as module
 
     topic = module.room_topic("counted")
     bus.subscribe(topic)
@@ -128,9 +128,12 @@ def test_unsubscribing_one_of_two_watchers_keeps_delivery(bus, listening):
 
 def test_a_second_broker_defers_to_the_one_holding_the_lock(app):
     """Ownership is a file lock, so a stale ipc file cannot lock everyone out."""
-    from server import bus as module
+    from messaging import bus as module
 
-    assert module.Broker().start() is False
+    from server import config
+
+    second = module.Broker(config.BUS_XSUB, config.BUS_XPUB, config.RUN_DIR)
+    assert second.start() is False
 
 
 def test_a_frame_of_the_wrong_shape_does_not_kill_the_relay(bus, listening):
@@ -140,7 +143,7 @@ def test_a_frame_of_the_wrong_shape_does_not_kill_the_relay(bus, listening):
     worker, and the bus is unauthenticated -- so the shape is not ours to
     assume.
     """
-    from server import bus as module
+    from messaging import bus as module
 
     topic = module.room_topic("shapes")
     bus.subscribe(topic)
@@ -157,7 +160,7 @@ def test_a_frame_of_the_wrong_shape_does_not_kill_the_relay(bus, listening):
 
 
 def test_a_frame_with_undecodable_json_does_not_kill_the_relay(bus, listening):
-    from server import bus as module
+    from messaging import bus as module
 
     topic = module.room_topic("garbage")
     bus.subscribe(topic)

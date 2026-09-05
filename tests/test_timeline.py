@@ -7,9 +7,8 @@ import pytest
 
 @pytest.fixture
 def timeline(app):
-    from server import timeline as module
-
-    return module
+    """The application's own store, already initialised."""
+    return app.extensions["chat"].timeline
 
 
 def test_sequence_starts_at_one_and_is_per_room(timeline):
@@ -57,9 +56,7 @@ def test_history_returns_only_what_follows_the_cursor(timeline):
 
 
 def test_history_keeps_the_tail_when_it_has_to_choose(timeline, monkeypatch):
-    from server import config
-
-    monkeypatch.setattr(config, "HISTORY_LIMIT", 3)
+    monkeypatch.setattr(timeline, "history_limit", 3)
     room = timeline.create_room("Room", ["demo"])
     for index in range(10):
         timeline.append(room["id"], "demo", str(index))
@@ -108,7 +105,7 @@ def test_presence_is_shared_state_not_a_set_in_memory(timeline):
 
 def test_a_stopped_worker_releases_its_presence(timeline):
     """The clean path: a lease dropped on the way out takes its rows with it."""
-    lease = timeline.WorkerLease()
+    lease = timeline.lease()
     lease.claim()
     timeline.arrive("demo", lease.worker)
 
@@ -125,7 +122,7 @@ def test_a_killed_worker_is_reclaimed_by_the_next_one(timeline):
     and the roster shows a phantom. The kernel drops its lock, though, which is
     how the next worker to start can tell it apart from one still running.
     """
-    dead = timeline.WorkerLease()
+    dead = timeline.lease()
     dead.claim()
     timeline.arrive("ghost", dead.worker)
 
@@ -141,7 +138,7 @@ def test_a_killed_worker_is_reclaimed_by_the_next_one(timeline):
 
 def test_a_sweep_leaves_a_running_worker_alone(timeline):
     """A lock still held is a worker still serving; its roster must survive."""
-    alive = timeline.WorkerLease()
+    alive = timeline.lease()
     alive.claim()
     timeline.arrive("demo", alive.worker)
 
@@ -152,7 +149,7 @@ def test_a_sweep_leaves_a_running_worker_alone(timeline):
 
 
 def test_releasing_a_lease_twice_is_harmless(timeline):
-    lease = timeline.WorkerLease()
+    lease = timeline.lease()
     lease.claim()
     lease.release()
     lease.release()

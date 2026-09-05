@@ -19,8 +19,9 @@ from flask import (
 )
 from flask_sock import Sock
 
-from . import bus as bus_module
-from . import chat, config, sockets, timeline, vfs
+import messaging
+
+from . import chat, config, sockets, vfs
 from .vfs import VfsError
 
 logger = logging.getLogger(__name__)
@@ -79,29 +80,29 @@ def start_messaging(registry):
     stays one command: the first process to come up claims it, and any further
     worker finds it claimed and simply connects.
     """
-    timeline.init()
+    broker = messaging.Broker(config.BUS_XSUB, config.BUS_XPUB, config.RUN_DIR)
+    broker.start()
+    bus = messaging.Bus(config.BUS_XSUB, config.BUS_XPUB)
+
+    handler = chat.build(bus, registry)
+    bus.start(handler.service.on_bus_message)
 
     # Claim before sweeping, so a worker starting alongside this one cannot
     # mistake our own lock for a dead worker's and clear the rows we are about
     # to write.
-    lease = timeline.WorkerLease()
+    lease = handler.timeline.lease()
     lease.claim()
-    timeline.sweep_dead_workers()
+    handler.timeline.sweep_dead_workers()
     atexit.register(release_worker, lease)
 
-    broker = bus_module.Broker()
-    broker.start()
-    bus = bus_module.Bus()
-    service = chat.ChatService(bus, registry)
-    bus.start(service.deliver)
+    handler.ensure_system_stream()
+    registry.register_application_handler(chat.APPLICATION, handler.handle)
 
-    chat.ensure_system_stream()
-    registry.register_application_handler("Chat", service.handle)
-
-    service.worker = lease.worker
-    service.lease = lease
-    service.broker = broker
-    return service
+    handler.worker = lease.worker
+    handler.lease = lease
+    handler.broker = broker
+    handler.bus = bus
+    return handler
 
 
 def release_worker(lease):
@@ -301,9 +302,9 @@ def announce(method, username, path):
     request that has already been carried out.
     """
     verb = ANNOUNCED_METHODS.get(method)
-    service = current_app.extensions.get("chat")
-    if verb is not None and service is not None and path:
-        chat.publish_system_event(service, f"{username} {verb} {path}")
+    handler = current_app.extensions.get("chat")
+    if verb is not None and handler is not None and path:
+        handler.publish_system_event(f"{username} {verb} {path}")
 
 
 def register_socket(app):
@@ -314,7 +315,7 @@ def register_socket(app):
     """
     sock = Sock(app)
     registry = app.extensions["sockets"]
-    service = app.extensions["chat"]
+    handler = app.extensions["chat"]
     max_age = int(config.SESSION_LIFETIME.total_seconds() * 1000)
 
     @sock.route("/")
@@ -328,15 +329,15 @@ def register_socket(app):
         # across workers. `sockets.serve` needs to know none of this: the
         # subscriptions are keyed by this websocket and released below.
         username = user.get("username")
-        presence_id = timeline.arrive(username, service.worker)
-        service.connect(ws)
-        service.announce_presence(username, True)
+        presence_id = handler.timeline.arrive(username, handler.worker)
+        handler.connect(ws)
+        handler.announce_presence(username, True)
         try:
             sockets.serve(registry, ws, user, config.WS_PING_INTERVAL, max_age)
         finally:
-            service.disconnect(ws)
-            timeline.depart(presence_id)
-            service.announce_presence(username, False)
+            handler.disconnect(ws)
+            handler.timeline.depart(presence_id)
+            handler.announce_presence(username, False)
 
 
 def main():

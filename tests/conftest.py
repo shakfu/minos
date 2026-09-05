@@ -28,12 +28,6 @@ def app(tmp_path, monkeypatch):
     from server import sockets as sockets_module
 
     importlib.reload(sockets_module)
-    from server import timeline as timeline_module
-
-    importlib.reload(timeline_module)
-    from server import bus as bus_module
-
-    importlib.reload(bus_module)
     from server import chat as chat_module
 
     importlib.reload(chat_module)
@@ -49,10 +43,10 @@ def app(tmp_path, monkeypatch):
     # Each app owns a bus and, being first in its own MINOS_RUN, a proxy. Left
     # running they would pile up threads across the suite. The lease holds an
     # open lock file, so it is released here rather than waiting for atexit.
-    service = instance.extensions["chat"]
-    service.bus.stop()
-    service.broker.stop()
-    service.lease.release()
+    handler = instance.extensions["chat"]
+    handler.bus.stop()
+    handler.broker.stop()
+    handler.lease.release()
 
 
 @pytest.fixture

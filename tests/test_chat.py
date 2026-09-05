@@ -37,6 +37,7 @@ class FakeWebsocket:
 
 @pytest.fixture
 def service(app):
+    """The websocket-facing handler, which is what the client drives."""
     return app.extensions["chat"]
 
 
@@ -262,9 +263,7 @@ def test_history_reports_what_the_room_holds(service, desktops, monkeypatch):
     slice, moves its cursor past the shortfall, and never learns it skipped the
     rest -- the one case sequence numbers exist to catch.
     """
-    from server import config
-
-    monkeypatch.setattr(config, "HISTORY_LIMIT", 3)
+    monkeypatch.setattr(service.timeline, "history_limit", 3)
     room = call(service, desktops["demo"], op="open", members=["alice"])
     for index in range(10):
         call(service, desktops["demo"], op="send", room=room["id"], body=f"m{index}")
@@ -283,9 +282,7 @@ def test_a_capped_reply_starts_above_the_cursor(service, desktops, monkeypatch):
     more than one past the cursor, which is how the client knows to mark it
     rather than close the gap in silence.
     """
-    from server import config
-
-    monkeypatch.setattr(config, "HISTORY_LIMIT", 3)
+    monkeypatch.setattr(service.timeline, "history_limit", 3)
     room = call(service, desktops["demo"], op="open", members=["alice"])
     for index in range(10):
         call(service, desktops["demo"], op="send", room=room["id"], body=f"m{index}")

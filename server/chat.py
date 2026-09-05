@@ -1,288 +1,120 @@
-"""The Chat application handler: rooms, membership, presence and streams.
+"""Binds the messaging layer to this server's websocket protocol.
 
-Registered under `register_application_handler`, so every request arrives as an
-`osjs/application:socket:message` frame and none of it touches the frozen HTTP
-contract. That is the reason this feature is shaped the way it is -- the
-websocket is the one extension point the OS.js wire format leaves open.
+Everything conversational lives in `messaging/`, which knows nothing about
+Flask, the OS.js wire format, or who has an account here. This module is the
+seam: it maps operation names to messaging calls, turns a `MessagingError` into
+the error shape the client expects, and fans deliveries out over the connection
+registry as `osjs/application:socket:message` frames.
 
-A room here is not a channel someone joined. It is a set of people, and the
-membership is what the window shows; a one-to-one becomes a group when another
-name is added to it, with nothing created and nothing named. Machine streams
-are the same object with a producer instead of a person, which is what lets one
-window type display either.
-
-The handler never touches the connection registry. It publishes to the bus and
-returns; the relay decides who is locally connected and delivers. That keeps
-delivery working when there is more than one worker, and it is why the handler
-signature did not have to grow a registry argument.
+The chat feature is shaped around the websocket because that is the one
+extension point the frozen OS.js HTTP contract leaves open -- so none of this
+touches the route map.
 """
 
 import logging
 
-from . import bus as bus_module
-from . import config, timeline
+from messaging import Messaging, MessagingError, Timeline
+
+from . import config
 
 logger = logging.getLogger(__name__)
 
-# Push event types, as seen by the client.
-MESSAGE = "message"
-ROOM = "room"
-PRESENCE = "presence"
+APPLICATION = "Chat"
+APPLICATION_MESSAGE = "osjs/application:socket:message"
 
 
-def _cursor(value):
-    """A client-supplied cursor, as a non-negative integer.
+def build(bus, registry):
+    """Assemble the messaging layer against this server's transport."""
+    timeline = Timeline(
+        db_path=config.TIMELINE_DB,
+        run_dir=config.RUN_DIR,
+        history_limit=config.HISTORY_LIMIT,
+    ).init()
 
-    Anything unparseable means the caller holds nothing, which is what a cursor
-    of zero says. A bad value is not worth an error: the reply is a backfill
-    either way, and the client's own cursor decides what it keeps.
-    """
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-class ChatService:
-    """Server-side state for one worker process.
-
-    Owns nothing durable -- the timeline does -- beyond which topics this
-    worker's connections have made it care about.
-    """
-
-    def __init__(self, bus, registry):
-        self.bus = bus
-        self.registry = registry
-        self._subscriptions = {}
-
-    # -- delivery -------------------------------------------------------------
-
-    def deliver(self, topic, payload):
-        """Hand a bus message to the local websockets it is addressed to.
-
-        The publisher works out the recipients, so a worker never queries
-        membership to deliver: the audience travels with the message.
-        """
-        audience = payload.get("to")
-        event = payload.get("event") or {}
+    def deliver(audience, event):
+        """Fan one bus message out to the local sockets it is addressed to."""
 
         def wanted(connection):
             return audience is None or connection.user.get("username") in audience
 
-        self.registry.broadcast(
-            "osjs/application:socket:message",
-            [{"pid": None, "name": "Chat", "args": [event]}],
+        registry.broadcast(
+            APPLICATION_MESSAGE,
+            [{"pid": None, "name": APPLICATION, "args": [event]}],
             predicate=wanted,
         )
 
-    def _publish(self, topic, event, audience):
-        self.bus.publish(topic, {"to": sorted(audience), "event": event})
+    service = Messaging(timeline, bus, deliver=deliver, roster=lambda: set(config.USERS))
+    return ChatHandler(service)
 
-    def _watch(self, connection, room_id):
-        """Subscribe this worker to a room for as long as a client wants it.
 
-        Keyed by the websocket rather than the `Connection`, because the socket
-        route holds the former and the handler is given the latter; that is
-        what lets subscriptions be released on disconnect without `sockets`
-        growing a callback.
-        """
-        topic = bus_module.room_topic(room_id)
-        watched = self._subscriptions.setdefault(id(connection.ws), set())
-        if topic not in watched:
-            watched.add(topic)
-            self.bus.subscribe(topic)
+class ChatHandler:
+    """The websocket-facing half: operation names in, reply dictionaries out."""
 
+    def __init__(self, service):
+        self.service = service
+        self.timeline = service.timeline
+
+    # The socket route drives these, and neither it nor `sockets` needs to know
+    # what a subscription is. A connection's websocket identifies the
+    # subscriber, because that is the object the route holds.
     def connect(self, ws):
-        self._subscriptions.setdefault(id(ws), set()).add(bus_module.PRESENCE_TOPIC)
-        self.bus.subscribe(bus_module.PRESENCE_TOPIC)
+        self.service.connect(id(ws))
 
     def disconnect(self, ws):
-        for topic in self._subscriptions.pop(id(ws), ()):
-            self.bus.unsubscribe(topic)
-        # Last use of the bus from this thread: the unsubscribes above went out
-        # through its PUSH sockets, so they are only free to close now.
-        self.bus.release_thread()
+        self.service.disconnect(id(ws))
 
     def announce_presence(self, username, online):
-        self._publish(
-            bus_module.PRESENCE_TOPIC,
-            {"type": PRESENCE, "username": username, "online": online},
-            set(config.USERS),
+        self.service.announce_presence(username, online)
+
+    def ensure_system_stream(self):
+        """The one room nobody creates: machine events, everyone a member."""
+        return self.service.ensure_stream(
+            config.SYSTEM_STREAM, "System", sorted(config.USERS)
         )
 
-    # -- operations -----------------------------------------------------------
+    def publish_system_event(self, text):
+        """Announce a server-side event on the system stream.
+
+        The machine half of the design: a stream produced by the server rather
+        than typed by anyone, arriving in the same window type as a chat. A
+        failure to publish is swallowed -- a stream must never be able to fail a
+        request that has already been carried out.
+        """
+        self.service.post_event_quietly(config.SYSTEM_STREAM, text, set(config.USERS))
 
     def handle(self, connection, respond, args):
+        """Route one `osjs/application:socket:message` frame."""
         request = args[0] if args and isinstance(args[0], dict) else {}
         operation = request.get("op")
         username = connection.user.get("username")
+        subscriber = id(connection.ws)
 
-        handlers = {
-            "sync": self._sync,
-            "history": self._history,
-            "send": self._send,
-            "open": self._open,
-            "invite": self._invite,
-            "leave": self._leave,
-            "merge": self._merge,
+        operations = {
+            "sync": lambda: self.service.sync(username, subscriber),
+            "history": lambda: self.service.history(
+                username, request.get("room"), request.get("since")
+            ),
+            "send": lambda: self.service.send(
+                username, request.get("room"), request.get("body")
+            ),
+            "open": lambda: self.service.open_room(
+                username, request.get("members"), request.get("title"), subscriber
+            ),
+            "invite": lambda: self.service.invite(
+                username, request.get("room"), request.get("username")
+            ),
+            "leave": lambda: self.service.leave(username, request.get("room")),
+            "merge": lambda: self.service.merge(
+                username, request.get("room"), request.get("into")
+            ),
         }
-        handler = handlers.get(operation)
-        if handler is None:
+
+        call = operations.get(operation)
+        if call is None:
             respond({"error": f"No such chat operation: {operation}"})
             return
 
         try:
-            respond(handler(connection, username, request))
-        except PermissionError as error:
+            respond(call())
+        except MessagingError as error:
             respond({"error": str(error)})
-
-    def _require_member(self, room_id, username):
-        # Room ids arrive from the client and reach SQLite as a bound parameter,
-        # which rejects anything but a scalar. An id of the wrong type is not a
-        # room that exists, so it gets the answer a missing one gets.
-        if not isinstance(room_id, str):
-            raise PermissionError(f"No such room: {room_id!r}")
-        room = timeline.room(room_id)
-        if room is None:
-            raise PermissionError(f"No such room: {room_id}")
-        if username not in room["members"]:
-            raise PermissionError("Not a member of that room")
-        return room
-
-    def _sync(self, connection, username, request):
-        """Everything a freshly opened desktop needs, and the subscriptions."""
-        rooms = timeline.rooms_for(username)
-        for room in rooms:
-            self._watch(connection, room["id"])
-
-        present = set(timeline.online())
-        return {
-            "me": username,
-            "users": [
-                {"username": name, "online": name in present} for name in sorted(config.USERS)
-            ],
-            "rooms": rooms,
-        }
-
-    def _history(self, connection, username, request):
-        room_id = request.get("room")
-        room = self._require_member(room_id, username)
-        since = _cursor(request.get("since"))
-        # `lastSeq` is what makes a truncated reply detectable: the cap is on the
-        # tail, so a client further behind than the limit gets the newest slice
-        # and would otherwise have no way to know it skipped the rest.
-        return {
-            "room": room_id,
-            "since": since,
-            "lastSeq": room["lastSeq"],
-            "messages": timeline.history(room_id, since),
-        }
-
-    def _send(self, connection, username, request):
-        room_id = request.get("room")
-        body = str(request.get("body") or "").strip()
-        room = self._require_member(room_id, username)
-        if not body:
-            return {"error": "Empty message"}
-
-        message = timeline.append(room_id, username, body)
-        self._publish(
-            bus_module.room_topic(room_id), {"type": MESSAGE, **message}, room["members"]
-        )
-        return {"ok": True, "seq": message["seq"]}
-
-    def _open(self, connection, username, request):
-        """Create a room from a set of people. No name required, no ceremony."""
-        members = {str(name) for name in request.get("members") or []} & set(config.USERS)
-        members.add(username)
-        title = str(request.get("title") or "").strip() or ", ".join(sorted(members))
-
-        room = timeline.create_room(title, sorted(members))
-        self._watch(connection, room["id"])
-        self._announce_room(room)
-        return room
-
-    def _invite(self, connection, username, request):
-        """Drag a person onto a window: the conversation simply grows."""
-        room_id = request.get("room")
-        invited = str(request.get("username") or "")
-        room = self._require_member(room_id, username)
-        if invited not in config.USERS:
-            return {"error": f"No such user: {invited}"}
-
-        added = timeline.add_members(room_id, [invited])
-        if not added:
-            return {"ok": True, "room": room}
-
-        self.post_event(room_id, f"{username} added {invited}", set(room["members"]) | {invited})
-        updated = timeline.room(room_id)
-        self._announce_room(updated)
-        return {"ok": True, "room": updated}
-
-    def _leave(self, connection, username, request):
-        room_id = request.get("room")
-        room = self._require_member(room_id, username)
-        timeline.remove_member(room_id, username)
-        self.post_event(room_id, f"{username} left", set(room["members"]))
-        self._announce_room(timeline.room(room_id))
-        return {"ok": True}
-
-    def _merge(self, connection, username, request):
-        """Drop one window onto another: the two memberships become one.
-
-        History is not rewritten. Sequence numbers are per room and a client
-        holds a cursor into each, so renumbering one room's messages into
-        another would invalidate every cursor pointing at either. The rooms
-        keep their own timelines and each gets a marker saying what happened.
-        """
-        source_id = request.get("room")
-        target_id = request.get("into")
-        source = self._require_member(source_id, username)
-        target = self._require_member(target_id, username)
-
-        added = timeline.add_members(target_id, source["members"])
-        merged = timeline.room(target_id)
-
-        self.post_event(
-            target_id,
-            f"{username} merged {source['title']} in" + (f", adding {', '.join(added)}" if added else ""),
-            set(merged["members"]),
-        )
-        self.post_event(source_id, f"{username} merged this into {target['title']}", set(source["members"]))
-        self._announce_room(merged)
-        return {"ok": True, "room": merged}
-
-    # -- publishing helpers ---------------------------------------------------
-
-    def post_event(self, room_id, text, audience):
-        message = timeline.append(room_id, "system", text, kind=timeline.EVENT)
-        self._publish(bus_module.room_topic(room_id), {"type": MESSAGE, **message}, audience)
-        return message
-
-    def _announce_room(self, room):
-        """Tell members a room's shape changed, on the presence topic.
-
-        Presence rather than the room topic: someone just added has not
-        subscribed to it yet, and this is the message that tells them to.
-        """
-        if room is not None:
-            self._publish(bus_module.PRESENCE_TOPIC, {"type": ROOM, "room": room}, room["members"])
-
-
-def ensure_system_stream():
-    """The one room nobody creates: machine events, everyone a member."""
-    return timeline.create_room(
-        "System", sorted(config.USERS), kind=timeline.STREAM, room_id=config.SYSTEM_STREAM
-    )
-
-
-def publish_system_event(service, text):
-    """Append to the system stream and push it.
-
-    This is the machine half of the design: a stream produced by the server
-    rather than typed by anyone, arriving in the same window type as a chat.
-    """
-    try:
-        service.post_event(config.SYSTEM_STREAM, text, set(config.USERS))
-    except Exception:  # pragma: no cover - a stream must never break a request
-        logger.debug("Could not publish a system event", exc_info=True)

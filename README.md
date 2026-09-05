@@ -22,16 +22,20 @@ make dev      # Vite with hot reload, proxying the API to a running `make serve`
 
 `serve`, `dev` and `test` install what they need first. That needs [uv](https://docs.astral.sh/uv/) for the Python venv and npm for the client; where the node install ships without npm, the Makefile falls back to corepack's.
 
+Python dependencies live in `pyproject.toml`: the three the server runs on, and a `dev` dependency group for the test tooling. A deployment installs `uv pip install -r pyproject.toml` and gets no test tooling; `make test` adds `--group dev`. Node needs 20.19+, 22.12+ or 24+ -- the floor is Vite's and Vitest's, and the versions between them that neither accepts are 21, 23, and 22.0 through 22.11.
+
 ## Layout
 
 | Path | Contents |
 |-|-|
 | `client/` | The minos front end. TypeScript, Vite, no UI framework. |
-| `server/` | Flask app, VFS, websocket, message bus, timeline, config. |
-| `tests/` | pytest suite against the Flask test client. |
+| `server/` | Flask app, VFS, websocket, config, and the adapter binding the two below. |
+| `messaging/` | Conversations: timeline, ZeroMQ bus, operations. Standalone. |
+| `tests/` | pytest. Most of it drives the Flask test client; the messaging tests need no server. |
 | `dist/` | Build output. Generated. |
 | `vfs/` | User home directories. Generated. |
-| `.run/` | Timeline database and the bus sockets. Generated. |
+| `.run/` | Timeline database, bus sockets, and the liveness locks. Generated. |
+| `pyproject.toml` | Python dependencies and pytest configuration. |
 
 ## Front end
 
@@ -44,11 +48,13 @@ make dev      # Vite with hot reload, proxying the API to a running `make serve`
 | `client/src/ui/` | Panel, menu, dialogs, login. |
 | `client/src/apps/` | File manager, file viewer, chat and streams. |
 
-Two things worth knowing:
+Three things worth knowing:
 
 - `core/api.ts` is the only module that knows the wire format. The tests in `client/tests/api.test.ts` pin every URL and body shape, so a drift from the frozen server contract fails there rather than in the browser.
 
 - `Session.patchDesktop` merges into a `minos/desktop` key and writes the whole settings object back rather than overwriting it. Homes created under the old client still carry `osjs/*` keys, and a blind overwrite would drop them.
+
+- `core/socket.ts` backs off exponentially to a minute between reconnects, and stops entirely when the server closes with 1008. That code means the session is gone, and no number of retries produces a new one -- the page reaches the login screen on its own once something touches the API.
 
 `WindowManager` takes its workspace rect as an injected function rather than measuring the DOM, which is what makes the geometry testable without layout.
 
@@ -68,6 +74,14 @@ The client talks to these routes. Shapes still match `@osjs/server`: the contrac
 | `WS /` | Core websocket. Shares the path with the index route. |
 
 Paths are `<mountpoint>:/<path>`. Two mountpoints are configured: `osjs:/` maps to `dist/` read-only, `home:/` to `vfs/<username>/`. Every resolved path is checked against its mountpoint root, so traversal and symlinks cannot escape it.
+
+Three things about the responses:
+
+- Every one carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and a `default-src 'self'` CSP with no `unsafe-inline`. The built client has no inline script or style, so nothing needs relaxing for it; `connect-src` names the request's own host, because the websocket is `ws://` while the page is `http://`.
+
+- `readfile` reports the file's real mime, but serves anything outside a small inline-safe set as an attachment. Inline-safe is images and `text/plain`, with `image/svg+xml` excluded by name -- it is an image that carries script. A document rendered inline from this origin could script it and reach the whole `/vfs` API with the viewer's cookie. Nothing in the UI depends on inline: the viewer reads text through `fetch` and images through `<img>`, and a disposition affects neither.
+
+- `POST /settings` requires a JSON object and answers 400 for anything else. The file is a flat map of namespaces that `Session.patchDesktop` merges into so one client cannot drop another's keys; a payload of another shape would destroy them.
 
 ## WebSocket
 
@@ -114,22 +128,47 @@ Machine streams are the same object with a producer instead of a person. The `sy
 ```
 send ─┬─> timeline.append ....... assigns the room's next sequence (SQLite)
       │
-      └─> bus.publish ──> XSUB ─ zmq.proxy ─ XPUB ──> relay ──> Registry.broadcast ──> websockets
-                                     │                  │
-                            one owning process    one per worker
+      └─> bus.publish ──> XSUB ─ zmq.proxy ─ XPUB ──> relay ──> deliver ──> websockets
+                                     │                  │          │
+                            one owning process    one per worker   host callback;
+                                                                   here Registry.broadcast
 ```
 
 | Module | Responsibility |
 |-|-|
-| `server/timeline.py` | The source of truth. Rooms, members, messages, presence, in SQLite. |
-| `server/bus.py` | The ZeroMQ leg: an XSUB/XPUB forwarder, and a per-process publisher and relay. |
-| `server/chat.py` | The application handler. `sync`, `history`, `send`, `open`, `invite`, `leave`, `merge`. |
+| `messaging/timeline.py` | The source of truth. Rooms, members, messages, presence, in SQLite. |
+| `messaging/bus.py` | The ZeroMQ leg: an XSUB/XPUB forwarder, and a per-process publisher and relay. |
+| `messaging/service.py` | The operations. `sync`, `history`, `send`, `open_room`, `invite`, `leave`, `merge`. |
+| `server/chat.py` | The adapter: operation names in, OS.js frames out. |
 | `client/src/core/chat.ts` | The protocol client, including gap repair. |
 | `client/src/apps/Chat.ts` | The Dock, the room window, and the drag targets. |
 
-The handler never touches the connection registry. It appends to the timeline, publishes, and returns; the relay in each worker decides who is locally connected and delivers. That is what makes a second worker work at all, and it is why `register_application_handler` did not need a registry argument.
+`messaging/` does not import `server/`, Flask, or anything about who has an
+account here. Deliveries leave through a `deliver(audience, event)` callback the
+host supplies, the roster of who exists is a `roster()` the host supplies, and a
+refusal is a `MessagingError` the host is expected to catch. `tests/test_messaging_independence.py`
+holds that line: it parses every module for a forbidden import, imports the
+package in a subprocess to prove the server never loads with it, and drives a
+whole conversation with delivery going to a list.
 
-The first process to start claims the forwarder by taking an exclusive `flock` on `.run/broker.lock` and runs `zmq.proxy` in a thread; the rest connect to it. A lock rather than a bind attempt, so a `kill -9` cannot lock everyone out behind a stale `ipc://` file. `python -m server.bus` runs it standalone if you would rather it not live inside a worker.
+```python
+from messaging import Broker, Bus, Messaging, Timeline
+
+timeline = Timeline(db_path="var/timeline.db").init()
+Broker(xsub, xpub, run_dir="var").start()   # first process wins; the rest connect
+bus = Bus(xsub, xpub)
+
+service = Messaging(
+    timeline, bus,
+    deliver=lambda audience, event: ...,     # hand to your own connections
+    roster=lambda: {"alice", "bob"},         # who exists, your business
+)
+bus.start(service.on_bus_message)
+```
+
+Nothing in `messaging/` touches the connection registry. An operation appends to the timeline, publishes, and returns; the relay in each worker decides who is locally connected and hands them to `deliver`. That is what makes a second worker work at all, and it is why the layer never had to learn what a websocket is.
+
+The first process to start claims the forwarder by taking an exclusive `flock` on `.run/broker.lock` and runs `zmq.proxy` in a thread; the rest connect to it. A lock rather than a bind attempt, so a `kill -9` cannot lock everyone out behind a stale `ipc://` file. `python -m server.broker` runs it standalone if you would rather it not live inside a worker.
 
 ### Why sequence numbers
 
@@ -139,9 +178,23 @@ Every message therefore gets a per-room sequence number, assigned inside a `BEGI
 
 - at or below the cursor: seen already, drop it
 - exactly one above: the next message, render it
-- higher: something never arrived -- ask for everything past the cursor, and render that
+- higher: something never arrived -- ask for everything past the cursor
 
 One mechanism covers a dropped frame, a slow joiner and a reconnect, and it is why the client can treat the bus as unreliable without any of it showing. `client/tests/chat.test.ts` and `tests/test_bus.py` are mostly about these edges: a burst must start one backfill rather than one per message, and a subscription to `room.1` must not deliver `room.11`.
+
+A backfill is capped at the tail (`HISTORY_LIMIT`, 200 messages) and that cap is
+not a window to page through -- asking again from the same cursor returns the
+same slice. So a client further behind than the limit gets the newest slice and
+nothing before it, and the reply starts more than one past its cursor. That is a
+gap which will never be filled, and closing it silently would defeat the whole
+mechanism, so the client marks it in the log instead:
+
+```
+896 earlier message(s) not shown
+```
+
+The reply carries the room's `lastSeq` alongside its messages, which is what
+makes the shortfall detectable rather than invisible.
 
 ## Scope
 
