@@ -21,8 +21,14 @@ Inside the client, `/help` lists the commands. `/open alice` raises a room, `/me
 
 ```
 make test     # typecheck, vitest, pytest
+make conformance   # the wire contract alone, against any server
 make dev      # Vite with hot reload, for the retired web client
 ```
+
+`make conformance` runs `tests/conformance/`, which talks to a server over HTTP
+and a websocket and imports none of its code. `MINOS_CONFORMANCE_CMD` points it
+at a different implementation and `MINOS_CONFORMANCE_URL` at one already
+running. The contract it checks is [docs/wire-contract.md](docs/wire-contract.md).
 
 `make dev` opens a browser on http://localhost:5173/. `BROWSER=none make dev` starts the server without one. It builds `client/`, which no longer speaks the server's protocol -- see [TODO.md](TODO.md).
 
@@ -35,11 +41,13 @@ Python dependencies live in `pyproject.toml`: the four the server and terminal c
 | Path | Contents |
 |-|-|
 | `chat-concepts.md` | The model: what a room, group and channel are. Front-end independent. |
+| `docs/` | The wire contract, and development notes under `docs/dev/`. |
 | `tui/` | The terminal client. Python, curses, no UI framework. |
 | `client/` | The retired web desktop. Speaks the old protocol -- see [TODO.md](TODO.md). |
 | `server/` | Flask app, VFS, websocket, config, and the adapter binding the two below. |
 | `messaging/` | Conversations: timeline, ZeroMQ bus, operations. Standalone. |
 | `tests/` | pytest. Most of it drives the Flask test client; the messaging tests need no server. |
+| `tests/conformance/` | The wire contract as a black-box suite. Imports no implementation. |
 | `dist/` | Build output. Generated, and optional. |
 | `vfs/` | User home directories. Generated. |
 | `.run/` | Timeline database, bus sockets, and the liveness locks. Generated. |

@@ -21,7 +21,8 @@ PORT = int(os.environ.get("MINOS_PORT", "8000"))
 SESSION_LIFETIME = timedelta(hours=12)
 
 # Seconds of client silence before the server sends a keepalive frame.
-WS_PING_INTERVAL = 30
+# Overridable so a conformance run can observe one without waiting half a minute.
+WS_PING_INTERVAL = float(os.environ.get("MINOS_WS_PING", "30"))
 
 # Cookie signing key. Override in any deployment that is not a local demo.
 SECRET_KEY = os.environ.get("MINOS_SECRET", "minos-development-secret")
@@ -79,3 +80,8 @@ SYSTEM_CHANNEL = "system"
 # connection does not destroy a live conversation. Users are relying on this,
 # so it is documented rather than merely configured.
 ROOM_GRACE = float(os.environ.get("MINOS_ROOM_GRACE", "120"))
+
+# How often the sweep looks for rooms whose grace has run out, and therefore
+# the resolution of the promise above: a room goes between ROOM_GRACE and
+# ROOM_GRACE + ROOM_SWEEP seconds after emptying.
+ROOM_SWEEP = float(os.environ.get("MINOS_ROOM_SWEEP", "15"))

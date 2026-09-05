@@ -5,7 +5,7 @@ PY := $(VENV)/bin/python
 # provides a working one, so fall back to it when npm is not on PATH.
 NPM := $(shell command -v npm >/dev/null 2>&1 && echo npm || echo 'corepack npm@11')
 
-.PHONY: install client serve dev tui test clean
+.PHONY: install client serve dev tui test conformance clean
 
 install: $(VENV)/bin/pytest client/node_modules
 
@@ -13,7 +13,7 @@ $(VENV)/bin/pytest: pyproject.toml
 	@command -v uv >/dev/null 2>&1 || { \
 	  echo "uv is required: https://docs.astral.sh/uv/getting-started/installation/"; \
 	  exit 1; }
-	uv venv $(VENV)
+	uv venv --allow-existing $(VENV)
 	uv pip install --python $(PY) -r pyproject.toml --group dev
 	@touch $@
 
@@ -42,6 +42,12 @@ dev: client/node_modules
 test: install
 	cd client && $(NPM) run typecheck && $(NPM) test
 	$(VENV)/bin/pytest -q
+
+## The wire contract alone, against any implementation of it.
+## MINOS_CONFORMANCE_CMD launches a different server; MINOS_CONFORMANCE_URL
+## points at one that is already running. See docs/dev/conformance-plan.md.
+conformance: install
+	$(VENV)/bin/pytest tests/conformance -q
 
 clean:
 	rm -rf $(VENV) client/node_modules dist .run

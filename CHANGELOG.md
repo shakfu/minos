@@ -32,6 +32,19 @@ the server keeps the OS.js wire format without carrying any OS.js code.
 
 ### Added
 
+- `docs/wire-contract.md`, and `tests/conformance/` checking it. The suite
+  drives a server over HTTP and a websocket and imports nothing from `server/`,
+  `messaging/` or `tui/`, so the same 146 tests can be pointed at a
+  reimplementation: `MINOS_CONFORMANCE_CMD` launches one,
+  `MINOS_CONFORMANCE_URL` addresses one already running, and `make conformance`
+  runs them. The rest of `tests/` cannot do this -- it calls
+  `app.test_client()` or imports `messaging` -- so nothing outside Python could
+  previously be held to the contract at all. `docs/dev/conformance-plan.md`
+  records why the suite is shaped as it is.
+- `MINOS_WS_PING` and `MINOS_ROOM_SWEEP`, overriding the keepalive interval and
+  the transient-room sweep. Both were constants, and both are timings the
+  conformance suite has to wait out: a run that observed a keepalive and an
+  expiring room at the defaults would take three minutes.
 - `make dev` opens a browser at the Vite URL, through Vite's own `--open`.
   `BROWSER=none make dev` starts the server without one. `npm run dev` inside
   `client/` is unchanged and still opens nothing.
@@ -41,6 +54,10 @@ the server keeps the OS.js wire format without carrying any OS.js code.
 - `make install` builds the Python venv with [uv](https://docs.astral.sh/uv/)
   rather than `python3 -m venv` plus pip. The stdlib path fails outright on
   distributions that ship Python without `ensurepip`.
+- That `uv venv` now passes `--allow-existing`. The rule fires whenever
+  `pyproject.toml` is newer than `.venv/bin/pytest`, and `uv venv` refuses a
+  directory that already holds a venv -- so editing dependencies made every
+  subsequent `make test` fail until `.venv` was deleted by hand.
 - The Makefile falls back to corepack's npm where the node install has none,
   so `make dev` and `make client` work on a Debian `nodejs` package.
 - `client/vite.config.ts` sets `emptyOutDir: true`. It was off only because the

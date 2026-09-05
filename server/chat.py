@@ -35,11 +35,10 @@ logger = logging.getLogger(__name__)
 APPLICATION = "Chat"
 APPLICATION_MESSAGE = "osjs/application:socket:message"
 
-# How often to look for transient rooms whose grace period has run out. The
-# deletion is a promise to the people who spoke in one, so the check has to run
-# whether or not anybody is connected -- which is why it is a thread here rather
-# than something a request happens to trigger.
-SWEEP_INTERVAL = 15.0
+# The deletion of a transient room is a promise to the people who spoke in one,
+# so the check has to run whether or not anybody is connected -- which is why it
+# is a thread here rather than something a request happens to trigger.
+SWEEP_INTERVAL = config.ROOM_SWEEP
 
 
 def is_admin(user):

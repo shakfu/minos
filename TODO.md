@@ -1,7 +1,7 @@
 # TODO
 
 Work that is known and not done. Questions about the *model* rather than the
-code live in [chat-concepts.md](chat-concepts.md) -- five open in the core,
+code live in [chat-concepts.md](chat-concepts.md) -- six open in the core,
 eight more in the sections deferred there -- and are not duplicated here.
 
 ## Parked
@@ -110,12 +110,30 @@ size of a room rather than with the number of messages in it. Anything else of
 that shape should be found and fixed before a rewrite is argued for, because
 each one makes the argument weaker.
 
-**Why not yet.** The model settled recently and the core has been implemented
-for less time still. A transport rewrite does not advance it, and the tests that
-currently encode its semantics exist only in Python. The frozen wire contract is
-what makes the rewrite safe when it comes: two clients speak it, and `tui/` makes
-no assumption about what language answers, so both become conformance tests for
-whatever replaces the server.
+**What is now ready.** The contract is written down in
+[docs/wire-contract.md](docs/wire-contract.md) and checked by
+`tests/conformance/`, which drives a server over HTTP and a websocket and
+imports nothing from `server/`, `messaging/` or `tui/`. `make conformance`
+points it at whatever implements it:
+
+    MINOS_CONFORMANCE_CMD="./minosd" make conformance
+
+That is what this section used to claim the two clients were for. They are not:
+`client/` speaks the retired protocol, so the contract had one speaker, and a
+rewrite checked by "the terminal client still looks right" would have been one
+Python program agreeing with another.
+
+Three configuration knobs exist because the suite needs them, and a
+reimplementation must honour them: `MINOS_PORT` to be startable at all,
+`MINOS_ROOM_GRACE` and `MINOS_ROOM_SWEEP` so a transient room can be watched
+expiring in seconds rather than minutes, and `MINOS_WS_PING` for the keepalive.
+
+**Why still not yet.** The model settled recently and the core has been
+implemented for less time still. Six questions in the core of
+[chat-concepts.md](chat-concepts.md) are open, and two decide the shape of what
+a rewrite would restructure: whether a participant may leave a room, and whether
+presence is global or per-room -- the second is what says when a transient room
+dies. Answer those, then port. The suite will say when the port is finished.
 
 ## Open
 
