@@ -235,3 +235,42 @@ def test_a_frame_finds_no_handler_registered_on_another_registry(sockets):
 
     assert sockets.dispatch(mine, connection, frame) is False
     assert reached == []
+
+
+def test_a_broadcast_encodes_the_frame_once(monkeypatch):
+    """Every recipient of a fan-out gets identical bytes.
+
+    Encoding inside `Connection.send` would repeat the same `json.dumps` for
+    each connection, which is the cost that grows with the size of a room
+    rather than with the number of messages in it.
+    """
+    from server import sockets
+
+    calls = []
+    original = sockets.encode
+
+    def counted(name, params=None):
+        calls.append(name)
+        return original(name, params)
+
+    monkeypatch.setattr(sockets, "encode", counted)
+
+    registry = sockets.Registry()
+    for _ in range(5):
+        registry.add(sockets.Connection(FakeWebsocket(), {"username": "demo"}))
+
+    assert registry.broadcast("osjs/core:ping", [{"n": 1}]) == 5
+    assert calls == ["osjs/core:ping"]
+
+
+def test_a_broadcast_reaching_nobody_encodes_nothing(monkeypatch):
+    from server import sockets
+
+    calls = []
+    monkeypatch.setattr(sockets, "encode", lambda *a, **k: calls.append(a) or "{}")
+
+    registry = sockets.Registry()
+    registry.add(sockets.Connection(FakeWebsocket(), {"username": "demo"}))
+
+    assert registry.broadcast("x", predicate=lambda c: False) == 0
+    assert calls == []

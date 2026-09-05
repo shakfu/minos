@@ -1,8 +1,9 @@
-"""WebSocket transport for the desktop client.
+"""WebSocket transport.
 
-The client opens one socket to `/` and multiplexes named messages over it as
+A client opens one socket to `/` and multiplexes named messages over it as
 JSON `{name, params}` frames. The server pushes a handshake and keepalive
-pings; the client sends application messages back.
+pings; the client sends application messages back. Nothing here assumes what
+the client is: the terminal client in `tui/` speaks exactly this.
 """
 
 import json
@@ -17,6 +18,15 @@ logger = logging.getLogger(__name__)
 APPLICATION_MESSAGE = "osjs/application:socket:message"
 
 
+def encode(name, params=None):
+    """One frame, as the wire carries it.
+
+    Separate from `Connection.send` so a fan-out can serialise once rather than
+    once per recipient: the frame is identical for everybody it reaches.
+    """
+    return json.dumps({"name": name, "params": params or []})
+
+
 class Connection:
     """One connected client. Sends are serialised so frames cannot interleave."""
 
@@ -26,7 +36,11 @@ class Connection:
         self._lock = threading.Lock()
 
     def send(self, name, params=None):
-        frame = json.dumps({"name": name, "params": params or []})
+        self.send_frame(encode(name, params))
+
+    def send_frame(self, frame):
+        """Write an already-encoded frame. The lock is what keeps two threads
+        from interleaving the halves of one message on a single socket."""
         with self._lock:
             self.ws.send(frame)
 
@@ -67,10 +81,18 @@ class Registry:
         with self._lock:
             targets = [c for c in self._connections if predicate is None or predicate(c)]
 
+        if not targets:
+            return 0
+
+        # Encoded once for the whole fan-out. Every recipient gets the same
+        # bytes, and a broadcast to a busy room would otherwise repeat the same
+        # `json.dumps` for each of them.
+        frame = encode(name, params)
+
         reached = 0
         for connection in targets:
             try:
-                connection.send(name, params)
+                connection.send_frame(frame)
                 reached += 1
             except Exception:
                 # The peer can drop between the snapshot and the send; its own

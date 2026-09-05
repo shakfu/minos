@@ -1,66 +1,74 @@
 # minos
 
-A web desktop: a Python backend, and a TypeScript front end built on it.
+A conversation server with a Python backend, a terminal client, and a frozen wire contract between them.
 
-It started as the [OS.js](https://www.os-js.org) v3 client against a Python server that reimplements the contract OS.js expects. That client has since been removed; `client/` is the replacement, written from scratch against the same backend. The server still speaks the OS.js wire format -- route shapes, `osjs/*` websocket message names, and the `osjs:` mountpoint are all kept as-is.
+It started as the [OS.js](https://www.os-js.org) v3 client against a Python server that reimplements the contract OS.js expects. That client has since been removed, and the web desktop that replaced it has been superseded in turn: `tui/` is the current front end, and the desktop metaphor it dropped took the old conversation model with it. The server still speaks the OS.js wire format -- route shapes, `osjs/*` websocket message names, and the `osjs:` mountpoint are all kept as-is, which is what lets a front end be replaced without touching the server.
+
+What a room, a group and a channel actually are is settled in [chat-concepts.md](chat-concepts.md), before and independently of any way of reaching them. Read that first if you are changing behaviour rather than code; the short version is that **a room is a place** -- it has its own identity, two rooms may hold the same people, and who may enter is a grant naming a user or a whole group.
 
 ## Run
 
 ```
-make client   # build the minos front end -> dist/index.html
 make serve    # Flask on http://127.0.0.1:8000
+make tui      # the terminal client, in another shell
 ```
 
-Then http://127.0.0.1:8000/, logging in as `demo` / `demo`. There are also `alice` and `bob`, with passwords to match; the chat and stream windows need two of them to show anything, so open a second browser profile and log in as another.
+Log in as `demo` / `demo`. There are also `alice` and `bob`, with passwords to match; a conversation needs two of them, so run `make tui` again in a third shell and log in as another. `demo` is the only administrator, which is what lets it found a permanent room or manage a group.
+
+`make serve` no longer needs a browser build. It warns and serves the API alone if `dist/` is empty, because the terminal client needs the routes and the websocket rather than a bundle.
+
+Inside the client, `/help` lists the commands. `/open alice` raises a room, `/meet alice` raises one that is discarded when everyone leaves, `/create Engineering` founds a permanent one, and `/invite @Team` admits a whole group.
 
 ```
 make test     # typecheck, vitest, pytest
-make dev      # Vite with hot reload, proxying the API to a running `make serve`
+make dev      # Vite with hot reload, for the retired web client
 ```
 
-`make dev` opens a browser on http://localhost:5173/. `BROWSER=none make dev` starts the server without one.
+`make dev` opens a browser on http://localhost:5173/. `BROWSER=none make dev` starts the server without one. It builds `client/`, which no longer speaks the server's protocol -- see [TODO.md](TODO.md).
 
 `serve`, `dev` and `test` install what they need first. That needs [uv](https://docs.astral.sh/uv/) for the Python venv and npm for the client; where the node install ships without npm, the Makefile falls back to corepack's.
 
-Python dependencies live in `pyproject.toml`: the three the server runs on, and a `dev` dependency group for the test tooling. A deployment installs `uv pip install -r pyproject.toml` and gets no test tooling; `make test` adds `--group dev`. Node needs 20.19+, 22.12+ or 24+ -- the floor is Vite's and Vitest's, and the versions between them that neither accepts are 21, 23, and 22.0 through 22.11.
+Python dependencies live in `pyproject.toml`: the four the server and terminal client run on, and a `dev` dependency group for the test tooling. A deployment installs `uv pip install -r pyproject.toml` and gets no test tooling; `make test` adds `--group dev`. Node needs 20.19+, 22.12+ or 24+ -- the floor is Vite's and Vitest's, and the versions between them that neither accepts are 21, 23, and 22.0 through 22.11.
 
 ## Layout
 
 | Path | Contents |
 |-|-|
-| `client/` | The minos front end. TypeScript, Vite, no UI framework. |
+| `chat-concepts.md` | The model: what a room, group and channel are. Front-end independent. |
+| `tui/` | The terminal client. Python, curses, no UI framework. |
+| `client/` | The retired web desktop. Speaks the old protocol -- see [TODO.md](TODO.md). |
 | `server/` | Flask app, VFS, websocket, config, and the adapter binding the two below. |
 | `messaging/` | Conversations: timeline, ZeroMQ bus, operations. Standalone. |
 | `tests/` | pytest. Most of it drives the Flask test client; the messaging tests need no server. |
-| `dist/` | Build output. Generated. |
+| `dist/` | Build output. Generated, and optional. |
 | `vfs/` | User home directories. Generated. |
 | `.run/` | Timeline database, bus sockets, and the liveness locks. Generated. |
+| `TODO.md` | Known work not done, including the parked Rust rewrite. |
 | `pyproject.toml` | Python dependencies and pytest configuration. |
 
 ## Front end
 
-`client/` is vanilla TypeScript. A window manager is imperative DOM work -- drag, resize, stacking, focus -- so there is no virtual DOM to fight; the whole toolchain is Vite and TypeScript.
+`tui/` is the terminal client, in Python with nothing under it but `curses`, `urllib` and the websocket client `flask-sock` already depends on. It needs no browser and no build.
 
 | Path | Contents |
 |-|-|
-| `client/src/core/` | API client, session, websocket, chat protocol, path helpers, event bus. |
-| `client/src/wm/` | Window and WindowManager. |
-| `client/src/ui/` | Panel, menu, dialogs, login. |
-| `client/src/apps/` | File manager, file viewer, chat and streams. |
+| `tui/transport.py` | The HTTP session that holds the cookie, and the socket that carries frames. |
+| `tui/protocol.py` | The protocol client: requests, pushes, cursors and gap repair. |
+| `tui/app.py` | The interface: sidebar, one conversation, composer, commands. |
 
 Three things worth knowing:
 
-- `core/api.ts` is the only module that knows the wire format. The tests in `client/tests/api.test.ts` pin every URL and body shape, so a drift from the frozen server contract fails there rather than in the browser.
+- **The room you have selected is the room you occupy.** A place is something you are *in*, so switching away leaves it and quitting leaves everything. For a transient room that is not decoration: its life is measured from the moment its last occupant goes.
 
-- `Session.patchDesktop` merges into a `minos/desktop` key and writes the whole settings object back rather than overwriting it. Homes created under the old client still carry `osjs/*` keys, and a blind overwrite would drop them.
+- **Everything the desktop expressed by dragging is a command.** Membership used to be edited by dropping one window onto another, which no keyboard could reach and no script could call. `/invite` says what it does, can be refused with a reason, and reads the same in a log. `@name` names a group, which the old interface could not express at all.
 
-- `core/socket.ts` backs off exponentially to a minute between reconnects, and stops entirely when the server closes with 1008. That code means the session is gone, and no number of retries produces a new one -- the page reaches the login screen on its own once something touches the API.
+- **Three threads, kept apart on purpose.** The socket reader never blocks, because repairing a gap means making a request and a request waits on the reader -- doing it there would deadlock the client against itself. Pushes go to a queue that a separate thread drains.
 
-`WindowManager` takes its workspace rect as an injected function rather than measuring the DOM, which is what makes the geometry testable without layout.
+`client/` is the retired web desktop: vanilla TypeScript, a window manager, and the argument that conversations belong in several windows at once. It speaks the old protocol and will not connect to this server. Its own tests still pass, because they drive a mocked socket -- see [TODO.md](TODO.md).
 
 ## API
 
-The client talks to these routes. Shapes still match `@osjs/server`: the contract is frozen, and `core/api.ts` is pinned to it by its tests.
+A client talks to these routes. Shapes still match `@osjs/server`: the contract is frozen, and `client/tests/api.test.ts` still pins every URL and body shape, which is the one part of the retired front end that is still earning its keep.
 
 | Route | Purpose |
 |-|-|
@@ -95,8 +103,6 @@ Server to client:
 
 - `osjs/application:socket:message` for chat traffic, both replies and unsolicited pushes. `Registry.broadcast` fans these out; a frame whose `pid` is null is a push rather than an answer.
 
-Hot reload during development is Vite's, through `make dev`.
-
 Client to server: only `osjs/application:socket:message` is accepted. Every other `osjs*` name is refused, so a page cannot forge core events. A frame carries `{pid, name, args}`, and `name` selects the handler:
 
 ```python
@@ -111,17 +117,25 @@ each other's.
 
 `respond` answers the one connection, quoting the `pid` back so the caller can match the reply to its request. `server/chat.py` is the one handler that ships; the section below is what it does.
 
-## Chat and streams
+## Rooms, groups and channels
 
-A window manager earns its keep when several things have to be visible at once. Chat is the case where that is obvious: a tab shows one conversation at a time and makes you remember the rest, while windows let you watch four and see which one moved.
+The model is specified in [chat-concepts.md](chat-concepts.md), which is worth reading before changing any of it. What follows is what the code does.
 
-So a room here is not a channel someone joined and named. It is **a set of people**, and the window is the view of that set:
+**A room is a place.** Its identity is its own, not the set of people in it: adding or removing someone leaves the same room, and two rooms may hold the same people and keep separate histories. That last part used to be impossible by definition -- a room *was* its membership, so the client had to search for an existing pair before opening one, and the project's distinctive idea lived in the view layer where a second front end could not reach it.
 
-- Open a person and you have a one-to-one.
-- Drag a second person onto the window and it is a group. Nothing was created, nothing was named -- the membership grew.
-- Drop one room window onto another and the two memberships merge into one conversation.
+Two independent facts describe every room, and nothing else about one varies:
 
-Machine streams are the same object with a producer instead of a person. The `system` stream carries what the server does -- every VFS write, mkdir and rename shows up there -- in a window that behaves like any other, minus the composer. Nothing in the client knows the difference; only `kind` differs.
+- **Authority** -- who founded it, and therefore who may invite. Permanent rooms are created and populated by administrators; they are institutional, so their membership is an administrative fact. Ad-hoc rooms are raised by anyone, and any participant may bring in another.
+- **Retention** -- whether it is kept. A persisted room lasts until deleted. A transient room is deleted a grace period after its last occupant leaves, and retains nothing: there is no conversion that rescues what was said, because a promise of discard that somebody can withdraw is not a promise.
+
+**Admission is by invitation, and an invitation names a user or a group.** There is no self-join and no directory. A grant to a group *tracks* that group: assigning somebody admits them everywhere it was invited, without a second invitation, and unassigning revokes the same. That is what groups are for, and it is why editing one is more consequential than it looks.
+
+Two distinctions do real work and are easy to lose:
+
+- **Access is not occupancy.** Who *may* be in a room and who *is* are different facts, and only the second can end -- people do not resign from a conversation, they stop being in it. A transient room's whole lifetime is measured by it.
+- **A name is not a description.** A permanent room's title is a name: institutional, chosen, and unique, because "post it in Engineering" only means something if that resolves to one room. An ad-hoc room's title renders who is in it, need not be unique, and is disambiguated by when the room began.
+
+**A channel is the same storage with a different door.** Subscribers choose to subscribe and may not write. The `system` channel carries what the server does -- every VFS write, mkdir and rename -- with the server as its only producer. Letting users submit for a moderator's approval is specified in `chat-concepts.md` and deliberately not built.
 
 ### How a message travels
 
@@ -136,12 +150,12 @@ send ─┬─> timeline.append ....... assigns the room's next sequence (SQLite
 
 | Module | Responsibility |
 |-|-|
-| `messaging/timeline.py` | The source of truth. Rooms, members, messages, presence, in SQLite. |
+| `messaging/timeline.py` | The source of truth. Groups, rooms, grants, messages, occupancy, read state, in SQLite. |
 | `messaging/bus.py` | The ZeroMQ leg: an XSUB/XPUB forwarder, and a per-process publisher and relay. |
-| `messaging/service.py` | The operations. `sync`, `history`, `send`, `open_room`, `invite`, `leave`, `merge`. |
-| `server/chat.py` | The adapter: operation names in, OS.js frames out. |
-| `client/src/core/chat.ts` | The protocol client, including gap repair. |
-| `client/src/apps/Chat.ts` | The Dock, the room window, and the drag targets. |
+| `messaging/service.py` | The operations. `sync`, `history`, `send`, `open_room`, `create_room`, `invite`, `leave`, `enter`, `exit`, `sweep`. |
+| `server/chat.py` | The adapter: operation names in, OS.js frames out. Owns who is an administrator, and the occupancy a connection holds. |
+| `tui/protocol.py` | The protocol client, including gap repair. |
+| `tui/app.py` | The sidebar, the conversation, and the commands that replaced the drag targets. |
 
 `messaging/` does not import `server/`, Flask, or anything about who has an
 account here. Deliveries leave through a `deliver(audience, event)` callback the
@@ -180,7 +194,11 @@ Every message therefore gets a per-room sequence number, assigned inside a `BEGI
 - exactly one above: the next message, render it
 - higher: something never arrived -- ask for everything past the cursor
 
-One mechanism covers a dropped frame, a slow joiner and a reconnect, and it is why the client can treat the bus as unreliable without any of it showing. `client/tests/chat.test.ts` and `tests/test_bus.py` are mostly about these edges: a burst must start one backfill rather than one per message, and a subscription to `room.1` must not deliver `room.11`.
+One mechanism covers a dropped frame, a slow joiner and a reconnect, and it is why the client can treat the bus as unreliable without any of it showing. `tests/test_bus.py` and `tests/test_tui.py` are mostly about these edges: a burst must start one backfill rather than one per message, and a subscription to `room.1` must not deliver `room.11`.
+
+The sequence a room issues is stored on the room (`rooms.high_seq`) rather than derived from the messages still present. Those agree today, because nothing removes a message without removing its room. They stop agreeing the moment retention does -- a room trimmed to empty would report zero and reissue numbers a client had already seen, and the client would judge them stale and drop them in silence. One column, and it is what lets the archival in `chat-concepts.md` be built later without breaking every client.
+
+The delivery cursor is not the read cursor. The first answers *what have I received* and lives in the client to repair gaps; the second answers *what has this person seen*, and the server keeps it because it is the same fact from every device. Conflating them marks a message read by arriving.
 
 A backfill is capped at the tail (`HISTORY_LIMIT`, 200 messages) and that cap is
 not a window to page through -- asking again from the same cursor returns the
@@ -204,12 +222,18 @@ This is a demo, not a deployment.
 
 - The Flask development server handles the websocket. It is threaded, which is enough for a demo; anything real wants gunicorn with a gevent worker.
 
-- VFS changes are announced onto the `system` stream, but only the ones a request made. Nothing watches the filesystem itself, and `osjs/vfs:watch:change` still has no consumer.
+- Administrators are a set of names in `server/config.py`, reaching the rest of the server on the session profile's `groups`. Same kind of placeholder as the credentials above.
 
-- Every account is a member of the `system` stream, so one user's file paths are visible to all of them -- `demo wrote home:/notes.txt` shows up in alice's window. That is deliberate here, because a stream nobody else can see demonstrates nothing, and filenames are often the sensitive part. Scope the audience to the acting user before this carries anyone's real files.
+- VFS changes are announced onto the `system` channel, but only the ones a request made. Nothing watches the filesystem itself, and `osjs/vfs:watch:change` still has no consumer.
+
+- Every account subscribes to the `system` channel, so one user's file paths are visible to all of them -- `demo wrote home:/notes.txt` shows up in alice's client. That is deliberate here, because a channel nobody else can see demonstrates nothing, and filenames are often the sensitive part. Scope the audience to the acting user before this carries anyone's real files.
+
+- The timeline database has no migrations. `Timeline.init` only creates what is missing, so a `.run/timeline.db` written before the model changed is neither upgraded nor rejected. Delete `.run/` when the schema moves.
 
 - Presence is a row per connection rather than a heartbeat. A worker killed outright leaves its rows behind until the next worker starts and reclaims them: each worker holds a `flock` on `.run/worker-<id>.lock` while it runs, so a lock that can be taken belongs to a worker that is gone. Between the kill and that restart the roster still shows its users as online.
 
 - The bus is not authenticated. Anything that can reach the `ipc://` sockets in `.run/` can publish to any room, so a multi-host deployment wants `tcp://` with CURVE rather than the defaults.
 
-- Apps are compiled into the one bundle and registered statically in `client/src/apps/index.ts`. Nothing is loaded at runtime.
+- Retention beyond the transient room is specified and not built: archival, the admin's read of it, and the submission workflow that would make a channel curated rather than merely broadcast. All three are in `chat-concepts.md` under *Later*, along with what the core does to avoid foreclosing them.
+
+- `client/`, the web desktop, speaks the retired protocol and will not connect. See [TODO.md](TODO.md).
