@@ -43,7 +43,7 @@ Python dependencies live in `pyproject.toml`: the four the server and terminal c
 | `dist/` | Build output. Generated, and optional. |
 | `vfs/` | User home directories. Generated. |
 | `.run/` | Timeline database, bus sockets, and the liveness locks. Generated. |
-| `TODO.md` | Known work not done, including the parked Rust rewrite. |
+| `TODO.md` | Known work not done, including the parked rewrite in a compiled language. |
 | `pyproject.toml` | Python dependencies and pytest configuration. |
 
 ## Front end

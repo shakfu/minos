@@ -6,35 +6,24 @@ eight more in the sections deferred there -- and are not duplicated here.
 
 ## Parked
 
-### Reimplement the server in Rust
+### Reimplement the server in a compiled language
 
-Worth doing eventually, and worth not doing yet.
+Worth doing eventually, and worth not doing yet. **Go is the recommendation**;
+the conditions under which Rust would be the better call are below.
 
 **It is not a performance argument, and it should not be mistaken for one.**
 `pyzmq` is a binding to libzmq, so the framing, the socket I/O, the internal
 queueing and the poller are already C, with the GIL released across those calls.
-zmq.rs is a from-scratch reimplementation whose pitch is the absence of a C
-dependency rather than throughput; against libzmq's fifteen years of tuning it
-is as likely to be slower. Whatever a rewrite gains comes from removing Python,
-never from removing libzmq -- which also means the choice between zmq.rs and
-`rust-zmq` is about dependencies and async ergonomics, and never about speed.
+A pure-language reimplementation of ZeroMQ -- `zmq.rs`, `go-zeromq/zmq4` -- is as
+likely to be slower than libzmq as faster. Whatever a rewrite gains comes from
+removing Python, never from removing libzmq.
 
-**The case for it.** The hard parts of this server are all concurrency, and they
-are enforced by prose rather than by anything that checks. `messaging/bus.py`
-spends a paragraph explaining that ZeroMQ contexts are thread-safe while sockets
-are not, so no socket may be touched by two threads -- publishers hand frames to
-a sender thread, subscription changes go to the relay, and each owns its sockets
-outright. That is `Send`/`Sync` written out longhand and policed by review. A
-compiler would police it instead. The same goes for `release_thread()`, which
-exists because a ZeroMQ socket holds a file descriptor that garbage collection
-will not reclaim, and flask-sock runs a thread per websocket.
-
-**Most of the bus would not survive the port, which is the point.** The message
-bus exists because of the GIL: the connection registry is a set in memory, which
-is the whole story until gunicorn runs several worker processes, and several
-processes exist because CPython cannot use several cores in one. Rust has no
-such constraint. One process with a thread pool serves every connection and the
-fan-out is an in-process broadcast, which deletes:
+**What it actually buys is architectural.** The message bus exists because of the
+GIL: the connection registry is a set in memory, which is the whole story until
+gunicorn runs several worker processes, and several processes exist because
+CPython cannot use several cores in one. A compiled runtime has no such
+constraint. One process with a goroutine or a task per connection serves
+everybody, and the fan-out is in-process, which deletes:
 
 - `messaging/bus.py` entirely -- `Broker`, the sender and relay threads, the
   thread-local PUSH sockets, `release_thread`
@@ -42,34 +31,76 @@ fan-out is an in-process broadcast, which deletes:
 - `WorkerLease`, `sweep_dead_workers`, and the `worker-*.lock` files
 - the `SETTLE` delay, and every `PROPAGATION` sleep in the tests
 
-That is an *architectural* tax rather than a throughput one: the broker, the
-liveness locks and the fd bookkeeping exist because CPython cannot use several
-cores in one process, not because ZeroMQ is slow. It is also the share of this
-codebase with the subtlest failure modes, which is the better reason to want it
-gone.
+That is the share of this codebase with the subtlest failure modes, which is the
+better reason to want it gone than any throughput number.
 
 **What survives is the sequence number.** It is not only a repair for what
-ZeroMQ drops: it covers a reconnect, and a client that was away for an hour, and
-a lagging receiver -- which a `tokio` broadcast channel drops exactly as PUB/SUB
-does. The delivery contract is transport-independent, which is why it is the
-part worth keeping.
+ZeroMQ drops: it covers a reconnect, a client that was away for an hour, and a
+lagging receiver -- which a Go channel or a `tokio` broadcast drops much as
+PUB/SUB does. The delivery contract is transport-independent, which is why it is
+the part worth keeping whatever replaces the rest.
 
-**On [zmq.rs](https://github.com/zeromq/zmq.rs) in particular**, if a bus is
-wanted at all. It covers what minos uses -- PUB/SUB with XPUB/XSUB, over
-`tcp://` and `ipc://`. Two gaps, both survivable: there is no `zmq_proxy`, so
-`Broker` becomes a hand-written forward loop of about fifteen lines; and there
-is no `inproc://`, which only matters because `bus.py` uses it for the queues
-that keep sockets off other threads, and those are a channel in Rust. The real
-caveat is its own README's: it does not implement all of ZeroMQ and is not
-offered as production-ready. Check recent activity on crates.io before depending
-on it. `rust-zmq` is the mature alternative, at the cost of the C dependency a
-rewrite is presumably escaping -- and, per the note above, at no cost in speed
-either way.
+#### Why Go
 
-**If it happens, the order matters.** Keep `deliver(audience, event)` as the
-seam and implement it in-process first; reach for a bus only when there is
-genuinely a second host. Adding ZeroMQ on day one would port the workaround
-along with the thing it works around.
+The workload is many long-lived websocket connections, small JSON frames fanned
+out to subsets, and SQLite writes with a serialised sequence assignment. That is
+I/O-bound, high-concurrency and low CPU per message -- close to what Go was
+designed for. The current thread-per-websocket structure becomes
+goroutine-per-connection at roughly 1:1, at a couple of KB each instead of an OS
+thread. Garbage collection is a non-issue at this shape: the payloads are small
+and short-lived, and a chat message does not care about a sub-millisecond pause.
+
+Rust's costs apply to all of that and its advantages to a narrow slice. Async
+Rust means choosing a runtime, `Send` bounds on futures, `Pin`, and function
+colouring -- real friction for a server whose job is thousands of mostly idle
+connections.
+
+**Note what happened to the strongest argument for Rust.** It was that
+`bus.py`'s "no socket is touched by two threads" is an invariant enforced by
+prose, and that `Send`/`Sync` would enforce it instead. But the same
+single-process reasoning that motivates the rewrite deletes `bus.py`. Rust's
+best card here is played against code that would not survive.
+
+**Rust becomes the better call if** connection counts grow large enough that
+per-connection memory matters; if anything CPU-heavy arrives -- end-to-end
+encryption, media relaying, CRDT merges; or if there are hard latency bounds.
+None of those are on the table while the server is what `chat-concepts.md`
+describes.
+
+#### On ZeroMQ, which neither language loses
+
+The options are the same shape in both: mature bindings to libzmq
+(`pebbe/zmq4`, `rust-zmq`), or a pure-language reimplementation
+([go-zeromq/zmq4](https://github.com/go-zeromq/zmq4),
+[zmq.rs](https://github.com/zeromq/zmq.rs)). Both reimplementations carry
+XPUB/XSUB and both are candid about being incomplete; the Go one is marked WIP
+and its maintainer has asked for a successor, so check the state of either
+before depending on it.
+
+One asymmetry cuts against Go: a cgo call occupies an OS thread the goroutine
+scheduler cannot preempt, so libzmq on a messaging hot path fights the model Go
+was chosen for. Rust has no green-thread scheduler to disrupt. If libzmq were
+central this would matter -- but it is not central, because the bus does not
+survive the rewrite at all.
+
+**When cross-host delivery is genuinely needed, the answer is probably NATS
+rather than ZeroMQ.** It solves this exact problem, it is written in Go so the
+client is first-class, and it improves on two things the current design works
+around:
+
+- Subject filtering is hierarchical rather than a byte prefix. `bus.py`
+  terminates topics with `|` precisely because a SUB filter is a prefix match
+  and `room.1` would otherwise swallow `room.11`. NATS subjects make those
+  distinct with no hack.
+- It authenticates. The README already admits the gap: anything that can reach
+  the `ipc://` sockets in `.run/` can publish to any room.
+
+The honest cost is an operational component: NATS is a server to run, where
+ZeroMQ's brokerless `ipc://` is lighter for single-host multi-process -- which is
+exactly the configuration that disappears.
+
+Either way, `deliver(audience, event)` keeps the choice contained to one
+callback, which is what makes this swappable rather than a second rewrite.
 
 **Cheaper wins come first.** Where Python actually costs something here is the
 work *around* the transport, and that is addressable without leaving it. The
@@ -80,11 +111,11 @@ that shape should be found and fixed before a rewrite is argued for, because
 each one makes the argument weaker.
 
 **Why not yet.** The model settled recently and the core has been implemented
-for less time still. A transport rewrite does not advance it, and the 150 tests
-that currently encode its semantics exist only in Python. The frozen wire
-contract is what makes the rewrite safe when it comes: two clients speak it, and
-`tui/` makes no assumption about what language answers, so both become
-conformance tests for whatever replaces the server.
+for less time still. A transport rewrite does not advance it, and the tests that
+currently encode its semantics exist only in Python. The frozen wire contract is
+what makes the rewrite safe when it comes: two clients speak it, and `tui/` makes
+no assumption about what language answers, so both become conformance tests for
+whatever replaces the server.
 
 ## Open
 
@@ -114,3 +145,4 @@ this is a demo and stops being fine the moment anything is worth keeping.
 session profile's `groups`. That is enough to demonstrate the authority split
 and is the same shape of placeholder as `config.USERS`; both want a real adapter
 before this server is exposed.
+
