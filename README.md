@@ -4,7 +4,7 @@ A conversation server in Go, a terminal client, and a frozen wire contract betwe
 
 There are two servers and that is deliberate. `go/` is the implementation. `server/` and `messaging/` are the specification it was written from -- executable, readable, and not meant to be deployed. Neither is authoritative on its own: [docs/wire-contract.md](docs/wire-contract.md) is, and `tests/conformance/` holds both to it.
 
-It started as the [OS.js](https://www.os-js.org) v3 client against a Python server that reimplements the contract OS.js expects. That client has since been removed, and the web desktop that replaced it has been superseded in turn: `tui/` is the current front end, and the desktop metaphor it dropped took the old conversation model with it. The server still speaks the OS.js wire format -- route shapes, `osjs/*` websocket message names, and the `osjs:` mountpoint are all kept as-is, which is what lets a front end be replaced without touching the server.
+It started as the [OS.js](https://www.os-js.org) v3 client against a Python server that reimplements the contract OS.js expects. Two front ends have been removed since: the OS.js client, and the web desktop written to replace it. `tui/` is the current one, and the desktop metaphor it dropped took the old conversation model with it. The server still speaks the OS.js wire format -- route shapes, `osjs/*` websocket message names, and the `osjs:` mountpoint are all kept as-is, which is what lets a front end be replaced without touching the server.
 
 What a room, a group and a channel actually are is settled in [chat-concepts.md](chat-concepts.md), before and independently of any way of reaching them. Read that first if you are changing behaviour rather than code; the short version is that **a room is a place** -- it has its own identity, two rooms may hold the same people, and who may enter is a grant naming a user or a whole group.
 
@@ -27,7 +27,6 @@ Inside the client, `/help` lists the commands. `/open alice` raises a room, `/me
 make test          # typecheck, vitest, pytest
 make conformance-go  # the wire contract, against the Go server
 make conformance     # the same suite, against the Python one
-make dev           # Vite with hot reload, for the retired web client
 ```
 
 `tests/conformance/` talks to a server over HTTP and a websocket and imports none
@@ -35,11 +34,9 @@ of its code, which is what lets one suite hold two implementations to one
 contract. `MINOS_CONFORMANCE_CMD` points it at any server and
 `MINOS_CONFORMANCE_URL` at one already running.
 
-`make dev` opens a browser on http://localhost:5173/. `BROWSER=none make dev` starts the server without one. It builds `client/`, which no longer speaks the server's protocol -- see [TODO.md](TODO.md).
+`serve`, `tui` and `test` install what they need first, which needs [uv](https://docs.astral.sh/uv/) for the Python venv. There is no JavaScript toolchain any more.
 
-`serve`, `dev` and `test` install what they need first. That needs [uv](https://docs.astral.sh/uv/) for the Python venv and npm for the client; where the node install ships without npm, the Makefile falls back to corepack's.
-
-Python dependencies live in `pyproject.toml`: the four the server and terminal client run on, and a `dev` dependency group for the test tooling. A deployment installs `uv pip install -r pyproject.toml` and gets no test tooling; `make test` adds `--group dev`. Node needs 20.19+, 22.12+ or 24+ -- the floor is Vite's and Vitest's, and the versions between them that neither accepts are 21, 23, and 22.0 through 22.11.
+Python dependencies live in `pyproject.toml`: the four the server and terminal client run on, and a `dev` dependency group for the test tooling. A deployment installs `uv pip install -r pyproject.toml` and gets no test tooling; `make test` adds `--group dev`.
 
 ## Layout
 
@@ -49,12 +46,11 @@ Python dependencies live in `pyproject.toml`: the four the server and terminal c
 | `docs/` | The wire contract, and development notes under `docs/dev/`. |
 | `go/` | The server. One process, a goroutine per connection, SQLite. |
 | `tui/` | The terminal client. Python, curses, no UI framework. |
-| `client/` | The retired web desktop. Speaks the old protocol -- see [TODO.md](TODO.md). |
 | `server/` | The specification: Flask app, VFS, websocket, config, and the adapter binding the two below. |
 | `messaging/` | The specification's conversation half: timeline, ZeroMQ bus, operations. |
 | `tests/` | pytest. Most of it drives the Flask test client; the messaging tests need no server. |
 | `tests/conformance/` | The wire contract as a black-box suite. Imports no implementation. |
-| `dist/` | Build output. Generated, and optional. |
+| `dist/` | What the `osjs:` mountpoint serves. Optional, and nothing in the tree builds it. |
 | `vfs/` | User home directories. Generated. |
 | `.run/` | Timeline database, bus sockets, and the liveness locks. Generated. |
 | `TODO.md` | Known work not done, including the parked rewrite in a compiled language. |
@@ -104,11 +100,9 @@ Three things worth knowing:
 
 - **Three threads, kept apart on purpose.** The socket reader never blocks, because repairing a gap means making a request and a request waits on the reader -- doing it there would deadlock the client against itself. Pushes go to a queue that a separate thread drains.
 
-`client/` is the retired web desktop: vanilla TypeScript, a window manager, and the argument that conversations belong in several windows at once. It speaks the old protocol and will not connect to this server. Its own tests still pass, because they drive a mocked socket -- see [TODO.md](TODO.md).
-
 ## API
 
-A client talks to these routes. Shapes still match `@osjs/server`: the contract is frozen, and `client/tests/api.test.ts` still pins every URL and body shape, which is the one part of the retired front end that is still earning its keep.
+A client talks to these routes. Shapes still match `@osjs/server`: the contract is frozen, and `tests/conformance/test_http.py` pins every URL, body shape and status against whichever server is running.
 
 | Route | Purpose |
 |-|-|
@@ -125,11 +119,11 @@ Paths are `<mountpoint>:/<path>`. Two mountpoints are configured: `osjs:/` maps 
 
 Three things about the responses:
 
-- Every one carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and a `default-src 'self'` CSP with no `unsafe-inline`. The built client has no inline script or style, so nothing needs relaxing for it; `connect-src` names the request's own host, because the websocket is `ws://` while the page is `http://`.
+- Every one carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and a `default-src 'self'` CSP with no `unsafe-inline`; `connect-src` names the request's own host, because the websocket is `ws://` while the page is `http://`.
 
 - `readfile` reports the file's real mime, but serves anything outside a small inline-safe set as an attachment. Inline-safe is images and `text/plain`, with `image/svg+xml` excluded by name -- it is an image that carries script. A document rendered inline from this origin could script it and reach the whole `/vfs` API with the viewer's cookie. Nothing in the UI depends on inline: the viewer reads text through `fetch` and images through `<img>`, and a disposition affects neither.
 
-- `POST /settings` requires a JSON object and answers 400 for anything else. The file is a flat map of namespaces that `Session.patchDesktop` merges into so one client cannot drop another's keys; a payload of another shape would destroy them.
+- `POST /settings` requires a JSON object and answers 400 for anything else. The file is a flat map of namespaces, replaced wholesale, so a payload of another shape would destroy them.
 
 ## WebSocket
 
@@ -226,7 +220,7 @@ The first process to start claims the forwarder by taking an exclusive `flock` o
 
 ### Why sequence numbers
 
-PUB/SUB drops rather than queues. A subscription that has not propagated yet, a high-water mark, a client offline for an hour -- all three lose messages, and none of them report it.
+PUB/SUB drops rather than queues. A high-water mark, a socket that has not finished connecting, a client offline for an hour -- all three lose messages, and none of them report it. (A subscription that has not propagated used to be a fourth; `messaging/bus.py` now subscribes the proxy to everything and filters where the message lands, so a subscription holds the moment it is asked for.)
 
 Every message therefore gets a per-room sequence number, assigned inside a `BEGIN IMMEDIATE` transaction so concurrent writers in different processes cannot collide. The client keeps a cursor per room and compares:
 
@@ -276,4 +270,3 @@ This is a demo, not a deployment.
 
 - Retention beyond the transient room is specified and not built: archival, the admin's read of it, and the submission workflow that would make a channel curated rather than merely broadcast. All three are in `chat-concepts.md` under *Later*, along with what the core does to avoid foreclosing them.
 
-- `client/`, the web desktop, speaks the retired protocol and will not connect. See [TODO.md](TODO.md).

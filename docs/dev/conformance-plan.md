@@ -12,9 +12,9 @@ over a socket. The rest call `app.test_client()` (`tests/conftest.py`), import
 be pointed at a binary written in another language.
 
 The claim in `TODO.md` that "two clients speak it, and both become conformance
-tests" was true when `client/` worked. It does not, so the contract has one
-speaker, and a Go server would be verified by whether the terminal client
-happened to look right.
+tests" was true while the web client worked. It stopped working and has since
+been removed, so the contract has one speaker, and a Go server would be verified
+by whether the terminal client happened to look right.
 
 ## Shape
 

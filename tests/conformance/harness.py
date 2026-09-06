@@ -8,9 +8,11 @@ a server that is already running, in which case nothing is launched at all.
 
 import os
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -56,10 +58,11 @@ def free_port():
 class Server:
     """One server process, and the base URL that reaches it."""
 
-    def __init__(self, base, process=None, log=None):
+    def __init__(self, base, process=None, log=None, run_dir=None):
         self.base = base
         self.process = process
         self.log = log
+        self.run_dir = run_dir
 
     def stop(self):
         if self.process is None:
@@ -70,6 +73,8 @@ class Server:
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.process.wait(timeout=SHUTDOWN_TIMEOUT)
+        if self.run_dir is not None:
+            shutil.rmtree(self.run_dir, ignore_errors=True)
 
     def output(self):
         """Whatever the server printed. Only read when something has failed."""
@@ -88,12 +93,18 @@ def launch(state_dir, **settings):
     state_dir = Path(state_dir)
     port = free_port()
 
+    # The run directory is not under `state_dir`: a server may put an `ipc://`
+    # endpoint in it, a Unix socket path may not exceed 103 bytes, and pytest's
+    # temporary directories are most of that before the server adds a name.
+    # It is removed by `Server.stop`.
+    run_dir = Path(tempfile.mkdtemp(prefix="minos-"))
+
     environment = dict(os.environ)
     environment.update(
         {
             "MINOS_HOST": "127.0.0.1",
             "MINOS_PORT": str(port),
-            "MINOS_RUN": str(state_dir / "run"),
+            "MINOS_RUN": str(run_dir),
             "MINOS_VFS": str(state_dir / "vfs"),
             "MINOS_DIST": str(state_dir / "dist"),
         }
@@ -112,7 +123,7 @@ def launch(state_dir, **settings):
         command(), cwd=ROOT, env=environment, stdout=handle, stderr=subprocess.STDOUT
     )
 
-    server = Server(f"http://127.0.0.1:{port}", process, log)
+    server = Server(f"http://127.0.0.1:{port}", process, log, run_dir)
     try:
         await_ready(server)
     except Exception:

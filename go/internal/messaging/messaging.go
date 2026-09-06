@@ -813,8 +813,18 @@ func (m *Messaging) PostEventQuietly(roomID, text string, audience []string) {
 	_, _ = m.PostEvent(roomID, text, audience)
 }
 
+// AnnouncePresence tells everyone else that someone arrived or left. Not the
+// subject: presence is a fact about a person rather than a connection, and a
+// client that just connected or is closing knows it already.
 func (m *Messaging) AnnouncePresence(username string, online bool) {
-	m.deliver(m.roster(), presenceEvent{Type: PresencePush, Username: username, Online: online})
+	roster := m.roster()
+	audience := make([]string, 0, len(roster))
+	for _, name := range roster {
+		if name != username {
+			audience = append(audience, name)
+		}
+	}
+	m.deliver(audience, presenceEvent{Type: PresencePush, Username: username, Online: online})
 }
 
 // announceRoom tells a room's audience that its shape changed.

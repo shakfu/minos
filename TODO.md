@@ -9,7 +9,7 @@ eight more in the sections deferred there -- and are not duplicated here.
 ### The server is reimplemented in Go
 
 `go/` is the server. `server/` and `messaging/` are the specification it was
-written from, and both pass `tests/conformance` -- 149 tests over HTTP and a
+written from, and both pass `tests/conformance` -- 150 tests over HTTP and a
 websocket, run by `make conformance-go` and `make conformance`. `tui/` drives
 either without knowing which.
 
@@ -55,19 +55,21 @@ Two faults the port found, neither of which the specification had:
 clarity beats throughput there, and any behaviour worth having is worth stating
 in `docs/wire-contract.md` before it is written in either language.
 
+### The web client is gone
+
+`client/` spoke the retired protocol -- rooms as sets of people, `merge`,
+membership edited by dragging -- and the server had stopped answering any of it.
+Removed rather than ported: `tui/` already reaches every operation, and porting
+would have meant a second front end to keep in step with each change to the
+model.
+
+Its 115 tests went with it, which is no loss of coverage: they drove a mocked
+socket, so they reported green on a front end that could not connect, and every
+route they pinned is pinned against a running server by
+`tests/conformance/test_http.py`. The JavaScript toolchain is gone with them --
+`make client`, `make dev`, and the npm and corepack fallback in the Makefile.
+
 ## Open
-
-### The web client is stale at runtime
-
-`client/` speaks the retired protocol: rooms as sets of people, `merge`,
-membership edited by dragging. The server no longer answers any of it, so the
-browser front end will not work against this server until it is either ported to
-the current model or removed.
-
-Its own tests still pass, which is the trap -- they drive a mocked socket, so
-`make test` reports green on a front end that cannot connect. Whoever picks this
-up should decide between porting and removing rather than leaving it in the
-tree looking maintained.
 
 ### Channels have no audience rule
 

@@ -14,13 +14,18 @@ exists. Whichever process starts first owns the proxy.
 
 Two properties of PUB/SUB shape everything above this file:
 
-- Filtering is a byte-prefix match, not a path match, so `room.1` would also
-  match `room.11`. Topics are terminated with `|` to make the prefix exact.
+- A subscription has to travel to every publisher before it matches anything,
+  and what is published in the meantime is dropped -- the slow joiner. So no
+  subscription travels: the proxy subscribes to everything once, each process
+  takes everything from it, and which topics a process wants is a dict it
+  tests locally. A subscription therefore holds the instant it is asked for,
+  which matters because opening a room and speaking in it are one round trip
+  apart. What this costs is every process reading every message.
 
-- Delivery is fire-and-forget. Messages published before a subscription has
-  propagated are dropped -- the slow joiner -- and so is anything past the high
-  water mark. Nothing here retries or acknowledges. Recovery is the sequence
-  number in `timeline`: a client that sees a gap asks for the difference.
+- Delivery is still fire-and-forget: anything past the high water mark is
+  dropped, and a PUB that has just connected sends nothing until its link is
+  up. Nothing here retries or acknowledges. Recovery is the sequence number in
+  `timeline`: a client that sees a gap asks for the difference.
 """
 
 import atexit
@@ -48,8 +53,9 @@ PRESENCE_TOPIC = b"presence|"
 def room_topic(room_id):
     """The topic a room's messages are published on.
 
-    Terminated, because a SUB filter is a prefix and an unterminated `room.1`
-    would swallow `room.11`.
+    Terminated, so that the name cannot be a prefix of another room's: `room.1`
+    would otherwise be one of `room.11`, which matters to anything matching
+    these by prefix rather than whole.
     """
     return f"room.{room_id}|".encode()
 
@@ -106,8 +112,27 @@ class Broker:
         self._context = zmq.Context()
         frontend = self._context.socket(zmq.XSUB)
         backend = self._context.socket(zmq.XPUB)
-        frontend.bind(self.xsub)
-        backend.bind(self.xpub)
+        try:
+            frontend.bind(self.xsub)
+            backend.bind(self.xpub)
+        except Exception:
+            # A bind fails for reasons the caller cannot always foresee: an
+            # `ipc://` path over the 103-byte `sockaddr_un` limit, a run
+            # directory that has been removed. Left open, the sockets keep the
+            # context from terminating and the process hangs at interpreter
+            # exit instead of reporting what went wrong.
+            frontend.close(0)
+            backend.close(0)
+            self.stop()
+            raise
+
+        # Subscribe the proxy to everything, so no publisher ever filters. A
+        # PUB sends only what a subscription it has already received matches,
+        # and subscriptions reach it from here -- so a subscriber joining after
+        # a publisher started would otherwise race every publisher's copy of
+        # its subscription, and lose whatever was sent in between. Which topics
+        # a process wants is decided in `Bus._relay` instead.
+        frontend.send(b"\x01")
 
         def run():
             try:
@@ -156,6 +181,13 @@ class Bus:
         self._on_message = None
         self._started = threading.Event()
 
+        # What this process wants delivered, counted per topic. Plain state
+        # under a lock rather than a socket option, because a subscription has
+        # to hold the moment it is asked for: the caller's next act is often to
+        # publish to the topic it just subscribed to.
+        self._topics = {}
+        self._topics_lock = threading.Lock()
+
     # -- lifecycle ------------------------------------------------------------
 
     def start(self, on_message):
@@ -194,10 +226,20 @@ class Bus:
         self._push(self._outbound).send_multipart([b"send", topic, encode(payload)])
 
     def subscribe(self, topic):
-        self._push(self._control).send_multipart([b"sub", topic])
+        """Deliver `topic` to this process, in force by the time this returns.
+
+        Counted rather than a set: two windows on the same room in one browser
+        must not have the first one closed cancel the other's delivery.
+        """
+        with self._topics_lock:
+            self._topics[topic] = self._topics.get(topic, 0) + 1
 
     def unsubscribe(self, topic):
-        self._push(self._control).send_multipart([b"unsub", topic])
+        with self._topics_lock:
+            if self._topics.get(topic):
+                self._topics[topic] -= 1
+                if not self._topics[topic]:
+                    del self._topics[topic]
 
     def _push(self, endpoint):
         """A PUSH socket private to the calling thread.
@@ -256,38 +298,30 @@ class Bus:
             inbox.close(0)
 
     def _relay(self, control):
-        """Own the SUB socket: its subscriptions and everything it receives.
+        """Own the SUB socket, and drop what this process did not ask for.
 
-        Subscriptions are counted rather than set, because two windows on the
-        same room in one browser must not have the first one closed cancel the
-        other's delivery.
+        The socket takes everything and the filter is `Bus._topics`, so that
+        subscribing is a local act with nothing to propagate. A SUB filter is
+        a byte prefix and would have to travel to the XPUB before it matched;
+        an exact test against a dict costs a comparison and holds at once.
         """
         subscriber = self._context.socket(zmq.SUB)
         subscriber.connect(self.xpub)
+        subscriber.setsockopt(zmq.SUBSCRIBE, b"")
 
         poller = zmq.Poller()
         poller.register(subscriber, zmq.POLLIN)
         poller.register(control, zmq.POLLIN)
 
-        counts = {}
         self._started.set()
         try:
             while True:
                 ready = dict(poller.poll())
 
                 if control in ready:
-                    action, topic = control.recv_multipart()
+                    action, _ = control.recv_multipart()
                     if action == b"stop":
                         return
-                    if action == b"sub":
-                        counts[topic] = counts.get(topic, 0) + 1
-                        if counts[topic] == 1:
-                            subscriber.setsockopt(zmq.SUBSCRIBE, topic)
-                    elif action == b"unsub" and counts.get(topic):
-                        counts[topic] -= 1
-                        if counts[topic] == 0:
-                            subscriber.setsockopt(zmq.UNSUBSCRIBE, topic)
-                            del counts[topic]
 
                 if subscriber in ready:
                     # The unpack is inside the guard with the decode: a frame of
@@ -300,6 +334,10 @@ class Bus:
                         payload = decode(raw)
                     except ValueError:
                         logger.warning("Discarding malformed bus frame", exc_info=True)
+                        continue
+                    with self._topics_lock:
+                        wanted = topic in self._topics
+                    if not wanted:
                         continue
                     if self._on_message is not None:
                         self._on_message(topic, payload)

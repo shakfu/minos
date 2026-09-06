@@ -139,10 +139,17 @@ class Messaging:
         self.bus.release_thread()
 
     def announce_presence(self, username, online):
+        """Tell everyone else that someone arrived or left.
+
+        Not the subject: presence is a fact about a person rather than a
+        connection, and a client that just connected or is closing knows it.
+        Sending it back would also make the frame's arrival a race against the
+        connection that provoked it.
+        """
         self._publish(
             PRESENCE_TOPIC,
             {"type": PRESENCE, "username": username, "online": online},
-            set(self._roster()),
+            set(self._roster()) - {username},
         )
 
     # -- access ---------------------------------------------------------------

@@ -586,9 +586,8 @@ per-user read cursors, and a stored per-room high-water mark.
 
 The retired model went with it. `merge` folded one room's membership into
 another's, which has no meaning when a room is a place -- two places do not
-become one. The web desktop that made membership an editable list went too;
-`client/` still speaks that protocol and no longer connects, which
-[TODO.md](TODO.md) covers.
+become one. The web desktop that made membership an editable list went too, and
+has since been removed from the tree.
 
 What the core *is* on the wire, as opposed to what it means, is written down in
 [docs/wire-contract.md](docs/wire-contract.md) and checked by

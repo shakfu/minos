@@ -145,6 +145,25 @@ def test_arriving_and_leaving_are_announced_as_presence(alice, server, session):
     assert departure["online"] is False
 
 
+def test_presence_does_not_come_back_to_its_subject(alice, server, session):
+    """It is a fact about a person, and this one already knows it.
+
+    Proved by bob's arrival, which must reach alice: a frame about alice
+    herself would have been queued ahead of it.
+    """
+    http = session("bob")
+    socket = Socket(server.base, http.cookie_header()).connect()
+    socket.handshake()
+    try:
+        _, before = alice.collect_push(
+            lambda e: e.get("type") == "presence" and e.get("username") == "bob"
+        )
+    finally:
+        socket.close()
+
+    assert not any(event.get("username") == "alice" for event in before)
+
+
 def test_a_dropped_connection_releases_the_places_it_held(alice, server, session, unique):
     """Or a transient room nobody is in would stay alive forever."""
     room = alice.call("open", invite=["bob"], title=unique("Held"))

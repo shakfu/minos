@@ -1,13 +1,9 @@
 VENV := .venv
 PY := $(VENV)/bin/python
 
-# Debian's nodejs package ships without npm; corepack (bundled with node)
-# provides a working one, so fall back to it when npm is not on PATH.
-NPM := $(shell command -v npm >/dev/null 2>&1 && echo npm || echo 'corepack npm@11')
+.PHONY: install go serve serve-go tui test conformance conformance-go clean
 
-.PHONY: install client go serve serve-go dev tui test conformance conformance-go clean
-
-install: $(VENV)/bin/pytest client/node_modules
+install: $(VENV)/bin/pytest
 
 $(VENV)/bin/pytest: pyproject.toml
 	@command -v uv >/dev/null 2>&1 || { \
@@ -16,14 +12,6 @@ $(VENV)/bin/pytest: pyproject.toml
 	uv venv --allow-existing $(VENV)
 	uv pip install --python $(PY) -r pyproject.toml --group dev
 	@touch $@
-
-client/node_modules: client/package.json
-	cd client && $(NPM) install
-	@touch client/node_modules
-
-## The minos front end -> dist/index.html
-client: client/node_modules
-	cd client && $(NPM) run build
 
 ## The server -> go/minosd. This is the implementation; server/ is the
 ## specification it was written from. See docs/wire-contract.md.
@@ -45,14 +33,8 @@ serve-go: go
 tui: install
 	$(PY) -m tui
 
-## Vite with hot reload, proxying the API to a running `make serve`.
-## --open launches a browser; BROWSER=none skips it.
-dev: client/node_modules
-	cd client && $(NPM) run dev -- --open
-
-## Types and unit tests.
+## The unit tests.
 test: install
-	cd client && $(NPM) run typecheck && $(NPM) test
 	$(VENV)/bin/pytest -q
 
 ## The wire contract alone, against any implementation of it.
@@ -66,4 +48,4 @@ conformance-go: install go
 	MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd $(VENV)/bin/pytest tests/conformance -q
 
 clean:
-	rm -rf $(VENV) client/node_modules dist .run go/minosd
+	rm -rf $(VENV) .run go/minosd

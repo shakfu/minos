@@ -310,7 +310,7 @@ with no cursor.
 | `message` | a message object | the room's audience |
 | `room` | `{"room": <room>}` | the audience, plus anyone just removed from it |
 | `roomGone` | `{"room": "<id>"}` | whoever must drop it |
-| `presence` | `{"username", "online"}` | everyone |
+| `presence` | `{"username", "online"}` | everyone but its subject |
 | `group` | `{"group": <group>}` | everyone |
 
 A `room` push carries the whole object rather than a delta, so a client that

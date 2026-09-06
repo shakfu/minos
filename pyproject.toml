@@ -1,7 +1,7 @@
 [project]
 name = "minos"
 version = "0.1.0"
-description = "A web desktop: a Python backend, and a TypeScript front end built on it."
+description = "A conversation server, a terminal client, and the wire contract between them."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

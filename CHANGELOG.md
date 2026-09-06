@@ -6,17 +6,30 @@ yet, so everything so far sits under Unreleased.
 
 ## [Unreleased]
 
-The OS.js reference client is gone. `client/` is now the only front end, and
-the server keeps the OS.js wire format without carrying any OS.js code.
+Both web front ends are gone. `tui/` is the only client, `go/` is the server,
+and the wire format between them is still OS.js's without any OS.js code.
 
 ### Removed
+
+- `client/`, the web desktop, and the last JavaScript in the tree with it: Vite,
+  Vitest, TypeScript, `client/node_modules`, and the `client` and `dev` make
+  targets. It spoke the retired conversation model -- rooms as sets of people,
+  `merge`, membership edited by dragging -- so it had not connected to this
+  server since the model changed. Removed rather than ported, because `tui/`
+  already reaches every operation and a second front end is a second thing to
+  keep in step with the model.
+
+  Its 115 tests went too, and no coverage did: they drove a mocked socket, so
+  they passed against a server they could not talk to, and the routes
+  `client/tests/api.test.ts` pinned are pinned against a running server by
+  `tests/conformance/test_http.py`. Nothing builds `dist/` any more; both
+  servers already served the API alone when it is empty.
 
 - The OS.js v3 reference client and the whole `src/` tree: the bootstrap and
   config under `src/client/`, the CLI config under `src/cli/`, and the
   `MonoBlueTheme` package. It built to `dist/osjs.html`, which is now a 404.
 - Its build: `webpack.config.js`, the root `package.json` and
-  `package-lock.json`, and with them every `@osjs/*` dependency. The only
-  JavaScript toolchain left is the one under `client/`.
+  `package-lock.json`, and with them every `@osjs/*` dependency.
 - The `osjs` and `lint` make targets. `lint` ran stylelint over the OS.js theme
   CSS and had nothing else to cover; there is no stylelint config any more.
 - `DistWatcher` and its polling thread. It pushed `osjs/dist:changed` and
@@ -24,7 +37,7 @@ the server keeps the OS.js wire format without carrying any OS.js code.
   manifest was written by `osjs-cli package:discover`, and the new client logs
   any frame it does not handle. Vite emits fingerprinted files under
   `dist/assets/` while the watcher only scanned the top level, so it could no
-  longer fire at all. Hot reload during development is Vite's, via `make dev`.
+  longer fire at all.
 - `WATCH_DIST` and `WATCH_INTERVAL` from `server/config.py`, so the
   `MINOS_WATCH_DIST` environment variable is no longer read.
 - `tests/test_theme_package.py` (guards on the MonoBlueTheme package contract)
@@ -67,11 +80,28 @@ the server keeps the OS.js wire format without carrying any OS.js code.
   the transient-room sweep. Both were constants, and both are timings the
   conformance suite has to wait out: a run that observed a keepalive and an
   expiring room at the defaults would take three minutes.
-- `make dev` opens a browser at the Vite URL, through Vite's own `--open`.
-  `BROWSER=none make dev` starts the server without one. `npm run dev` inside
-  `client/` is unchanged and still opens nothing.
 
 ### Fixed
+
+- The bus lost a message published just after a subscription. A subscription has
+  to reach every publisher before it matches anything, and `open` followed by
+  `send` is one round trip -- so the first message in a new room was dropped, and
+  a client cannot repair a gap it has no way to know is there. The proxy now
+  subscribes to everything, and which topics a process wants is a dict it tests
+  when the message lands rather than a filter that has to travel. A subscription
+  holds the moment it is asked for; the cost is that every process reads every
+  message. `test_a_message_is_stored_before_it_is_published` failed every run
+  against `server/`, and the two delivery tests failed intermittently.
+
+- A `Broker` whose bind failed left its context and sockets open, so the process
+  hung in `zmq_ctx_term` at exit instead of reporting what went wrong. Under
+  pytest that turned one bad fixture into a suite that never returned.
+
+- `MINOS_RUN` no longer sits under pytest's `tmp_path`. A Unix socket path may
+  not exceed 103 bytes and `tmp_path` spends most of that on the test's name, so
+  on macOS -- where the temporary root is 50 characters before pytest adds
+  anything -- every `ipc://` bind in the suite failed. `make test` and
+  `make conformance` could not run there at all.
 
 - `tests/conformance/wire.py` provokes a reply when the handshake does not
   arrive promptly. `simple_websocket`'s client blocks on the socket before
@@ -84,6 +114,11 @@ the server keeps the OS.js wire format without carrying any OS.js code.
 
 ### Changed
 
+- A `presence` push no longer reaches the person it is about. It is a fact about
+  a user rather than a connection, and the client it would go back to is the one
+  that caused it. It also made a client's own arrival race the connection that
+  provoked it, which is what the conformance suite kept catching.
+
 - `make install` builds the Python venv with [uv](https://docs.astral.sh/uv/)
   rather than `python3 -m venv` plus pip. The stdlib path fails outright on
   distributions that ship Python without `ensurepip`.
@@ -91,11 +126,6 @@ the server keeps the OS.js wire format without carrying any OS.js code.
   `pyproject.toml` is newer than `.venv/bin/pytest`, and `uv venv` refuses a
   directory that already holds a venv -- so editing dependencies made every
   subsequent `make test` fail until `.venv` was deleted by hand.
-- The Makefile falls back to corepack's npm where the node install has none,
-  so `make dev` and `make client` work on a Debian `nodejs` package.
-- `client/vite.config.ts` sets `emptyOutDir: true`. It was off only because the
-  OS.js build wrote into the same `dist/`; `make client` now clears the
-  directory first.
 - `chat-concepts.md` reconciled against the code. Three of its six open core
   questions were answered by building the core and are now stated in the model:
   a participant may give up a grant naming them but not one inherited from a

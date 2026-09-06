@@ -1,6 +1,8 @@
 import importlib
 import io
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -9,7 +11,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 @pytest.fixture
-def app(tmp_path, monkeypatch):
+def run_dir():
+    """A run directory short enough to hold an `ipc://` endpoint.
+
+    A Unix socket path may not exceed 103 bytes, and `tmp_path` spends most of
+    that on the test's own name before the bus appends its own -- which on
+    macOS, where the temporary root is itself 50 characters, fails every bind.
+    So the run directory sits at the short end of the temporary root, and is
+    removed here rather than by pytest.
+    """
+    path = Path(tempfile.mkdtemp(prefix="minos-"))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+def app(tmp_path, run_dir, monkeypatch):
     """A server instance whose dist/ and vfs/ roots live under tmp_path."""
     dist = tmp_path / "dist"
     dist.mkdir()
@@ -17,7 +36,7 @@ def app(tmp_path, monkeypatch):
 
     monkeypatch.setenv("MINOS_DIST", str(dist))
     monkeypatch.setenv("MINOS_VFS", str(tmp_path / "vfs"))
-    monkeypatch.setenv("MINOS_RUN", str(tmp_path / "run"))
+    monkeypatch.setenv("MINOS_RUN", str(run_dir))
 
     from server import config
 
