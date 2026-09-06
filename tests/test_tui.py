@@ -229,8 +229,11 @@ class FakeUi:
         self.notices = []
         self.running = True
         self.dirty = False
+        self.input = ""
+        # The command layer and the composer, which is the other place a
+        # keystroke reaches the server. Everything drawing stays behind.
         for name in dir(Ui):
-            if name.startswith(("cmd_", "principal", "command")):
+            if name.startswith(("cmd_", "_new_", "principal", "command", "submit")):
                 setattr(self, name, getattr(Ui, name).__get__(self))
 
     def notice(self, text):
@@ -285,3 +288,60 @@ def test_a_refusal_from_the_server_reaches_the_notices(alice):
     ui = FakeUi(alice)
     ui.command("/create Engineering")
     assert any("administrator" in notice for notice in ui.notices)
+
+
+def test_channel_admit_and_revoke_move_the_audience_rule(demo, alice):
+    """The admin's half of a channel: who may subscribe, not who is subscribed."""
+    demo.create_group("Ops", ["demo"])
+    ui = FakeUi(demo)
+
+    ui.command("/channel admit system Ops")
+    assert any("may subscribe" in notice for notice in ui.notices)
+    # Alice is subscribed and in no admitted group, so her client is told to
+    # drop the channel: the rule reaches people who never asked for anything.
+    assert wait_for(lambda: "system" not in alice.rooms)
+
+    ui.command("/channel revoke system Ops")
+    assert any("open to everybody" in notice for notice in ui.notices)
+
+
+def test_a_restricted_channel_refuses_an_outsider(demo, alice):
+    demo.create_group("Ops", ["demo"])
+    FakeUi(demo).command("/channel admit system Ops")
+
+    alice.unsubscribe("system")
+    ui = FakeUi(alice)
+    ui.command("/subscribe system")
+    assert any("restricted" in notice for notice in ui.notices)
+
+
+def test_a_channel_is_founded_and_written_to_from_the_composer(demo, alice):
+    """The composer takes the producer's path when the space is a channel."""
+    ui = FakeUi(demo)
+    ui.command("/channel new Announcements")
+    channel = next(n for n in ui.notices if "Opened Announcements" in n)
+    channel_id = channel.split("(")[1].split(")")[0]
+
+    # Founding a channel is not subscribing to one: subscription is the
+    # subscriber's own act, and an admin who wants to write in the composer
+    # takes their place in the audience like anybody else.
+    demo.subscribe(channel_id)
+    alice.subscribe(channel_id)
+    time.sleep(0.5)  # the bus subscription, as everywhere else in this file
+    ui.select(channel_id)
+    ui.input = "the first"
+    ui.submit()
+
+    assert wait_for(lambda: alice.log.get(channel_id))
+    assert alice.log[channel_id][-1]["body"] == "the first"
+    assert alice.log[channel_id][-1]["author"] == "demo"
+
+
+def test_an_ordinary_user_cannot_publish_to_a_channel(demo, alice):
+    FakeUi(demo).command("/channel new Bulletins")
+    ui = FakeUi(alice)
+    ui.select("system")
+    ui.input = "hello"
+    ui.submit()
+
+    assert any("administrator" in str(notice) for notice in ui.notices)

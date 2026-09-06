@@ -222,6 +222,10 @@ therefore time out rather than wait forever.
 | `group.unassign` | `group`, `username` | a group |
 | `subscribe` | `channel` | a channel |
 | `unsubscribe` | `channel` | `{ok: true}` |
+| `channel.create` | `title`, `groups` | a channel |
+| `channel.publish` | `channel`, `body` | `{ok: true, seq}` |
+| `channel.admit` | `channel`, `group` | `{ok: true, channel}` |
+| `channel.revoke` | `channel`, `group` | `{ok: true, channel}` |
 
 ### Objects
 
@@ -231,14 +235,15 @@ A room, and a channel in the same shape:
 {"id": "<hex>", "title": "Engineering", "kind": "room",
  "authority": "admin", "retention": "persisted",
  "createdBy": "demo", "createdAt": 1757030400.0,
- "grants": [{"kind": "user", "id": "demo"}],
+ "grants": [{"kind": "user", "id": "demo"}], "restrictedTo": [],
  "audience": ["alice", "demo"], "occupants": [], "lastSeq": 4}
 ```
 
 `kind` is `room` or `channel`; `authority` is `admin` or `user`; `retention` is
 `persisted` or `transient`. A channel has empty `grants` and its `audience` is
 its subscribers. `audience` resolves group grants, so it lists users and never
-groups. `occupants` is who is in the room now, not who may be.
+groups. `occupants` is who is in the room now, not who may be. `restrictedTo`
+is the groups a channel admits, empty on an open channel and on every room.
 
 A message:
 
@@ -278,10 +283,27 @@ with no cursor.
   group is refused, because dropping it would be restored the moment grants
   were re-evaluated.
 - `send` to a channel is refused: a channel is read-only to its audience.
-- Every channel is open: `subscribe` checks that the channel exists and nothing
-  else. The audience rule in `chat-concepts.md` section 2.4 -- open, or
-  restricted to named groups -- is not implemented, so there is nothing here for
-  a reimplementation to reproduce yet.
+- `channel.create` is administrators only. Its title is unique among channels,
+  compared without case, for the reason a permanent room's is among rooms.
+  `groups` sets the audience rule at once and each must exist. Nothing is pushed
+  to the new channel -- it has no subscribers -- and the server announces it on
+  `system` instead, as `<user> opened the channel <title> (<id>)`.
+- `channel.publish` is administrators only and writes as its caller, `kind`
+  `text`. It is the producer's path: a channel's producer is the administrator,
+  as the machine is `system`'s, and `send` to a channel stays refused whoever
+  sends it.
+- A channel with no `restrictedTo` groups is open to anybody. One with groups
+  admits their members only: `subscribe` from anyone else is refused with
+  `That channel is restricted`, and `channel.admit` / `channel.revoke` are
+  administrators only. A channel never names a user, only groups.
+- Eligibility is re-read on every delivery, not fixed when the subscription was
+  stored. Someone removed from the last group that admitted them keeps the
+  subscription and leaves the `audience`: they stop receiving the channel, it
+  leaves their `sync`, `history` on it is refused, and they get a `roomGone`.
+  Re-admitting the group restores all of it without their acting again.
+- Revoking the last group leaves the channel open rather than closed to
+  everybody: open is the absence of a rule, so there is no way to write "nobody"
+  and no reason to.
 - An empty or whitespace-only body is refused.
 - `exit` may only release an occupancy the same connection took. Another
   connection's is refused with `Not in that room`.

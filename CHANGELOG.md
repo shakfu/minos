@@ -45,6 +45,83 @@ and the wire format between them is still OS.js's without any OS.js code.
 
 ### Added
 
+- `make demo`, a narrated run of the audience rule against the compiled server:
+  three real websockets, its own database, and the refusals and pushes printed
+  as they happen. It launches and drives the server through
+  `tests/conformance/harness.py` and `wire.py` rather than a second copy of the
+  protocol, so it cannot drift from the contract without the suite noticing
+  first. In `docs/dev/demo_audience.py`.
+
+- `channel.create` and `channel.publish`, both administrators only. A channel is
+  founded with a name unique among channels and optionally restricted at once
+  (`{"op": "channel.create", "title": "Announcements", "groups": ["<id>"]}`),
+  and the administrator writes to it as its producer, the way the machine writes
+  to `system`. `send` to a channel stays refused: a channel is read-only to its
+  audience, and the operation that writes to one is not the operation a
+  participant uses in a room.
+
+  A new channel has no subscribers, so nothing is pushed to it; the server
+  announces it on `system` instead, which is how anyone learns there is
+  something to subscribe to. Founding is not subscribing -- an admin who wants
+  to read what they publish subscribes like anybody else -- and the terminal
+  client's composer publishes when the selected space is a channel, leaving the
+  authority check to the server.
+
+  This is the core's own answer to who may publish, not section 5's. Moderators
+  widen the set of publishers; they do not define it.
+
+- A channel's audience rule, the last unimplemented part of the core model
+  (`chat-concepts.md` 2.4). `channel_audience` stores the groups a channel
+  admits, `subscribe` refuses anyone outside them with `That channel is
+  restricted`, and an administrator sets the rule with two new operations:
+
+      {"op": "channel.admit",  "channel": "system", "group": "<id>"}
+      {"op": "channel.revoke", "channel": "system", "group": "<id>"}
+
+  A channel with no groups is open, so revoking the last one reopens it rather
+  than closing it to everybody: open is the absence of a rule, and there is no
+  way to write "nobody". Room and channel objects gained `restrictedTo`, empty
+  on every room and on an open channel. `/channel admit|revoke <id> <group>`
+  reaches it from the terminal client.
+
+  Eligibility is re-read on every delivery rather than fixed when the
+  subscription was stored. Someone removed from the last group that admitted
+  them keeps their subscription and leaves the audience: they stop receiving the
+  channel, it leaves their `sync`, `history` on it is refused, and they are sent
+  a `roomGone`. Re-admitting the group restores all of it without their acting
+  again. The alternative was to delete the subscription, which is what a room's
+  group grant does to access -- rejected because a subscription is the
+  subscriber's own act, and the server would be destroying a choice it could not
+  give back. The cost is a group resolution per fan-out.
+
+- A schema version marker. Both servers stamp `PRAGMA user_version` with
+  `SCHEMA_VERSION` / `SchemaVersion`, both check it when they open the timeline
+  database, and one carrying a different number -- or none, which is every
+  database written before this change -- is refused by name instead of read.
+  Without it the Go server opened a database an older Python server had left
+  and failed later on the first query naming a column that was not there
+  (`no such column: empty_since`); two implementations now write this file, so
+  neither could tell a database it understands from one it does not.
+
+  A pragma rather than a version table: it sits in the header of every SQLite
+  file, so an empty file and an unmarked one are told apart without creating
+  anything to ask. The marker covers the tables both servers read; `presence`
+  and `occupants` belong to the Python server alone. There is no upgrade path
+  yet -- the refusal says to move the file aside, and migrations attach where
+  the version is compared.
+
+- An upgrade path between versions. `MIGRATIONS` / `migrations` map each version
+  to the statements that reach it from the one before, and both servers run
+  every step between the version on disk and their own inside the transaction
+  that stamps it -- so a failed upgrade leaves the version it started at. A
+  version with no entry is refused rather than stamped over, which is what stops
+  a change that cannot be made in place from being treated as if it could.
+
+  Version 2 is the audience rule, whose step is empty: the table is new, and
+  `CREATE TABLE IF NOT EXISTS` in the schema covers it. A version 1 database
+  written by either server therefore opens in either server with its rows
+  intact, rather than being refused.
+
 - `go/`, the server. One process, a goroutine per connection, an in-process
   fan-out and SQLite; `make serve-go` runs it and `make conformance-go` holds it
   to the contract. `server/` and `messaging/` become the specification it was
@@ -83,6 +160,12 @@ and the wire format between them is still OS.js's without any OS.js code.
 
 ### Fixed
 
+- A client that subscribed to a channel created after it connected received
+  nothing published to it. `Messaging.subscribe` never watched the channel's
+  topic, so the Python server's process sat in the audience of a channel it was
+  not listening to, and only a reconnect repaired it. Unreachable until now,
+  because every channel existed before every connection.
+
 - The bus lost a message published just after a subscription. A subscription has
   to reach every publisher before it matches anything, and `open` followed by
   `send` is one round trip -- so the first message in a new room was dropped, and
@@ -118,6 +201,9 @@ and the wire format between them is still OS.js's without any OS.js code.
   a user rather than a connection, and the client it would go back to is the one
   that caused it. It also made a client's own arrival race the connection that
   provoked it, which is what the conformance suite kept catching.
+
+- `make test` runs `go test ./...` after pytest. The store's version check is
+  not visible on the wire, so the conformance suite cannot reach it.
 
 - `make install` builds the Python venv with [uv](https://docs.astral.sh/uv/)
   rather than `python3 -m venv` plus pip. The stdlib path fails outright on

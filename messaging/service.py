@@ -476,8 +476,10 @@ class Messaging:
         self._announce_group(group)
         # The new member's room list just changed, and nothing else would tell
         # them: they were not in the audience of any of those rooms a moment ago.
-        for room in self.timeline.rooms_for(username):
-            self._announce_room(room)
+        # Channels for the same reason: a restricted one this group admits is
+        # theirs again if they had subscribed to it before losing eligibility.
+        for space in self.timeline.rooms_for(username) + self.timeline.channels_for(username):
+            self._announce_room(space)
         return group
 
     def unassign_group(self, is_admin, group_id, username):
@@ -486,10 +488,20 @@ class Messaging:
             raise MessagingError(f"No such group: {group_id}")
 
         # Read before the change: afterwards these rooms are no longer theirs,
-        # so this is the last moment their client can be told to drop them.
-        losing = [room["id"] for room in self.timeline.rooms_for(username)]
+        # so this is the last moment their client can be told to drop them. A
+        # restricted channel is lost the same way, and leaves the subscription
+        # behind -- being removed from a group is not unsubscribing.
+        losing = [
+            space["id"]
+            for space in self.timeline.rooms_for(username)
+            + self.timeline.channels_for(username)
+        ]
         self.timeline.unassign_group(group_id, username)
-        keeping = {room["id"] for room in self.timeline.rooms_for(username)}
+        keeping = {
+            space["id"]
+            for space in self.timeline.rooms_for(username)
+            + self.timeline.channels_for(username)
+        }
 
         group = self.timeline.group(group_id)
         self._announce_group(group)
@@ -516,10 +528,73 @@ class Messaging:
             self.timeline.subscribe(channel_id, username)
         return self.timeline.room(channel_id)
 
-    def subscribe(self, username, channel_id):
-        """Join a channel's audience. The one thing a user chooses for themselves."""
+    def create_channel(self, username, is_admin, title, groups=()):
+        """Found a channel. Administrators only, and its rule may be set at once.
+
+        Nothing is pushed: a new channel has no subscribers, so there is nobody
+        to tell. The host announces it on `system` instead, which is how a user
+        learns there is something to subscribe to -- and the host is where the
+        id of the machine channel lives.
+        """
+        self.require_admin(is_admin)
+        title = str(title or "").strip()
+        if not title:
+            raise MessagingError("A channel needs a name")
+
+        # A channel's name is institutional, referred to, and unique among
+        # channels for the same reason a permanent room's is among rooms.
+        if self.timeline.room_named(title, kind=CHANNEL) is not None:
+            raise MessagingError(f"A channel called {title!r} already exists")
+
+        admitted = [str(group) for group in groups or []]
+        for group_id in admitted:
+            if self.timeline.group(group_id) is None:
+                raise MessagingError(f"No such group: {group_id}")
+
+        channel = self.timeline.create_room(
+            title,
+            created_by=username,
+            kind=CHANNEL,
+            authority=ADMIN,
+            retention=PERSISTED,
+        )
+        for group_id in admitted:
+            self.timeline.admit_group(channel["id"], group_id)
+
+        return self.timeline.room(channel["id"])
+
+    def publish_message(self, username, is_admin, channel_id, body):
+        """An administrator's own words on a channel.
+
+        The producer's path, and separate from `send`: a channel is read-only to
+        its audience, so the operation that writes to one is not the operation a
+        participant uses in a room.
+        """
+        self.require_admin(is_admin)
+        channel = self.require_room(channel_id, CHANNEL)
+        body = str(body or "").strip()
+        if not body:
+            raise MessagingError("Empty message")
+
+        message = self.timeline.append(channel_id, username, body)
+        self._publish(
+            room_topic(channel_id), {"type": MESSAGE, **message}, set(channel["audience"])
+        )
+        return {"ok": True, "seq": message["seq"]}
+
+    def subscribe(self, username, channel_id, subscriber=None):
+        """Join a channel's audience. The one thing a user chooses for themselves.
+
+        `subscriber` starts this process listening on the channel's topic. A
+        client that synced before the channel existed is not watching it, and
+        without this would be in the audience of a channel whose messages never
+        reached its process.
+        """
         self.require_room(channel_id, CHANNEL)
+        if not self.timeline.eligible(channel_id, username):
+            raise MessagingError("That channel is restricted")
         self.timeline.subscribe(channel_id, username)
+        self._watch(subscriber, channel_id)
         channel = self.timeline.room(channel_id)
         self._announce_room(channel)
         return channel
@@ -529,6 +604,45 @@ class Messaging:
         self.timeline.unsubscribe(channel_id, username)
         self._publish(PRESENCE_TOPIC, {"type": ROOM_GONE, "room": channel_id}, {username})
         return {"ok": True}
+
+    def admit(self, is_admin, channel_id, group_id):
+        """Admit a group to a channel, restricting the channel if it was open."""
+        self.require_admin(is_admin)
+        channel = self.require_room(channel_id, CHANNEL)
+        if self.timeline.group(group_id) is None:
+            raise MessagingError(f"No such group: {group_id}")
+
+        # Everyone the channel reached before, so that the people an admission
+        # excludes -- everyone, when an open channel is restricted for the first
+        # time -- are told by the same call that excluded them.
+        reached = set(channel["audience"])
+        self.timeline.admit_group(channel_id, group_id)
+        return {"ok": True, "channel": self._audience_changed(channel_id, reached)}
+
+    def revoke(self, is_admin, channel_id, group_id):
+        """Withdraw a group. Withdrawing the last one leaves the channel open."""
+        self.require_admin(is_admin)
+        channel = self.require_room(channel_id, CHANNEL)
+
+        reached = set(channel["audience"])
+        self.timeline.revoke_group(channel_id, group_id)
+        return {"ok": True, "channel": self._audience_changed(channel_id, reached)}
+
+    def _audience_changed(self, channel_id, reached):
+        """Announce a channel whose rule moved, and drop whoever it now excludes.
+
+        A subscription outlives the eligibility that allowed it, so the people
+        who lost it keep their row and are simply no longer in the audience.
+        Their client is told once, here; nothing else would tell it, because the
+        next message will not be addressed to them.
+        """
+        channel = self.timeline.room(channel_id)
+        self._announce_room(channel, audience=reached)
+        for username in reached - set(channel["audience"]):
+            self._publish(
+                PRESENCE_TOPIC, {"type": ROOM_GONE, "room": channel_id}, {username}
+            )
+        return channel
 
     def post_event(self, room_id, text, audience):
         """Append a machine event to a room or channel and push it."""

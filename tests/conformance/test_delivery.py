@@ -62,7 +62,8 @@ def test_a_room_push_carries_the_whole_room(alice, bob, unique):
     pushed = bob.expect_push(lambda e: e.get("type") == "room")["room"]
     assert set(pushed) == {
         "id", "title", "kind", "authority", "retention",
-        "createdBy", "createdAt", "grants", "audience", "occupants", "lastSeq",
+        "createdBy", "createdAt", "grants", "restrictedTo", "audience",
+        "occupants", "lastSeq",
     }
 
 

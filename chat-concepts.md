@@ -283,13 +283,20 @@ named groups, which only their members may.
 | Open | anybody |
 | Restricted | members of the named groups |
 
-Eligibility is a gate on the act of subscribing; it is not an invitation, and
-nobody is ever admitted to a channel individually. That is what keeps
-subscription and invitation distinct even now that both can be refused: a room
-decides *who*, a restricted channel decides *which group*, and in both cases the
-person still chooses whether to be there. A room's grant may name a single user;
-a channel's restriction may not. A channel wanting one reader has misidentified
-itself, and is a room.
+Eligibility gates the act of subscribing and, from then on, delivery. It is read
+again on every message rather than fixed when the subscription was stored, so
+someone who leaves the last group that admitted them stops receiving the channel
+at once -- and keeps the subscription, which applies again the moment they are
+admitted again. The subscription records the subscriber's choice; eligibility
+decides whether that choice currently reaches anything. Revoking a group is
+therefore not the same act as unsubscribing, and neither one performs the other.
+
+Eligibility is not an invitation, and nobody is ever admitted to a channel
+individually. That is what keeps subscription and invitation distinct even now
+that both can be refused: a room decides *who*, a restricted channel decides
+*which group*, and in both cases the person still chooses whether to be there. A
+room's grant may name a single user; a channel's restriction may not. A channel
+wanting one reader has misidentified itself, and is a room.
 
 In the core, a channel has one producer and no path for a subscriber to
 contribute. The existing `system` stream is precisely this: a machine producer,
@@ -371,9 +378,13 @@ now keep that door open:
 
 ### Settled since
 
-Three questions that stood here have been answered by building the core, and
+Four questions that stood here have been answered by building the core, and
 their answers are in the model above rather than in this list.
 
+- **What becomes of a subscriber who leaves the last group that admitted them?**
+  Nothing is deleted: eligibility is re-read on every delivery, so they stop
+  receiving the channel and their subscription applies again on re-admission.
+  Under *Subscription is chosen rather than granted*.
 - **May a participant leave a room?** Yes, for a grant naming them; no, for
   access inherited from a group. Under *Admission*.
 - **Is presence global or per-room?** Global, with occupancy as the separate
@@ -581,8 +592,11 @@ For orientation, not as a work plan.
 Everything in section 2 is implemented: groups as a stored principal, the chat
 admin role, the two room axes, grants naming a user or a group and resolved at
 the moment access is checked, occupancy separate from access, the stored
-empty-since moment and the sweep that acts on it, channel subscriptions,
-per-user read cursors, and a stored per-room high-water mark.
+empty-since moment and the sweep that acts on it, channel subscriptions and the
+audience rule that gates them, per-user read cursors, and a stored per-room
+high-water mark. An administrator founds a channel and publishes to it, which is
+the core's producer: section 5 widens that set to moderators rather than
+defining it.
 
 The retired model went with it. `merge` folded one room's membership into
 another's, which has no meaning when a room is a place -- two places do not
@@ -594,15 +608,6 @@ What the core *is* on the wire, as opposed to what it means, is written down in
 `tests/conformance/`. That suite answers "is this implemented correctly", for
 any implementation in any language. This document answers "is this the right
 thing to implement", and the two should not be merged.
-
-### One part of the core is not
-
-A channel's audience rule (section 2.4) is described and unimplemented. Every
-channel is open: `subscribe` checks that the channel exists and nothing else,
-which is correct for `system` -- a machine channel every account is subscribed to
-at start-up -- and is the whole of what exists. A restricted channel needs a
-stored set of eligible groups, an eligibility check on `subscribe`, and a decision
-about what happens to a subscriber who leaves the last group that admitted them.
 
 ### The later sections are not
 

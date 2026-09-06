@@ -68,6 +68,24 @@ const (
 // ErrNoRoom is returned by Append for a room that does not exist.
 var ErrNoRoom = errors.New("no such room")
 
+// SchemaVersion is stamped in PRAGMA user_version and checked on open. It
+// covers the tables both servers read; presence and occupants belong to the
+// Python server alone and are not part of it. Raise it when the shared schema
+// changes, in both implementations at once -- SCHEMA_VERSION in
+// messaging/timeline.py is the same number.
+const SchemaVersion = 2
+
+// migrations is how to reach each version from the one before it. A version
+// with no entry has no upgrade path and a database at the version below it is
+// refused, which is what keeps a change that cannot be made in place from being
+// applied as if it could. An empty slice means the step is additive: schema runs
+// after every open and creates whatever is new, so nothing else has to be said.
+//
+// Statements here run before schema, in one transaction with the stamp.
+var migrations = map[int][]string{
+	2: {}, // channel_audience, and nothing else to move
+}
+
 const schema = `
 CREATE TABLE IF NOT EXISTS groups (
     id         TEXT PRIMARY KEY,
@@ -112,6 +130,16 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     PRIMARY KEY (channel_id, username)
 );
 
+-- A restricted channel's audience: the groups whose members may subscribe. No
+-- rows means the channel is open. Groups only -- a channel admitting one named
+-- person has misidentified itself and is a room.
+CREATE TABLE IF NOT EXISTS channel_audience (
+    channel_id  TEXT NOT NULL,
+    group_id    TEXT NOT NULL,
+    admitted_at REAL NOT NULL,
+    PRIMARY KEY (channel_id, group_id)
+);
+
 CREATE TABLE IF NOT EXISTS messages (
     room_id TEXT NOT NULL,
     seq     INTEGER NOT NULL,
@@ -153,8 +181,11 @@ type Room struct {
 	CreatedAt float64     `json:"createdAt"`
 	Grants    []Principal `json:"grants"`
 	Audience  []string    `json:"audience"`
-	Occupants []string    `json:"occupants"`
-	LastSeq   int64       `json:"lastSeq"`
+	// The groups a channel is restricted to; empty is open, and a room has no
+	// such rule at all.
+	RestrictedTo []string `json:"restrictedTo"`
+	Occupants    []string `json:"occupants"`
+	LastSeq      int64    `json:"lastSeq"`
 }
 
 // Message is one entry in a room's log.
@@ -202,6 +233,10 @@ func Open(path string, historyLimit int, grace time.Duration) (*Timeline, error)
 	}
 	db.SetMaxOpenConns(1)
 
+	if err := checkVersion(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, err
@@ -229,6 +264,79 @@ func Open(path string, historyLimit int, grace time.Duration) (*Timeline, error)
 }
 
 func (t *Timeline) Close() error { return t.db.Close() }
+
+// checkVersion brings a database to this schema, or refuses the ones that
+// cannot be brought.
+//
+// PRAGMA user_version is zero both in an empty file and in one written before
+// the marker existed, so the tables tell them apart: an empty file is stamped
+// and then populated, one holding tables cannot be identified and is left
+// untouched rather than read or repaired. The stamp commits before any table is
+// created, so tables without a marker mean a database from before this check
+// and nothing else. One transaction covers the steps and the stamp, so a failed
+// upgrade leaves the version it started at.
+func checkVersion(db *sql.DB) error {
+	transaction, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+
+	var version int
+	if err := transaction.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
+	if version == SchemaVersion {
+		return nil
+	}
+	if version > SchemaVersion {
+		return fmt.Errorf(
+			"database is schema version %d; this server reads %d, so it was written"+
+				" by a later server", version, SchemaVersion,
+		)
+	}
+
+	if version == 0 {
+		var tables int
+		if err := transaction.QueryRow(
+			"SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+		).Scan(&tables); err != nil {
+			return err
+		}
+		if tables > 0 {
+			return errors.New(
+				"database predates the schema version marker, so what it holds cannot be" +
+					" identified: move it aside or delete it",
+			)
+		}
+	} else if err := upgrade(transaction, version); err != nil {
+		return err
+	}
+
+	if _, err := transaction.Exec(fmt.Sprintf("PRAGMA user_version = %d", SchemaVersion)); err != nil {
+		return err
+	}
+	return transaction.Commit()
+}
+
+// upgrade runs every step between the version on disk and this one.
+func upgrade(transaction *sql.Tx, version int) error {
+	for step := version + 1; step <= SchemaVersion; step++ {
+		statements, ok := migrations[step]
+		if !ok {
+			return fmt.Errorf(
+				"database is schema version %d and there is no upgrade to %d:"+
+					" move it aside or delete it", version, step,
+			)
+		}
+		for _, statement := range statements {
+			if _, err := transaction.Exec(statement); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
 // -- groups ------------------------------------------------------------------
 
@@ -357,7 +465,10 @@ func (t *Timeline) CreateRoom(
 
 // Room describes one room or channel, or reports nil when there is none.
 func (t *Timeline) Room(roomID string) (*Room, error) {
-	room := Room{ID: roomID, Grants: []Principal{}, Audience: []string{}, Occupants: []string{}}
+	room := Room{
+		ID: roomID, Grants: []Principal{}, Audience: []string{},
+		RestrictedTo: []string{}, Occupants: []string{},
+	}
 	err := t.db.QueryRow(
 		"SELECT title, kind, authority, retention, created_by, created_at, high_seq"+
 			" FROM rooms WHERE id = ?", roomID,
@@ -375,7 +486,11 @@ func (t *Timeline) Room(roomID string) (*Room, error) {
 		if err != nil {
 			return nil, err
 		}
-		room.Audience = audience
+		rule, err := t.AudienceRule(roomID)
+		if err != nil {
+			return nil, err
+		}
+		room.Audience, room.RestrictedTo = audience, rule
 	} else {
 		grants, err := t.grantsOf(roomID)
 		if err != nil {
@@ -444,9 +559,70 @@ func (t *Timeline) participants(roomID string) ([]string, error) {
          ORDER BY username`, roomID, roomID)
 }
 
+// subscribers is who a channel reaches: subscribed, and still eligible to be.
+//
+// Eligibility is re-read here rather than enforced when the subscription was
+// stored, so leaving the last group that admitted someone stops their delivery
+// at once. The row stays: it is their choice, and it applies again the moment
+// they are admitted again.
 func (t *Timeline) subscribers(channelID string) ([]string, error) {
+	return t.strings(`
+        SELECT s.username FROM subscriptions s
+         WHERE s.channel_id = ?
+           AND (NOT EXISTS (SELECT 1 FROM channel_audience
+                             WHERE channel_id = s.channel_id)
+                OR EXISTS (SELECT 1 FROM channel_audience ca
+                             JOIN group_members gm ON gm.group_id = ca.group_id
+                            WHERE ca.channel_id = s.channel_id
+                              AND gm.username = s.username))
+         ORDER BY s.username`, channelID)
+}
+
+// AudienceRule is the groups a channel is restricted to. Empty means open.
+func (t *Timeline) AudienceRule(channelID string) ([]string, error) {
 	return t.strings(
-		"SELECT username FROM subscriptions WHERE channel_id = ? ORDER BY username", channelID)
+		"SELECT group_id FROM channel_audience WHERE channel_id = ? ORDER BY group_id",
+		channelID)
+}
+
+// Eligible reports whether this user may subscribe to a channel, and be
+// delivered to once they have.
+func (t *Timeline) Eligible(channelID, username string) (bool, error) {
+	var found int
+	err := t.db.QueryRow(
+		"SELECT 1 FROM channel_audience WHERE channel_id = ? LIMIT 1", channelID).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	err = t.db.QueryRow(`
+        SELECT 1 FROM channel_audience ca
+          JOIN group_members gm ON gm.group_id = ca.group_id
+         WHERE ca.channel_id = ? AND gm.username = ?
+         LIMIT 1`, channelID, username).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// AdmitGroup adds a group to a channel's audience, restricting the channel if
+// it was open. It reports whether the group was not already admitted.
+func (t *Timeline) AdmitGroup(channelID, groupID string) (bool, error) {
+	return t.changed(
+		"INSERT OR IGNORE INTO channel_audience"+
+			" (channel_id, group_id, admitted_at) VALUES (?, ?, ?)",
+		channelID, groupID, now())
+}
+
+// RevokeGroup withdraws one. Withdrawing the last leaves the channel open.
+func (t *Timeline) RevokeGroup(channelID, groupID string) (bool, error) {
+	return t.changed(
+		"DELETE FROM channel_audience WHERE channel_id = ? AND group_id = ?",
+		channelID, groupID)
 }
 
 // Audience is who a message in this room should be delivered to.
@@ -478,8 +654,15 @@ func (t *Timeline) HasAccess(roomID, username string) (bool, error) {
 
 	var found int
 	if kind == ChannelKind {
-		err = t.db.QueryRow(
-			"SELECT 1 FROM subscriptions WHERE channel_id = ? AND username = ?",
+		err = t.db.QueryRow(`
+            SELECT 1 FROM subscriptions s
+             WHERE s.channel_id = ? AND s.username = ?
+               AND (NOT EXISTS (SELECT 1 FROM channel_audience
+                                 WHERE channel_id = s.channel_id)
+                    OR EXISTS (SELECT 1 FROM channel_audience ca
+                                 JOIN group_members gm ON gm.group_id = ca.group_id
+                                WHERE ca.channel_id = s.channel_id
+                                  AND gm.username = s.username))`,
 			roomID, username).Scan(&found)
 	} else {
 		err = t.db.QueryRow(`
@@ -526,8 +709,12 @@ func (t *Timeline) ChannelsFor(username string) ([]Room, error) {
           JOIN subscriptions s ON s.channel_id = r.id
           LEFT JOIN messages msg ON msg.room_id = r.id
          WHERE r.kind = 'channel' AND s.username = ?
+           AND (NOT EXISTS (SELECT 1 FROM channel_audience WHERE channel_id = r.id)
+                OR EXISTS (SELECT 1 FROM channel_audience ca
+                             JOIN group_members gm ON gm.group_id = ca.group_id
+                            WHERE ca.channel_id = r.id AND gm.username = ?))
          GROUP BY r.id
-         ORDER BY COALESCE(MAX(msg.at), r.created_at) DESC`, username)
+         ORDER BY COALESCE(MAX(msg.at), r.created_at) DESC`, username, username)
 	if err != nil {
 		return nil, err
 	}
@@ -560,6 +747,7 @@ func (t *Timeline) DeleteRoom(roomID string) error {
 		"DELETE FROM messages WHERE room_id = ?",
 		"DELETE FROM grants WHERE room_id = ?",
 		"DELETE FROM subscriptions WHERE channel_id = ?",
+		"DELETE FROM channel_audience WHERE channel_id = ?",
 		"DELETE FROM read_cursors WHERE room_id = ?",
 		"DELETE FROM rooms WHERE id = ?",
 	} {

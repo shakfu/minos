@@ -441,3 +441,53 @@ def test_ad_hoc_rooms_may_share_a_title(service, clients):
 def test_an_ad_hoc_room_does_not_block_a_permanent_name(service, clients):
     call(service, clients["demo"], op="open", title="Engineering")
     assert "error" not in call(service, clients["demo"], op="create", title="Engineering")
+
+
+def test_a_channel_is_founded_by_an_admin_and_written_to_by_one(service, clients):
+    """The producer's path: the admin publishes, and it is not `send`."""
+    channel = call(service, clients["demo"], op="channel.create", title="Announcements")
+
+    assert channel["authority"] == "admin"
+    assert channel["createdBy"] == "demo"
+    # Founding is not subscribing: subscription is the subscriber's own act.
+    assert channel["audience"] == []
+
+    published = call(
+        service, clients["demo"], op="channel.publish",
+        channel=channel["id"], body="the first",
+    )
+    assert published == {"ok": True, "seq": 1}
+
+    # Reading is the audience's act, publishing is not, so this needs both.
+    call(service, clients["demo"], op="subscribe", channel=channel["id"])
+    message = call(
+        service, clients["demo"], op="history", room=channel["id"], since=0
+    )["messages"][-1]
+    assert (message["author"], message["kind"]) == ("demo", "text")
+
+
+def test_founding_a_channel_is_announced_on_the_system_channel(service, clients):
+    """Nobody is subscribed to a new channel, so this is how anyone hears of it."""
+    channel = call(service, clients["demo"], op="channel.create", title="Bulletins")
+    system = call(service, clients["alice"], op="history", room="system", since=0)
+
+    assert any(channel["id"] in m["body"] for m in system["messages"])
+
+
+def test_a_channel_name_is_unique_among_channels_only(service, clients):
+    """A room and a channel may share a name: they are not the same kind of thing."""
+    call(service, clients["demo"], op="channel.create", title="Engineering")
+    call(service, clients["demo"], op="create", title="Engineering")
+
+    refused = call(service, clients["demo"], op="channel.create", title="engineering")
+    assert refused["error"] == "A channel called 'engineering' already exists"
+
+
+def test_an_ordinary_user_neither_founds_nor_publishes(service, clients):
+    refusal = "Only an administrator may do that"
+    assert call(
+        service, clients["alice"], op="channel.create", title="Mine"
+    )["error"] == refusal
+    assert call(
+        service, clients["alice"], op="channel.publish", channel="system", body="hi"
+    )["error"] == refusal

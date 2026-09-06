@@ -1,5 +1,8 @@
 """The timeline store: sequence numbers, grants, occupancy and retention."""
 
+import pathlib
+import re
+import sqlite3
 import threading
 import time
 
@@ -254,3 +257,168 @@ def test_the_read_cursor_only_moves_forward(timeline):
 
     assert timeline.read_cursors("demo") == {talk["id"]: 5}
     assert timeline.read_cursors("alice") == {}
+
+
+# -- the schema version marker ------------------------------------------------
+
+
+def user_version(path):
+    connection = sqlite3.connect(path)
+    try:
+        return connection.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        connection.close()
+
+
+def test_a_new_database_is_stamped_and_reopens(tmp_path):
+    path = tmp_path / "timeline.db"
+    timeline_module.Timeline(db_path=path, run_dir=tmp_path).init()
+
+    assert user_version(path) == timeline_module.SCHEMA_VERSION
+    timeline_module.Timeline(db_path=path, run_dir=tmp_path).init()
+
+
+def test_a_database_without_the_marker_is_refused(tmp_path):
+    """The case the marker exists for: a file from before it was written.
+
+    It carries tables this server would read straight through, and no way to
+    tell whether they are the ones it expects.
+    """
+    path = tmp_path / "timeline.db"
+    connection = sqlite3.connect(path)
+    connection.executescript("CREATE TABLE rooms (id TEXT PRIMARY KEY)")
+    connection.close()
+
+    with pytest.raises(timeline_module.SchemaMismatch):
+        timeline_module.Timeline(db_path=path, run_dir=tmp_path).init()
+
+    assert user_version(path) == 0
+
+
+def at_version(path, version, drop=()):
+    """Wind a current database back to an older version, tables and all."""
+    connection = sqlite3.connect(path)
+    for table in drop:
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
+    connection.execute(f"PRAGMA user_version = {version}")
+    connection.close()
+
+
+def test_an_older_database_is_upgraded_in_place(tmp_path):
+    """The point of the version: an upgrade, not a refusal, where one exists."""
+    path = tmp_path / "timeline.db"
+    timeline = timeline_module.Timeline(db_path=path, run_dir=tmp_path).init()
+    group = timeline.create_group("Ops", members=["alice"])
+    at_version(path, 1, drop=["channel_audience"])
+
+    upgraded = timeline_module.Timeline(db_path=path, run_dir=tmp_path).init()
+
+    assert user_version(path) == timeline_module.SCHEMA_VERSION
+    assert upgraded.group(group["id"])["members"] == ["alice"]
+    assert upgraded.audience_rule("anything") == []
+
+
+def test_a_version_with_no_upgrade_path_is_refused(tmp_path, monkeypatch):
+    """A step nobody wrote must not be applied by stamping over it."""
+    path = tmp_path / "timeline.db"
+    timeline_module.Timeline(db_path=path, run_dir=tmp_path).init()
+    at_version(path, 1)
+    monkeypatch.setattr(timeline_module, "MIGRATIONS", {})
+
+    with pytest.raises(timeline_module.SchemaMismatch):
+        timeline_module.Timeline(db_path=path, run_dir=tmp_path).init()
+
+    assert user_version(path) == 1
+
+
+def test_a_database_from_a_later_schema_is_refused(tmp_path):
+    path = tmp_path / "timeline.db"
+    timeline_module.Timeline(db_path=path, run_dir=tmp_path).init()
+    connection = sqlite3.connect(path)
+    connection.execute(f"PRAGMA user_version = {timeline_module.SCHEMA_VERSION + 1}")
+    connection.close()
+
+    with pytest.raises(timeline_module.SchemaMismatch):
+        timeline_module.Timeline(db_path=path, run_dir=tmp_path).init()
+
+
+def test_both_servers_stamp_the_same_version():
+    """The two constants are the compatibility claim, and nothing else pins them.
+
+    Both implementations write this database, so a version raised in one and
+    not the other would leave each refusing what the other wrote.
+    """
+    source = (pathlib.Path(__file__).parent.parent / "go/internal/timeline/timeline.go").read_text()
+    declared = re.search(r"const SchemaVersion = (\d+)", source)
+
+    assert declared, "go/internal/timeline/timeline.go declares no SchemaVersion"
+    assert int(declared.group(1)) == timeline_module.SCHEMA_VERSION
+
+
+# -- a channel's audience rule ------------------------------------------------
+
+
+def channel(timeline, title="Channel", channel_id=None):
+    return timeline.create_room(
+        title,
+        created_by="system",
+        kind=timeline_module.CHANNEL,
+        authority=timeline_module.ADMIN,
+        retention=timeline_module.PERSISTED,
+        room_id=channel_id,
+    )
+
+
+def test_a_channel_with_no_rule_is_open(timeline):
+    stream = channel(timeline, "Open")
+    assert timeline.eligible(stream["id"], "demo") is True
+    assert timeline.audience_rule(stream["id"]) == []
+
+
+def test_a_rule_admits_the_named_groups_and_nobody_else(timeline):
+    stream = channel(timeline, "Restricted")
+    group = timeline.create_group("Ops", members=["alice"])
+    timeline.admit_group(stream["id"], group["id"])
+
+    assert timeline.eligible(stream["id"], "alice") is True
+    assert timeline.eligible(stream["id"], "bob") is False
+
+
+def test_an_ineligible_subscriber_keeps_the_row_and_leaves_the_audience(timeline):
+    """The subscription is theirs; the delivery is not.
+
+    Losing the group must not delete the choice, or re-admitting the person
+    would silently fail to restore what they had.
+    """
+    stream = channel(timeline, "Restricted")
+    group = timeline.create_group("Ops", members=[])
+    timeline.subscribe(stream["id"], "bob")
+    timeline.admit_group(stream["id"], group["id"])
+
+    assert timeline.audience(stream["id"]) == []
+    assert timeline.has_access(stream["id"], "bob") is False
+    assert stream["id"] not in [c["id"] for c in timeline.channels_for("bob")]
+
+    timeline.assign_group(group["id"], "bob")
+    assert timeline.audience(stream["id"]) == ["bob"]
+    assert stream["id"] in [c["id"] for c in timeline.channels_for("bob")]
+
+
+def test_revoking_the_last_group_reopens_the_channel(timeline):
+    stream = channel(timeline, "Reopened")
+    group = timeline.create_group("Ops", members=[])
+    timeline.subscribe(stream["id"], "bob")
+    timeline.admit_group(stream["id"], group["id"])
+
+    assert timeline.revoke_group(stream["id"], group["id"]) is True
+    assert timeline.audience(stream["id"]) == ["bob"]
+
+
+def test_deleting_a_channel_forgets_its_rule(timeline):
+    stream = channel(timeline, "Doomed")
+    group = timeline.create_group("Ops", members=[])
+    timeline.admit_group(stream["id"], group["id"])
+    timeline.delete_room(stream["id"])
+
+    reborn = channel(timeline, "Reborn", channel_id=stream["id"])
+    assert timeline.audience_rule(reborn["id"]) == []

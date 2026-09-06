@@ -333,6 +333,18 @@ class ChatClient:
     def unassign_group(self, group, username):
         return self.request("group.unassign", group=group, username=username)
 
+    def create_channel(self, title, groups=()):
+        return self.request("channel.create", title=title, groups=list(groups))
+
+    def publish(self, channel, body):
+        return self.request("channel.publish", channel=channel, body=body)
+
+    def admit_group(self, channel, group):
+        return self.request("channel.admit", channel=channel, group=group)
+
+    def revoke_group(self, channel, group):
+        return self.request("channel.revoke", channel=channel, group=group)
+
     def subscribe(self, channel):
         return self._track(self.request("subscribe", channel=channel))
 

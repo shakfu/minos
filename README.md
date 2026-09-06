@@ -21,10 +21,16 @@ Log in as `demo` / `demo`. There are also `alice` and `bob`, with passwords to m
 
 Neither server needs a browser build. Both warn and serve the API alone if `dist/` is empty, because the terminal client needs the routes and the websocket rather than a bundle.
 
-Inside the client, `/help` lists the commands. `/open alice` raises a room, `/meet alice` raises one that is discarded when everyone leaves, `/create Engineering` founds a permanent one, and `/invite @Team` admits a whole group.
+Inside the client, `/help` lists the commands. `/open alice` raises a room, `/meet alice` raises one that is discarded when everyone leaves, `/create Engineering` founds a permanent one, and `/invite @Team` admits a whole group. `/channel new Announcements @Ops` founds a channel restricted to a group, and `/channel admit system @Ops` restricts an existing one. Typing in a channel publishes to it, which only an administrator may do.
 
 ```
-make test          # typecheck, vitest, pytest
+make demo # the audience rule, narrated, against the compiled server
+```
+
+It launches a server of its own on a database of its own and drives three real websockets, so it neither needs nor disturbs anything you have running.
+
+```
+make test            # pytest over the specification, go test over the server
 make conformance-go  # the wire contract, against the Go server
 make conformance     # the same suite, against the Python one
 ```

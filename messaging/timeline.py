@@ -39,7 +39,15 @@ a timer would be lost on restart and invisible to the other workers.
 sequence and the delivery path, because none of that differs. What differs is
 authority -- a subscriber chooses to subscribe and may not write -- so
 subscriptions live in their own table rather than sharing `grants` with an
-invitation they are not.
+invitation they are not. `channel_audience` names the groups a restricted
+channel admits, and is read on every delivery rather than at the moment of
+subscribing: the subscription records a choice, eligibility decides whether it
+currently reaches anything.
+
+**The schema is versioned.** `PRAGMA user_version` holds `SCHEMA_VERSION`, and
+opening a database that does not carry the number this server reads fails
+rather than proceeding. Two implementations write this file; without the mark
+neither could tell a database it understands from one it does not.
 
 Room and message dictionaries carry `lastSeq` rather than `last_seq`: they are
 returned to callers and published on the bus unchanged, so the field names are
@@ -60,6 +68,24 @@ except ImportError:  # pragma: no cover - POSIX only, and this is Linux
     fcntl = None
 
 logger = logging.getLogger(__name__)
+
+# The schema version, stamped in `PRAGMA user_version` and checked on open. It
+# covers the tables both servers read; `presence` and `occupants` are this
+# server's alone and are not part of it. Raise it when the shared schema
+# changes, in both implementations at once -- `SchemaVersion` in
+# `go/internal/timeline/timeline.go` is the same number.
+SCHEMA_VERSION = 2
+
+# How to reach each version from the one before it. A version with no entry has
+# no upgrade path and a database at the version below it is refused, which is
+# what keeps a change that cannot be made in place from being applied as if it
+# could. An empty tuple means the step is additive: `SCHEMA` runs after every
+# open and creates whatever is new, so nothing else has to be said.
+#
+# Statements here run before `SCHEMA`, in one transaction with the stamp.
+MIGRATIONS = {
+    2: (),  # channel_audience, and nothing else to move
+}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS groups (
@@ -103,6 +129,16 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     channel_id TEXT NOT NULL,
     username   TEXT NOT NULL,
     PRIMARY KEY (channel_id, username)
+);
+
+-- A restricted channel's audience: the groups whose members may subscribe. No
+-- rows means the channel is open. Groups only -- a channel admitting one named
+-- person has misidentified itself and is a room.
+CREATE TABLE IF NOT EXISTS channel_audience (
+    channel_id TEXT NOT NULL,
+    group_id   TEXT NOT NULL,
+    admitted_at REAL NOT NULL,
+    PRIMARY KEY (channel_id, group_id)
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -176,6 +212,10 @@ WORKER_LOCK_PREFIX = "worker-"
 WORKER_LOCK_SUFFIX = ".lock"
 
 
+class SchemaMismatch(RuntimeError):
+    """The database on disk is not the schema this server reads."""
+
+
 def encode(payload):
     return json.dumps(payload).encode()
 
@@ -244,8 +284,57 @@ class Timeline:
     def init(self):
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
+            with self._write(connection):
+                self._check_version(connection)
             connection.executescript(SCHEMA)
         return self
+
+    def _check_version(self, connection):
+        """Bring a database to this schema, or refuse the ones that cannot be.
+
+        `PRAGMA user_version` is zero both in an empty file and in one written
+        before the marker existed, so the tables tell them apart: an empty file
+        is stamped and then populated, one holding tables cannot be identified
+        and is left untouched rather than read or repaired.
+
+        The stamp is committed before any table is created, so tables without a
+        marker mean a database from before this check and nothing else. The
+        caller runs inside BEGIN IMMEDIATE, which is what keeps two workers
+        opening the same new file from reaching different conclusions and what
+        makes an upgrade all-or-nothing.
+        """
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if version == SCHEMA_VERSION:
+            return
+        if version > SCHEMA_VERSION:
+            raise SchemaMismatch(
+                f"{self.db_path} is schema version {version}; this server reads "
+                f"{SCHEMA_VERSION}. It was written by a later server."
+            )
+        if version == 0:
+            tables = connection.execute(
+                "SELECT count(*) FROM sqlite_master"
+                " WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchone()[0]
+            if tables:
+                raise SchemaMismatch(
+                    f"{self.db_path} predates the schema version marker, so what "
+                    "it holds cannot be identified. Move it aside or delete it."
+                )
+        else:
+            self._upgrade(connection, version)
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _upgrade(self, connection, version):
+        """Run every step between the version on disk and this one."""
+        for step in range(version + 1, SCHEMA_VERSION + 1):
+            if step not in MIGRATIONS:
+                raise SchemaMismatch(
+                    f"{self.db_path} is schema version {version} and there is no "
+                    f"upgrade to {step}. Move it aside or delete it."
+                )
+            for statement in MIGRATIONS[step]:
+                connection.execute(statement)
 
     # -- groups ---------------------------------------------------------------
 
@@ -379,11 +468,53 @@ class Timeline:
         return [row["username"] for row in rows]
 
     def _subscribers(self, connection, channel_id):
+        """Who a channel reaches: subscribed, and still eligible to be.
+
+        Eligibility is re-read here rather than enforced when the subscription
+        was stored, so leaving the last group that admitted someone stops their
+        delivery at once. The row stays: it is their choice, and it applies
+        again the moment they are admitted again.
+        """
         rows = connection.execute(
-            "SELECT username FROM subscriptions WHERE channel_id = ? ORDER BY username",
+            """
+            SELECT s.username FROM subscriptions s
+             WHERE s.channel_id = ?
+               AND (NOT EXISTS (SELECT 1 FROM channel_audience
+                                 WHERE channel_id = s.channel_id)
+                    OR EXISTS (SELECT 1 FROM channel_audience ca
+                                 JOIN group_members gm ON gm.group_id = ca.group_id
+                                WHERE ca.channel_id = s.channel_id
+                                  AND gm.username = s.username))
+             ORDER BY s.username
+            """,
             (channel_id,),
         )
         return [row["username"] for row in rows]
+
+    def _audience_rule(self, connection, channel_id):
+        rows = connection.execute(
+            "SELECT group_id FROM channel_audience WHERE channel_id = ? ORDER BY group_id",
+            (channel_id,),
+        )
+        return [row["group_id"] for row in rows]
+
+    def _eligible(self, connection, channel_id, username):
+        restricted = connection.execute(
+            "SELECT 1 FROM channel_audience WHERE channel_id = ? LIMIT 1",
+            (channel_id,),
+        ).fetchone()
+        if restricted is None:
+            return True
+        row = connection.execute(
+            """
+            SELECT 1 FROM channel_audience ca
+              JOIN group_members gm ON gm.group_id = ca.group_id
+             WHERE ca.channel_id = ? AND gm.username = ?
+             LIMIT 1
+            """,
+            (channel_id, username),
+        ).fetchone()
+        return row is not None
 
     def _occupants(self, connection, room_id):
         rows = connection.execute(
@@ -412,6 +543,9 @@ class Timeline:
             "createdBy": room["created_by"],
             "createdAt": room["created_at"],
             "grants": [] if is_channel else self._grants(connection, room_id),
+            # The groups a channel is restricted to; empty is open, and a room
+            # has no such rule at all.
+            "restrictedTo": self._audience_rule(connection, room_id) if is_channel else [],
             "audience": audience,
             "occupants": self._occupants(connection, room_id),
             # The stored mark, not MAX(seq): see the module docstring.
@@ -460,7 +594,7 @@ class Timeline:
                     "SELECT 1 FROM subscriptions WHERE channel_id = ? AND username = ?",
                     (room_id, username),
                 ).fetchone()
-                return row is not None
+                return row is not None and self._eligible(connection, room_id, username)
             row = connection.execute(
                 """
                 SELECT 1 FROM grants
@@ -507,10 +641,15 @@ class Timeline:
                   JOIN subscriptions s ON s.channel_id = r.id
                   LEFT JOIN messages msg ON msg.room_id = r.id
                  WHERE r.kind = 'channel' AND s.username = ?
+                   AND (NOT EXISTS (SELECT 1 FROM channel_audience
+                                     WHERE channel_id = r.id)
+                        OR EXISTS (SELECT 1 FROM channel_audience ca
+                                     JOIN group_members gm ON gm.group_id = ca.group_id
+                                    WHERE ca.channel_id = r.id AND gm.username = ?))
                  GROUP BY r.id
                  ORDER BY COALESCE(MAX(msg.at), r.created_at) DESC
                 """,
-                (username,),
+                (username, username),
             ).fetchall()
             return [self._describe(connection, row["id"]) for row in rows]
 
@@ -522,6 +661,7 @@ class Timeline:
                     ("DELETE FROM messages WHERE room_id = ?", None),
                     ("DELETE FROM grants WHERE room_id = ?", None),
                     ("DELETE FROM subscriptions WHERE channel_id = ?", None),
+                    ("DELETE FROM channel_audience WHERE channel_id = ?", None),
                     ("DELETE FROM read_cursors WHERE room_id = ?", None),
                     ("DELETE FROM occupants WHERE room_id = ?", None),
                     ("DELETE FROM rooms WHERE id = ?", None),
@@ -549,6 +689,37 @@ class Timeline:
                     "DELETE FROM grants WHERE room_id = ?"
                     " AND principal_kind = ? AND principal_id = ?",
                     (room_id, principal_kind, principal_id),
+                )
+            return cursor.rowcount > 0
+
+    def audience_rule(self, channel_id):
+        """The groups a channel is restricted to. Empty means open."""
+        with self._connect() as connection:
+            return self._audience_rule(connection, channel_id)
+
+    def eligible(self, channel_id, username):
+        """Whether this user may subscribe to this channel, and be delivered to."""
+        with self._connect() as connection:
+            return self._eligible(connection, channel_id, username)
+
+    def admit_group(self, channel_id, group_id):
+        """Add a group to a channel's audience. True when it was not there."""
+        with self._connect() as connection:
+            with self._write(connection):
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO channel_audience"
+                    " (channel_id, group_id, admitted_at) VALUES (?, ?, ?)",
+                    (channel_id, group_id, time.time()),
+                )
+            return cursor.rowcount > 0
+
+    def revoke_group(self, channel_id, group_id):
+        """Remove a group. Removing the last one opens the channel to everybody."""
+        with self._connect() as connection:
+            with self._write(connection):
+                cursor = connection.execute(
+                    "DELETE FROM channel_audience WHERE channel_id = ? AND group_id = ?",
+                    (channel_id, group_id),
                 )
             return cursor.rowcount > 0
 

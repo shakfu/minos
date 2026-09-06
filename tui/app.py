@@ -41,6 +41,8 @@ HELP = [
     ("/group new <name> [user]...", "create a group (admin)"),
     ("/group add|rm <group> <user>", "assign or unassign (admin)"),
     ("/subscribe <id>  /unsubscribe", "a channel's audience is your own choice"),
+    ("/channel new <title> [@group]...", "found a channel (admin)"),
+    ("/channel admit|revoke <id> <group>", "restrict a channel to groups (admin)"),
     ("/quit", "leave every room and stop"),
     ("Tab / S-Tab", "next or previous space"),
     ("PgUp / PgDn", "scroll this room"),
@@ -232,7 +234,13 @@ class Ui:
             self.notice("Nowhere to send that; open a room first")
             return
         try:
-            self.client.send(self.selected, text)
+            if self.selected in self.client.channels:
+                # A channel is read-only to its audience, so the composer takes
+                # the producer's path. Whether this caller may is the server's
+                # answer, and it arrives as an ordinary refusal.
+                self.client.publish(self.selected, text)
+            else:
+                self.client.send(self.selected, text)
         except ChatError as error:
             self.notice(error)
 
@@ -344,6 +352,35 @@ class Ui:
             self.notice(f"{args[2]} left @{args[1]}, and every room it carried")
         else:
             raise ChatError("Usage: /group new <name> [user]... | add|rm <group> <user>")
+
+    def cmd_channel(self, args):
+        if args and args[0].lower() == "new" and len(args) >= 2:
+            return self._new_channel(args[1:])
+        if len(args) != 3 or args[0].lower() not in ("admit", "revoke"):
+            raise ChatError(
+                "Usage: /channel new <title> [@group]... | admit|revoke <id> <group>"
+            )
+        action, channel_id, name = args[0].lower(), args[1], args[2]
+        group = self.principal("@" + name)["id"]
+
+        if action == "admit":
+            channel = self.client.admit_group(channel_id, group)["channel"]
+            self.notice(f"@{name} may subscribe to {channel['title']}")
+        else:
+            channel = self.client.revoke_group(channel_id, group)["channel"]
+            if channel["restrictedTo"]:
+                self.notice(f"@{name} may no longer subscribe to {channel['title']}")
+            else:
+                self.notice(f"{channel['title']} is open to everybody again")
+
+    def _new_channel(self, args):
+        """Title first, then any groups it is restricted to, each `@name`."""
+        title = " ".join(word for word in args if not word.startswith("@"))
+        groups = [self.principal(word)["id"] for word in args if word.startswith("@")]
+
+        channel = self.client.create_channel(title, groups)
+        rule = "open to everybody" if not groups else "restricted"
+        self.notice(f"Opened {channel['title']} ({channel['id']}), {rule}")
 
     def cmd_subscribe(self, args):
         if not args:

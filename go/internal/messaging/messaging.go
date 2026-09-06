@@ -133,6 +133,11 @@ type RoomReply struct {
 	Room *timeline.Room `json:"room"`
 }
 
+type ChannelReply struct {
+	Ok      bool           `json:"ok"`
+	Channel *timeline.Room `json:"channel"`
+}
+
 type EnterReply struct {
 	Ok        bool   `json:"ok"`
 	Occupancy string `json:"occupancy"`
@@ -695,12 +700,14 @@ func (m *Messaging) AssignGroup(isAdmin bool, groupID, username string) (*timeli
 
 	// The new member's room list just changed, and nothing else would tell
 	// them: they were not in the audience of any of those rooms a moment ago.
-	rooms, err := m.store.RoomsFor(username)
+	// Channels for the same reason: a restricted one this group admits is theirs
+	// again if they had subscribed to it before losing eligibility.
+	spaces, err := m.spacesFor(username)
 	if err != nil {
 		return nil, err
 	}
-	for index := range rooms {
-		m.announceRoom(&rooms[index], nil)
+	for index := range spaces {
+		m.announceRoom(&spaces[index], nil)
 	}
 	return group, nil
 }
@@ -718,15 +725,17 @@ func (m *Messaging) UnassignGroup(isAdmin bool, groupID, username string) (*time
 	}
 
 	// Read before the change: afterwards these rooms are no longer theirs, so
-	// this is the last moment their client can be told to drop them.
-	before, err := m.store.RoomsFor(username)
+	// this is the last moment their client can be told to drop them. A restricted
+	// channel is lost the same way, and leaves the subscription behind -- being
+	// removed from a group is not unsubscribing.
+	before, err := m.spacesFor(username)
 	if err != nil {
 		return nil, err
 	}
 	if err := m.store.UnassignGroup(groupID, username); err != nil {
 		return nil, err
 	}
-	after, err := m.store.RoomsFor(username)
+	after, err := m.spacesFor(username)
 	if err != nil {
 		return nil, err
 	}
@@ -750,6 +759,19 @@ func (m *Messaging) UnassignGroup(isAdmin bool, groupID, username string) (*time
 	return group, nil
 }
 
+// spacesFor is every room and channel this user currently reaches.
+func (m *Messaging) spacesFor(username string) ([]timeline.Room, error) {
+	rooms, err := m.store.RoomsFor(username)
+	if err != nil {
+		return nil, err
+	}
+	channels, err := m.store.ChannelsFor(username)
+	if err != nil {
+		return nil, err
+	}
+	return append(rooms, channels...), nil
+}
+
 // -- channels ----------------------------------------------------------------
 
 // EnsureChannel declares a channel. Idempotent, so it can run on every boot.
@@ -767,10 +789,103 @@ func (m *Messaging) EnsureChannel(channelID, title string, subscribers []string)
 	return m.store.Room(channelID)
 }
 
+// CreateChannel founds a channel. Administrators only, and its audience rule may
+// be set at once.
+//
+// Nothing is pushed: a new channel has no subscribers, so there is nobody to
+// tell. The host announces it on `system` instead, which is how a user learns
+// there is something to subscribe to -- and the host is where the id of the
+// machine channel lives.
+func (m *Messaging) CreateChannel(
+	username string, isAdmin bool, title string, groups []any,
+) (*timeline.Room, error) {
+	if err := requireAdmin(isAdmin); err != nil {
+		return nil, err
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return nil, refuse("A channel needs a name")
+	}
+
+	// A channel's name is institutional, referred to, and unique among channels
+	// for the same reason a permanent room's is among rooms.
+	existing, err := m.store.RoomNamed(title, timeline.Admin, timeline.ChannelKind)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return nil, refuse("A channel called '%s' already exists", title)
+	}
+
+	admitted := make([]string, 0, len(groups))
+	for _, value := range groups {
+		groupID, ok := value.(string)
+		if !ok {
+			return nil, refuse("Not a group: %v", value)
+		}
+		group, err := m.store.Group(groupID)
+		if err != nil {
+			return nil, err
+		}
+		if group == nil {
+			return nil, refuse("No such group: %s", groupID)
+		}
+		admitted = append(admitted, groupID)
+	}
+
+	channel, err := m.store.CreateRoom(
+		title, username, timeline.ChannelKind, timeline.Admin, timeline.Persisted, "", nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for _, groupID := range admitted {
+		if _, err := m.store.AdmitGroup(channel.ID, groupID); err != nil {
+			return nil, err
+		}
+	}
+	return m.store.Room(channel.ID)
+}
+
+// PublishMessage is an administrator's own words on a channel.
+//
+// The producer's path, and separate from Send: a channel is read-only to its
+// audience, so the operation that writes to one is not the operation a
+// participant uses in a room.
+func (m *Messaging) PublishMessage(
+	username string, isAdmin bool, channelID, body string,
+) (*SendReply, error) {
+	if err := requireAdmin(isAdmin); err != nil {
+		return nil, err
+	}
+	channel, err := m.requireRoom(channelID, timeline.ChannelKind)
+	if err != nil {
+		return nil, err
+	}
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return nil, refuse("Empty message")
+	}
+
+	message, err := m.store.Append(channelID, username, body, timeline.Text)
+	if err != nil {
+		return nil, err
+	}
+	m.deliver(channel.Audience, messageEvent{Type: MessagePush, Message: message})
+	return &SendReply{Ok: true, Seq: message.Seq}, nil
+}
+
 // Subscribe joins a channel's audience: the one thing a user chooses alone.
 func (m *Messaging) Subscribe(username, channelID string) (*timeline.Room, error) {
 	if _, err := m.requireRoom(channelID, timeline.ChannelKind); err != nil {
 		return nil, err
+	}
+	eligible, err := m.store.Eligible(channelID, username)
+	if err != nil {
+		return nil, err
+	}
+	if !eligible {
+		return nil, refuse("That channel is restricted")
 	}
 	if _, err := m.store.Subscribe(channelID, username); err != nil {
 		return nil, err
@@ -792,6 +907,76 @@ func (m *Messaging) Unsubscribe(username, channelID string) (*Ok, error) {
 	}
 	m.deliver([]string{username}, roomGoneEvent{Type: RoomGonePush, Room: channelID})
 	return &Ok{Ok: true}, nil
+}
+
+// Admit adds a group to a channel's audience, restricting it if it was open.
+func (m *Messaging) Admit(isAdmin bool, channelID, groupID string) (*ChannelReply, error) {
+	if err := requireAdmin(isAdmin); err != nil {
+		return nil, err
+	}
+	channel, err := m.requireRoom(channelID, timeline.ChannelKind)
+	if err != nil {
+		return nil, err
+	}
+	group, err := m.store.Group(groupID)
+	if err != nil {
+		return nil, err
+	}
+	if group == nil {
+		return nil, refuse("No such group: %s", groupID)
+	}
+
+	// Everyone the channel reached before, so that the people an admission
+	// excludes -- everyone, when an open channel is restricted for the first
+	// time -- are told by the same call that excluded them.
+	reached := channel.Audience
+	if _, err := m.store.AdmitGroup(channelID, groupID); err != nil {
+		return nil, err
+	}
+	return m.audienceChanged(channelID, reached)
+}
+
+// Revoke withdraws a group. Withdrawing the last leaves the channel open.
+func (m *Messaging) Revoke(isAdmin bool, channelID, groupID string) (*ChannelReply, error) {
+	if err := requireAdmin(isAdmin); err != nil {
+		return nil, err
+	}
+	channel, err := m.requireRoom(channelID, timeline.ChannelKind)
+	if err != nil {
+		return nil, err
+	}
+
+	reached := channel.Audience
+	if _, err := m.store.RevokeGroup(channelID, groupID); err != nil {
+		return nil, err
+	}
+	return m.audienceChanged(channelID, reached)
+}
+
+// audienceChanged announces a channel whose rule moved, and drops whoever it now
+// excludes.
+//
+// A subscription outlives the eligibility that allowed it, so the people who
+// lost it keep their row and are simply no longer in the audience. Their client
+// is told once, here; nothing else would tell it, because the next message will
+// not be addressed to them.
+func (m *Messaging) audienceChanged(channelID string, reached []string) (*ChannelReply, error) {
+	channel, err := m.store.Room(channelID)
+	if err != nil {
+		return nil, err
+	}
+	m.announceRoom(channel, reached)
+
+	keeping := map[string]bool{}
+	for _, username := range channel.Audience {
+		keeping[username] = true
+	}
+	for _, username := range reached {
+		if !keeping[username] {
+			m.deliver([]string{username}, roomGoneEvent{Type: RoomGonePush, Room: channelID})
+		}
+	}
+	return &ChannelReply{Ok: true, Channel: channel}, nil
 }
 
 // -- events and announcements ------------------------------------------------

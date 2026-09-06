@@ -18,6 +18,7 @@ package chat
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strconv"
 	"strings"
@@ -91,6 +92,22 @@ func (h *Handler) EnsureSystemChannel() error {
 // already been carried out.
 func (h *Handler) PublishSystemEvent(text string) {
 	h.service.PostEventQuietly(config.SystemChannel, text, h.settings.Roster())
+}
+
+// createChannel founds a channel and says so where everybody is listening.
+//
+// A new channel has no subscribers, so the only way anyone learns it exists is
+// the machine channel every account is already in.
+func (h *Handler) createChannel(
+	username string, isAdmin bool, title string, groups []any,
+) (any, error) {
+	channel, err := h.service.CreateChannel(username, isAdmin, title, groups)
+	if err != nil {
+		return nil, err
+	}
+	h.PublishSystemEvent(fmt.Sprintf(
+		"%s opened the channel %s (%s)", username, channel.Title, channel.ID))
+	return channel, nil
 }
 
 // StartSweeper runs the transient-room sweep until the server stops.
@@ -239,6 +256,23 @@ func (h *Handler) run(
 
 	case "unsubscribe":
 		return h.service.Unsubscribe(username, text(fields, "channel"))
+
+	case "channel.create":
+		groups, err := list(fields, "groups")
+		if err != nil {
+			return nil, err
+		}
+		return h.createChannel(username, isAdmin, text(fields, "title"), groups)
+
+	case "channel.publish":
+		return h.service.PublishMessage(
+			username, isAdmin, text(fields, "channel"), text(fields, "body"))
+
+	case "channel.admit":
+		return h.service.Admit(isAdmin, text(fields, "channel"), text(fields, "group"))
+
+	case "channel.revoke":
+		return h.service.Revoke(isAdmin, text(fields, "channel"), text(fields, "group"))
 	}
 
 	return nil, &messaging.Refusal{Message: "No such chat operation: " + text(fields, "op")}

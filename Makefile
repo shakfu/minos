@@ -1,7 +1,7 @@
 VENV := .venv
 PY := $(VENV)/bin/python
 
-.PHONY: install go serve serve-go tui test conformance conformance-go clean
+.PHONY: install go serve serve-go tui demo test conformance conformance-go clean
 
 install: $(VENV)/bin/pytest
 
@@ -33,9 +33,15 @@ serve-go: go
 tui: install
 	$(PY) -m tui
 
-## The unit tests.
+## A narrated run of the channel audience rule against the compiled server.
+demo: install go
+	$(PY) docs/dev/demo_audience.py
+
+## The unit tests: pytest over the specification, go test over the server.
+## Both, because the store's schema check is not visible on the wire.
 test: install
 	$(VENV)/bin/pytest -q
+	cd go && go test ./...
 
 ## The wire contract alone, against any implementation of it.
 ## MINOS_CONFORMANCE_CMD launches a different server; MINOS_CONFORMANCE_URL

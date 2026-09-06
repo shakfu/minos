@@ -69,35 +69,47 @@ route they pinned is pinned against a running server by
 `tests/conformance/test_http.py`. The JavaScript toolchain is gone with them --
 `make client`, `make dev`, and the npm and corepack fallback in the Makefile.
 
+### Channels have an audience rule
+
+`chat-concepts.md` 2.4 is implemented. `channel_audience` stores the groups a
+channel admits, `subscribe` refuses anyone outside them, and `channel.admit` /
+`channel.revoke` are how an admin sets the rule. A channel with no groups is
+open, which is what `system` is.
+
+The question that was worth deciding first was the third one: eligibility is
+re-read on every delivery rather than fixed when the subscription was stored.
+Someone removed from the last group that admitted them keeps the subscription
+and leaves the audience -- the server does not destroy a choice it cannot
+restore, and re-admitting them needs nothing from them. The cost is a group
+resolution per fan-out and a row that can name someone who currently reads
+nothing.
+
+### The timeline database is versioned and upgradeable
+
+Both servers stamp `PRAGMA user_version`, refuse a database whose version they
+cannot reach, and run the steps between an older version and their own. The
+marker covers the tables both read; `presence` and `occupants` are the Python
+server's own, and their absence from a database `go/` wrote is not a mismatch.
+
+Two things are worth knowing before the first non-additive change. Every step so
+far is additive, so `MIGRATIONS[2]` is empty and the schema script does the work
+-- a step that moves data will be the first to test the machinery. And nothing
+downgrades: a database opened by a later server is refused by an earlier one,
+which is correct and means a rollback needs the file kept aside first.
+
+### Channels are founded and published to over the wire
+
+`channel.create` and `channel.publish` are administrators only, and the core
+answers who may publish without waiting for section 5: publication is not the
+subscribers', and moderators widen that set rather than defining it. A channel
+is announced on `system` when it is founded, because nobody is subscribed to it
+yet.
+
+What section 5 still owes is submissions: a user's message becoming a proposal a
+moderator approves, held outside the channel's sequence so a rejection leaves no
+gap for a client to re-request forever.
+
 ## Open
-
-### Channels have no audience rule
-
-`chat-concepts.md` 2.4 says a channel is open or restricted to named groups.
-Every channel here is open: `subscribe` checks that the channel exists and
-nothing else. It has not mattered, because `system` is the only channel and
-every account is subscribed to it at start-up.
-
-Three things are needed, and the third is the one worth deciding before the
-first two: a stored set of eligible groups, an eligibility check on `subscribe`,
-and an answer for the subscriber who leaves the last group that admitted them.
-Dropping them is consistent with a room's group grant, which is re-evaluated
-rather than snapshotted -- but a subscription was their own act, and revoking it
-is not the same as never having granted it.
-
-### The timeline database has no migrations
-
-The schema changed with the model and `Timeline.init` only runs
-`CREATE TABLE IF NOT EXISTS`, so an existing `.run/timeline.db` from before is
-neither upgraded nor rejected -- it simply lacks the tables and columns the
-server now reads. Deleting `.run/` is the current answer, which is fine while
-this is a demo and stops being fine the moment anything is worth keeping.
-
-The port added a second writer of the same file with a slightly different
-schema: `go/` never creates `presence` or `occupants`, and ignores them where a
-database written by `server/` has them. That happens to work and is not a design
--- there is no version marker, so neither implementation can tell a database it
-understands from one it does not.
 
 ### Administrators are a set in a config file
 

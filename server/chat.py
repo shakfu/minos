@@ -149,6 +149,18 @@ class ChatHandler:
             config.SYSTEM_CHANNEL, text, set(config.USERS)
         )
 
+    def _create_channel(self, username, admin, title, groups):
+        """Found a channel, and say so where everybody is listening.
+
+        A new channel has no subscribers, so the only way anyone learns it
+        exists is the machine channel every account is already in.
+        """
+        channel = self.service.create_channel(username, admin, title, groups or ())
+        self.publish_system_event(
+            f"{username} opened the channel {channel['title']} ({channel['id']})"
+        )
+        return channel
+
     # -- dispatch -------------------------------------------------------------
 
     def handle(self, connection, respond, args):
@@ -200,8 +212,22 @@ class ChatHandler:
             "group.unassign": lambda: service.unassign_group(
                 admin, request.get("group"), request.get("username")
             ),
-            "subscribe": lambda: service.subscribe(username, request.get("channel")),
+            "subscribe": lambda: service.subscribe(
+                username, request.get("channel"), subscriber
+            ),
             "unsubscribe": lambda: service.unsubscribe(username, request.get("channel")),
+            "channel.create": lambda: self._create_channel(
+                username, admin, request.get("title"), request.get("groups")
+            ),
+            "channel.publish": lambda: service.publish_message(
+                username, admin, request.get("channel"), request.get("body")
+            ),
+            "channel.admit": lambda: service.admit(
+                admin, request.get("channel"), request.get("group")
+            ),
+            "channel.revoke": lambda: service.revoke(
+                admin, request.get("channel"), request.get("group")
+            ),
         }
 
         call = operations.get(operation)
