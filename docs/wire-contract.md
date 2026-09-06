@@ -267,8 +267,9 @@ with no cursor.
 ### Rules a reimplementation must reproduce
 
 - `create` is administrators only, always persisted, and its title is unique
-  among permanent rooms, compared without case. `open` is open to anyone and
-  its title is not unique.
+  among permanent rooms, compared without case. A `retention` field sent with it
+  is ignored rather than refused, so no room is both admin-founded and
+  transient. `open` is open to anyone and its title is not unique.
 - `open` with no title derives one from the sorted principal names.
 - `retention` must be `persisted` or `transient`; anything else is refused.
 - Only an administrator may invite to an admin-founded room. Any participant
@@ -277,6 +278,10 @@ with no cursor.
   group is refused, because dropping it would be restored the moment grants
   were re-evaluated.
 - `send` to a channel is refused: a channel is read-only to its audience.
+- Every channel is open: `subscribe` checks that the channel exists and nothing
+  else. The audience rule in `chat-concepts.md` section 2.4 -- open, or
+  restricted to named groups -- is not implemented, so there is nothing here for
+  a reimplementation to reproduce yet.
 - An empty or whitespace-only body is refused.
 - `exit` may only release an occupancy the same connection took. Another
   connection's is refused with `Not in that room`.
@@ -311,6 +316,11 @@ with no cursor.
 A `room` push carries the whole object rather than a delta, so a client that
 missed one is not left behind. It is what tells a newly invited user the room
 exists at all.
+
+Presence names no room, and there is no per-room presence event. Where a user is
+travels on the `room` push instead, in `occupants`: presence says whether someone
+could reply, occupancy says who is in this room, and only the second decides when
+a transient room dies.
 
 `roomGone` covers three causes and does not distinguish them: a transient room
 expired, a user unsubscribed from a channel, or a group assignment was

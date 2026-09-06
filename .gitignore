@@ -123,3 +123,6 @@ packages.json
 
 # Message bus sockets, broker lock and the timeline database
 .run/
+
+# The compiled server. Built by `make go`.
+go/minosd

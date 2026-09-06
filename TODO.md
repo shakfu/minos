@@ -1,139 +1,59 @@
 # TODO
 
 Work that is known and not done. Questions about the *model* rather than the
-code live in [chat-concepts.md](chat-concepts.md) -- six open in the core,
+code live in [chat-concepts.md](chat-concepts.md) -- three open in the core,
 eight more in the sections deferred there -- and are not duplicated here.
 
-## Parked
+## Done
 
-### Reimplement the server in a compiled language
+### The server is reimplemented in Go
 
-Worth doing eventually, and worth not doing yet. **Go is the recommendation**;
-the conditions under which Rust would be the better call are below.
+`go/` is the server. `server/` and `messaging/` are the specification it was
+written from, and both pass `tests/conformance` -- 149 tests over HTTP and a
+websocket, run by `make conformance-go` and `make conformance`. `tui/` drives
+either without knowing which.
 
-**It is not a performance argument, and it should not be mistaken for one.**
-`pyzmq` is a binding to libzmq, so the framing, the socket I/O, the internal
-queueing and the poller are already C, with the GIL released across those calls.
-A pure-language reimplementation of ZeroMQ -- `zmq.rs`, `go-zeromq/zmq4` -- is as
-likely to be slower than libzmq as faster. Whatever a rewrite gains comes from
-removing Python, never from removing libzmq.
+**It was never a performance argument.** `pyzmq` binds libzmq, so the framing,
+the socket I/O and the poller were already C with the GIL released across them.
+What the port bought is architectural, and it is what the note that stood here
+predicted: one process with a goroutine per connection removes the reason the
+message bus existed at all. Gone rather than ported --
 
-**What it actually buys is architectural.** The message bus exists because of the
-GIL: the connection registry is a set in memory, which is the whole story until
-gunicorn runs several worker processes, and several processes exist because
-CPython cannot use several cores in one. A compiled runtime has no such
-constraint. One process with a goroutine or a task per connection serves
-everybody, and the fan-out is in-process, which deletes:
-
-- `messaging/bus.py` entirely -- `Broker`, the sender and relay threads, the
+- `messaging/bus.py` entirely: the broker, the sender and relay threads, the
   thread-local PUSH sockets, `release_thread`
 - the `broker.lock` claim, and the argument about why a lock beats a failed bind
 - `WorkerLease`, `sweep_dead_workers`, and the `worker-*.lock` files
-- the `SETTLE` delay, and every `PROPAGATION` sleep in the tests
+- the `presence` and `occupants` tables. They describe live connections, and the
+  process that holds the connections is now the process that answers for them
+- the `SETTLE` delay, and every `PROPAGATION` sleep
 
-That is the share of this codebase with the subtlest failure modes, which is the
-better reason to want it gone than any throughput number.
+`rooms.empty_since` stayed, because it outlives the connections. Start-up stamps
+every transient room not already counting down, which is what carries the promise
+of deletion across a restart instead of losing it there.
 
-**What survives is the sequence number.** It is not only a repair for what
-ZeroMQ drops: it covers a reconnect, a client that was away for an hour, and a
-lagging receiver -- which a Go channel or a `tokio` broadcast drops much as
-PUB/SUB does. The delivery contract is transport-independent, which is why it is
-the part worth keeping whatever replaces the rest.
+**What survived is the sequence number**, for the reason given before the port:
+it never repaired the bus alone. A reconnect, an hour offline and a lagging
+reader all outlive any transport, and the terminal client's gap repair works
+against the Go server unmodified.
 
-#### Why Go
+**ZeroMQ is not in it, and NATS is not needed yet.** Cross-host delivery is the
+only thing that would bring a broker back, and `deliver(audience, event)` is
+still the single callback it would go behind. Until then a fan-out is a function
+call over a map of connections.
 
-The workload is many long-lived websocket connections, small JSON frames fanned
-out to subsets, and SQLite writes with a serialised sequence assignment. That is
-I/O-bound, high-concurrency and low CPU per message -- close to what Go was
-designed for. The current thread-per-websocket structure becomes
-goroutine-per-connection at roughly 1:1, at a couple of KB each instead of an OS
-thread. Garbage collection is a non-issue at this shape: the payloads are small
-and short-lived, and a chat message does not care about a sub-millisecond pause.
+Two faults the port found, neither of which the specification had:
 
-Rust's costs apply to all of that and its advantages to a narrow slice. Async
-Rust means choosing a runtime, `Send` bounds on futures, `Pin`, and function
-colouring -- real friction for a server whose job is thousands of mostly idle
-connections.
+- A fan-out that wrote synchronously let one unresponsive peer stall every other
+  recipient for a full write timeout. Each connection now has an outbound queue
+  and a writer goroutine, and a client that cannot keep up is disconnected rather
+  than waited for -- it reconnects and repairs from its cursor.
+- Tying a websocket's lifetime to `r.Context()` is wrong: the upgrade ends the
+  request, and `net/http` may cancel that context under a hijacked connection.
+  The socket's lifetime is now the server's, ended by `httpapi.Server.Close`.
 
-**Note what happened to the strongest argument for Rust.** It was that
-`bus.py`'s "no socket is touched by two threads" is an invariant enforced by
-prose, and that `Send`/`Sync` would enforce it instead. But the same
-single-process reasoning that motivates the rewrite deletes `bus.py`. Rust's
-best card here is played against code that would not survive.
-
-**Rust becomes the better call if** connection counts grow large enough that
-per-connection memory matters; if anything CPU-heavy arrives -- end-to-end
-encryption, media relaying, CRDT merges; or if there are hard latency bounds.
-None of those are on the table while the server is what `chat-concepts.md`
-describes.
-
-#### On ZeroMQ, which neither language loses
-
-The options are the same shape in both: mature bindings to libzmq
-(`pebbe/zmq4`, `rust-zmq`), or a pure-language reimplementation
-([go-zeromq/zmq4](https://github.com/go-zeromq/zmq4),
-[zmq.rs](https://github.com/zeromq/zmq.rs)). Both reimplementations carry
-XPUB/XSUB and both are candid about being incomplete; the Go one is marked WIP
-and its maintainer has asked for a successor, so check the state of either
-before depending on it.
-
-One asymmetry cuts against Go: a cgo call occupies an OS thread the goroutine
-scheduler cannot preempt, so libzmq on a messaging hot path fights the model Go
-was chosen for. Rust has no green-thread scheduler to disrupt. If libzmq were
-central this would matter -- but it is not central, because the bus does not
-survive the rewrite at all.
-
-**When cross-host delivery is genuinely needed, the answer is probably NATS
-rather than ZeroMQ.** It solves this exact problem, it is written in Go so the
-client is first-class, and it improves on two things the current design works
-around:
-
-- Subject filtering is hierarchical rather than a byte prefix. `bus.py`
-  terminates topics with `|` precisely because a SUB filter is a prefix match
-  and `room.1` would otherwise swallow `room.11`. NATS subjects make those
-  distinct with no hack.
-- It authenticates. The README already admits the gap: anything that can reach
-  the `ipc://` sockets in `.run/` can publish to any room.
-
-The honest cost is an operational component: NATS is a server to run, where
-ZeroMQ's brokerless `ipc://` is lighter for single-host multi-process -- which is
-exactly the configuration that disappears.
-
-Either way, `deliver(audience, event)` keeps the choice contained to one
-callback, which is what makes this swappable rather than a second rewrite.
-
-**Cheaper wins come first.** Where Python actually costs something here is the
-work *around* the transport, and that is addressable without leaving it. The
-fan-out used to run one `json.dumps` per recipient for an identical frame;
-`Registry.broadcast` now encodes once, which removes a cost that grew with the
-size of a room rather than with the number of messages in it. Anything else of
-that shape should be found and fixed before a rewrite is argued for, because
-each one makes the argument weaker.
-
-**What is now ready.** The contract is written down in
-[docs/wire-contract.md](docs/wire-contract.md) and checked by
-`tests/conformance/`, which drives a server over HTTP and a websocket and
-imports nothing from `server/`, `messaging/` or `tui/`. `make conformance`
-points it at whatever implements it:
-
-    MINOS_CONFORMANCE_CMD="./minosd" make conformance
-
-That is what this section used to claim the two clients were for. They are not:
-`client/` speaks the retired protocol, so the contract had one speaker, and a
-rewrite checked by "the terminal client still looks right" would have been one
-Python program agreeing with another.
-
-Three configuration knobs exist because the suite needs them, and a
-reimplementation must honour them: `MINOS_PORT` to be startable at all,
-`MINOS_ROOM_GRACE` and `MINOS_ROOM_SWEEP` so a transient room can be watched
-expiring in seconds rather than minutes, and `MINOS_WS_PING` for the keepalive.
-
-**Why still not yet.** The model settled recently and the core has been
-implemented for less time still. Six questions in the core of
-[chat-concepts.md](chat-concepts.md) are open, and two decide the shape of what
-a rewrite would restructure: whether a participant may leave a room, and whether
-presence is global or per-room -- the second is what says when a transient room
-dies. Answer those, then port. The suite will say when the port is finished.
+**Cheaper wins still come first for `server/`.** It is a specification now, so
+clarity beats throughput there, and any behaviour worth having is worth stating
+in `docs/wire-contract.md` before it is written in either language.
 
 ## Open
 
@@ -149,6 +69,20 @@ Its own tests still pass, which is the trap -- they drive a mocked socket, so
 up should decide between porting and removing rather than leaving it in the
 tree looking maintained.
 
+### Channels have no audience rule
+
+`chat-concepts.md` 2.4 says a channel is open or restricted to named groups.
+Every channel here is open: `subscribe` checks that the channel exists and
+nothing else. It has not mattered, because `system` is the only channel and
+every account is subscribed to it at start-up.
+
+Three things are needed, and the third is the one worth deciding before the
+first two: a stored set of eligible groups, an eligibility check on `subscribe`,
+and an answer for the subscriber who leaves the last group that admitted them.
+Dropping them is consistent with a room's group grant, which is re-evaluated
+rather than snapshotted -- but a subscription was their own act, and revoking it
+is not the same as never having granted it.
+
 ### The timeline database has no migrations
 
 The schema changed with the model and `Timeline.init` only runs
@@ -156,6 +90,12 @@ The schema changed with the model and `Timeline.init` only runs
 neither upgraded nor rejected -- it simply lacks the tables and columns the
 server now reads. Deleting `.run/` is the current answer, which is fine while
 this is a demo and stops being fine the moment anything is worth keeping.
+
+The port added a second writer of the same file with a slightly different
+schema: `go/` never creates `presence` or `occupants`, and ignores them where a
+database written by `server/` has them. That happens to work and is not a design
+-- there is no version marker, so neither implementation can tell a database it
+understands from one it does not.
 
 ### Administrators are a set in a config file
 

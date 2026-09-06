@@ -5,7 +5,7 @@ PY := $(VENV)/bin/python
 # provides a working one, so fall back to it when npm is not on PATH.
 NPM := $(shell command -v npm >/dev/null 2>&1 && echo npm || echo 'corepack npm@11')
 
-.PHONY: install client serve dev tui test conformance clean
+.PHONY: install client go serve serve-go dev tui test conformance conformance-go clean
 
 install: $(VENV)/bin/pytest client/node_modules
 
@@ -25,8 +25,20 @@ client/node_modules: client/package.json
 client: client/node_modules
 	cd client && $(NPM) run build
 
+## The server -> go/minosd. This is the implementation; server/ is the
+## specification it was written from. See docs/wire-contract.md.
+go: go/minosd
+
+go/minosd: $(shell find go -name '*.go' 2>/dev/null) go/go.mod
+	cd go && go build -o minosd ./cmd/minosd
+
+## The Python server: the executable specification, not the deployable one.
 serve: install
 	$(PY) -m server.app
+
+## The compiled server, on the same port and the same contract.
+serve-go: go
+	./go/minosd
 
 ## The terminal client, against a running `make serve`.
 ## MINOS_SERVER overrides the address; --user skips the username prompt.
@@ -49,5 +61,9 @@ test: install
 conformance: install
 	$(VENV)/bin/pytest tests/conformance -q
 
+## The same suite against the compiled server.
+conformance-go: install go
+	MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd $(VENV)/bin/pytest tests/conformance -q
+
 clean:
-	rm -rf $(VENV) client/node_modules dist .run
+	rm -rf $(VENV) client/node_modules dist .run go/minosd

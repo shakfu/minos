@@ -189,6 +189,32 @@ invited-since fact to store: every participant of a room sees exactly the same
 thing. What varies is not who may see the history but how much of it the room
 still holds, which is retention's business (section 4) rather than admission's.
 
+**A participant may give up a grant that names them, and only that.** Leaving is
+not a change to the room -- the place is unaffected -- but to one user's
+relationship with it, so it withdraws that user's own grant and nothing else.
+
+Access inherited from a group cannot be given up. The grant names the group, and
+re-evaluating it would restore the access at once, so the alternative is to store
+the departure as a second fact that overrides the group. The model does not have
+that fact and should not acquire it: admission would then be decided by two rules
+that can disagree, and every question about who is in a room would have to ask
+both. Leaving such a room is refused instead, and the honest remedy is to be
+unassigned from the group.
+
+##### Presence and occupancy
+
+Two facts about where a user is, deliberately not one:
+
+- **Presence** is global. A user is online or not, and the whole roster sees it.
+  It answers whether someone could reply, not where they are.
+- **Occupancy** is per room. It answers who is in this room now, and it is what a
+  transient room's lifetime is measured from.
+
+Making presence per-room would produce occupancy under a second name; making
+occupancy global would leave nothing able to say which room to delete. A third
+fact between them has no question to answer -- a room already carries its
+occupants, and the roster already carries who is online.
+
 #### Transience
 
 A transient room exists for the duration of a conversation and is then deleted,
@@ -246,11 +272,24 @@ held by different people.
 |-|-|
 | Identity | An opaque id with a name. |
 | Lifetime | Lasting, like a group. Independent of subscribers. |
-| Authority | Subscribers read. Publication is not theirs. |
+| Authority | Subscribers read. Publication is not theirs. The chat admin sets the audience rule. |
 
-Channels are the one open object in the model. Where a room is closed and entered
-by invitation, a channel is subscribed to by choice — the asymmetry is
-deliberate, and it is the difference between a conversation and a broadcast.
+**Subscription is chosen rather than granted — but it is not always available.**
+A channel is either *open*, which any user may subscribe to, or *restricted* to
+named groups, which only their members may.
+
+| Audience rule | Who may subscribe |
+|-|-|
+| Open | anybody |
+| Restricted | members of the named groups |
+
+Eligibility is a gate on the act of subscribing; it is not an invitation, and
+nobody is ever admitted to a channel individually. That is what keeps
+subscription and invitation distinct even now that both can be refused: a room
+decides *who*, a restricted channel decides *which group*, and in both cases the
+person still chooses whether to be there. A room's grant may name a single user;
+a channel's restriction may not. A channel wanting one reader has misidentified
+itself, and is a room.
 
 In the core, a channel has one producer and no path for a subscriber to
 contribute. The existing `system` stream is precisely this: a machine producer,
@@ -268,7 +307,7 @@ duplicated or out-of-order frame.
 Two cursors, and conflating them is a bug rather than a simplification:
 
 - The **delivery cursor** answers *what have I received*, and exists to repair
-  gaps. It lives in the client; `client/src/core/chat.ts` already implements it.
+  gaps. It lives in the client; `tui/protocol.py` implements it.
 - The **read cursor** answers *what has this person seen*. It belongs on the
   server, because it is the same fact from every device and every interface.
   Conflating the two marks a message read by arriving.
@@ -281,8 +320,9 @@ makes retention possible later without breaking every client. Two cheap habits
 now keep that door open:
 
 - **The room stores its own high-water mark** rather than deriving the next
-  sequence from `MAX(seq)` over surviving rows, as `Timeline._last_seq` does
-  today. Correct now, and required the moment anything removes messages.
+  sequence from `MAX(seq)` over surviving rows. `rooms.high_seq` holds it.
+  Indistinguishable from the derived answer now, and required the moment
+  anything removes messages.
 - **Messages are keyed by `(room_id, seq)`**, as they already are, so moving or
   re-moving a row is idempotent.
 
@@ -292,7 +332,7 @@ now keep that door open:
 |-|-|-|-|-|
 | Created by | chat admin | chat admin | any user | chat admin |
 | Who may admit | chat admin | chat admin only | any participant | nobody — self-subscribe |
-| Admission is | assignment | invitation | invitation | subscription, by choice |
+| Admission is | assignment | invitation | invitation | subscription, where eligible |
 | Invitation names | — | user or group | user or group | — |
 | Identity | opaque id | opaque id | opaque id | opaque id |
 | Has a message log | **no** | yes | yes | yes |
@@ -315,6 +355,12 @@ now keep that door open:
    seems reasonable; if it is meant to be impossible, the reason should be
    stated, because otherwise it reads as an oversight.
 
+   The code has taken a position without arguing one: founding a permanent room
+   is always persisted, and a retention asked for is ignored rather than
+   refused. An admin who wants a transient room raises it the way any user
+   does, and gets a user-authority room. So the combination is unreachable, and
+   the open question is whether that is the intent or the default.
+
 3. **Should uniqueness extend beyond admin-created rooms?** Settled for now as
    admin-only: a permanent room's name is unique, an ad-hoc room's title is not,
    including when a user types one explicitly. The case for widening it is that
@@ -323,22 +369,18 @@ now keep that door open:
    across the whole server would surprise them. Worth revisiting once there are
    enough user-named rooms to see which way it bites.
 
-4. **May a participant leave a room?** Under Place semantics leaving is not a
-   change to the room but to that user's relationship with it. The harder half is
-   what it means when access came from a group assignment rather than a personal
-   invitation: leaving would be undone the moment the grant is re-evaluated, so
-   either it cannot be left, or the departure is itself a stored fact that
-   overrides the group grant.
+### Settled since
 
-5. **Is presence global or per-room?** Today it is global — online or not,
-   published to the whole roster. Occupancy needs something finer, at least for
-   transient rooms, where it decides when the room dies.
+Three questions that stood here have been answered by building the core, and
+their answers are in the model above rather than in this list.
 
-6. **Terminology: "system room".** Worth settling early, because `system` is
-   already the id of the machine channel (`server/config.py`, `SYSTEM_STREAM`).
-   Using "system room" as a synonym for an admin-created permanent room would
-   collide with it in every log line and error message. Recommend reserving
-   "system" for the machine channel and calling the other kind "permanent".
+- **May a participant leave a room?** Yes, for a grant naming them; no, for
+  access inherited from a group. Under *Admission*.
+- **Is presence global or per-room?** Global, with occupancy as the separate
+  per-room fact. Under *Presence and occupancy*.
+- **Terminology: "system room".** Reserved: `system` is the id of the machine
+  channel (`server/config.py`, `SYSTEM_CHANNEL`), and an admin-created room is
+  called *permanent* throughout. The two never share a word.
 
 # Later
 
@@ -386,14 +428,14 @@ If archival reset the count, a client holding cursor 500 would receive a new
 message numbered 1, judge it already seen, and silently discard it — the message
 would never appear, with nothing anywhere reporting a fault. So archival removes
 messages from the low end and never renumbers what remains, and the room reports
-its stored high-water mark as `lastSeq`. Deriving that from surviving rows, as
-`Timeline._last_seq` does, is correct only while some remain: a room archived
-down to empty would report zero and begin again at one, colliding with numbers
-already issued.
+its stored high-water mark as `lastSeq`. Deriving it from surviving rows would be
+correct only while some remain: a room archived down to empty would report zero
+and begin again at one, colliding with numbers already issued. `rooms.high_seq`
+is stored for this reason and for no benefit visible today.
 
 The gap archival leaves is one the client already describes. A participant
 returning with a cursor below what the room still holds is precisely the case
-`client/src/core/chat.ts` was built for: the backfill starts above the cursor,
+`tui/protocol.py` was built for: the backfill starts above the cursor,
 the shortfall is detected against `lastSeq`, and the log says `N earlier
 message(s) not shown` rather than pretending. Archival is a second producer of a
 condition the client can already report, so it needs no new protocol — provided
@@ -489,22 +531,38 @@ becomes an ordinary published message.
 So a submission is a distinct object with its own lifecycle — submitted, then
 approved or rejected — and the channel's log contains only what was published.
 
+### Settled
+
+**A rejection is reported; its reason is optional.** The author is told that
+moderators rejected the submission, and pointed at the content submission
+guidelines for the reasons one might be. A moderator may attach a comment and
+nothing obliges them to. The author therefore always learns the outcome rather
+than inferring it from silence, and the moderators are not required to justify
+each decision individually.
+
+**A moderator may not edit a submission.** Approve or reject, and nothing
+between. That is what keeps attribution a fact rather than a rule: what
+subscribers read is what its author wrote, so the question of crediting the
+author against the approver never arises. A submission that is nearly right is
+rejected with a comment, and resubmitted by its author.
+
+**The chat admin appoints moderators**, by symmetry with permanent rooms,
+channels and group assignment. Every institutional fact in the model is the
+admin's, and moderation is one.
+
+**Channel subscription is not open to everyone.** A channel is open or
+restricted to named groups; the rule is in section 2.4 rather than here, because
+it changes what a channel *is* rather than how one is curated.
+
 ### Open questions
 
-1. **What does a rejected submission tell its author?** Silence, a bare
-   rejection, or a reason.
-
-2. **May a moderator edit a submission before publishing?** "Curated" suggests
-   yes. If so, is the published message attributed to its author or to the
-   moderator who approved it?
-
-3. **Who appoints moderators, and may a channel have none?** Presumably the chat
-   admin, by symmetry with permanent rooms and channels. A channel with no
-   moderator accepts submissions nobody can ever approve.
-
-4. **Is channel subscription open to everyone?** Section 2.4 makes channels the
-   open object, but a channel restricted to a group is an obvious want, and it
-   would be a different mechanism from a room's invitation.
+1. **May a channel have no moderator?** Who appoints them is settled; whether
+   the set may be empty is not. The `system` channel is already one -- a machine
+   producer, no moderator, and no submission path -- which suggests the answer is
+   yes, and that such a channel is a broadcast that accepts no submissions. That
+   is an inference from the one channel that exists, not a decision. The case
+   for making it explicit: a channel that accepts submissions and has no
+   moderator collects work nobody can ever approve.
 
 ## 6. Deliberately excluded
 
@@ -514,47 +572,52 @@ indicators; attachments as first-class objects rather than VFS paths mentioned i
 text; federation across servers; calls or huddles layered on a room; and any
 conversion of a transient room into a persisted one.
 
-## 7. What this changes in the code
+## 7. Where the code stands
 
-For orientation, not as a work plan. The existing `messaging/` implements a
-retired model in which a room *was* a set of people.
+For orientation, not as a work plan.
 
-### For the core
+### The core is built
 
-**Retired.** `merge` (`messaging/service.py:210`) folded one room's membership
-into another's. It was a membership-as-identity gesture and has no meaning when a
-room is a place — two places do not become one. The client-side pair dedupe at
-`client/src/apps/Chat.ts:175` goes with it, along with the derived room title
-frozen at creation and never recomputed.
+Everything in section 2 is implemented: groups as a stored principal, the chat
+admin role, the two room axes, grants naming a user or a group and resolved at
+the moment access is checked, occupancy separate from access, the stored
+empty-since moment and the sweep that acts on it, channel subscriptions,
+per-user read cursors, and a stored per-room high-water mark.
 
-**Reworked.** `open_room` gains a creation-authority check and a retention flag.
-`invite` becomes the single admission mechanism, accepts a group as well as a
-user, and is authority-checked per room type; grants that track a group must be
-re-evaluated when assignments change, which is new behaviour rather than a
-tightened check. Room `kind` stops being advisory: the service currently accepts
-a `send` to a stream from any member (`service.py:166` checks membership, not
-kind), which must be refused. `leave` currently revokes access to history the
-leaver wrote, a side effect of `require_member` gating `history`
-(`service.py:124`, `:153`); that needs revisiting alongside core question 3.
+The retired model went with it. `merge` folded one room's membership into
+another's, which has no meaning when a room is a place -- two places do not
+become one. The web desktop that made membership an editable list went too;
+`client/` still speaks that protocol and no longer connects, which
+[TODO.md](TODO.md) covers.
 
-**New.** Groups, as a stored principal with assignments. The chat admin role.
-Room retention, the stored empty-since moment, and the sweep that deletes
-transient rooms once grace expires. Occupancy, distinct from access. Channel
-subscriptions. Per-user read cursors. A stored per-room high-water mark, in place
-of deriving the next sequence from `MAX(seq)`.
+What the core *is* on the wire, as opposed to what it means, is written down in
+[docs/wire-contract.md](docs/wire-contract.md) and checked by
+`tests/conformance/`. That suite answers "is this implemented correctly", for
+any implementation in any language. This document answers "is this the right
+thing to implement", and the two should not be merged.
 
-### For the later sections
+### One part of the core is not
 
-An archival frequency per room, an `archived_messages` table, the pass that moves
-rows into it — which shares the sweep with transient expiry, since both must run
-when nobody is connected — and an admin-only, pageable read over the archive that
-is a separate operation from `history()` rather than a widening of it. Then
-moderators, and the submission queue held outside the channel's sequence.
+A channel's audience rule (section 2.4) is described and unimplemented. Every
+channel is open: `subscribe` checks that the channel exists and nothing else,
+which is correct for `system` -- a machine channel every account is subscribed to
+at start-up -- and is the whole of what exists. A restricted channel needs a
+stored set of eligible groups, an eligibility check on `subscribe`, and a decision
+about what happens to a subscriber who leaves the last group that admitted them.
+
+### The later sections are not
+
+Section 4 needs an archival frequency per room, an `archived_messages` table,
+the pass that moves rows into it -- sharing the sweep with transient expiry,
+since both must run when nobody is connected -- and an admin-only, pageable read
+over the archive, as a separate operation from `history` rather than a widening
+of it. Section 5 needs moderators, and a submission queue held outside the
+channel's sequence.
 
 ### Untouched
 
-The delivery machinery is orthogonal to all of it: per-room sequence numbers, the
-gap repair in `client/src/core/chat.ts`, the ZeroMQ bus, and the worker-liveness
-design. Those are the parts that are already right, and two are reused rather
-than disturbed — the sweep that expires transient rooms, and the sequencing the
-submission queue is built to avoid perturbing.
+The delivery machinery is orthogonal to all of it: per-room sequence numbers,
+the gap repair in `tui/protocol.py`, the ZeroMQ bus, and the worker-liveness
+design. Two of them are reused rather than disturbed by the later sections --
+the sweep that expires transient rooms, and the sequencing the submission queue
+is built to avoid perturbing.

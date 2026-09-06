@@ -36,6 +36,10 @@ PUSH_TIMEOUT = 10.0
 # How long a socket waits for its handshake before the connection is a failure.
 HANDSHAKE_TIMEOUT = 10.0
 
+# How long to wait for the handshake before provoking the server into sending
+# something else. See Socket.handshake for what this works around.
+PROVOKE_AFTER = 0.5
+
 
 class WireError(Exception):
     """The server refused an operation, or never answered one."""
@@ -291,11 +295,39 @@ class Socket:
     # -- receiving ------------------------------------------------------------
 
     def handshake(self, timeout=HANDSHAKE_TIMEOUT):
-        """The `osjs/core:connected` frame, which arrives before anything else."""
-        frame = _drain(self.control, lambda f: True, timeout)
+        """The `osjs/core:connected` frame, which arrives before anything else.
+
+        A server fast enough to put that frame in the same TCP segment as the
+        101 response exposes a defect in `simple_websocket`: its reader blocks
+        on the socket before draining what its parser already holds, so a frame
+        that arrived alongside the handshake response waits for unrelated
+        traffic that may never come. Provoking a reply is what supplies it.
+
+        This weakens nothing. The assertion is still that
+        `osjs/core:connected` is the first control frame on the connection.
+        """
+        try:
+            frame = _drain(self.control, lambda f: True, PROVOKE_AFTER)
+        except AssertionError:
+            self._provoke()
+            frame = _drain(self.control, lambda f: True, timeout)
+
         if frame["name"] != "osjs/core:connected":
             raise AssertionError(f"First frame was {frame['name']!r}")
         return frame
+
+    def _provoke(self):
+        """Ask something answerable, so that bytes come back.
+
+        The reply is discarded: it carries a pid no caller is waiting on, and
+        its only job is to be inbound traffic.
+        """
+        self.send_frame(
+            {
+                "name": APPLICATION_MESSAGE,
+                "params": [{"pid": 0, "name": APPLICATION, "args": [{"op": "__wake__"}]}],
+            }
+        )
 
     def expect_push(self, predicate, timeout=PUSH_TIMEOUT):
         """The next push matching `predicate`. Discards the ones before it."""

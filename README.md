@@ -1,6 +1,8 @@
 # minos
 
-A conversation server with a Python backend, a terminal client, and a frozen wire contract between them.
+A conversation server in Go, a terminal client, and a frozen wire contract between them.
+
+There are two servers and that is deliberate. `go/` is the implementation. `server/` and `messaging/` are the specification it was written from -- executable, readable, and not meant to be deployed. Neither is authoritative on its own: [docs/wire-contract.md](docs/wire-contract.md) is, and `tests/conformance/` holds both to it.
 
 It started as the [OS.js](https://www.os-js.org) v3 client against a Python server that reimplements the contract OS.js expects. That client has since been removed, and the web desktop that replaced it has been superseded in turn: `tui/` is the current front end, and the desktop metaphor it dropped took the old conversation model with it. The server still speaks the OS.js wire format -- route shapes, `osjs/*` websocket message names, and the `osjs:` mountpoint are all kept as-is, which is what lets a front end be replaced without touching the server.
 
@@ -9,26 +11,29 @@ What a room, a group and a channel actually are is settled in [chat-concepts.md]
 ## Run
 
 ```
-make serve    # Flask on http://127.0.0.1:8000
+make serve-go # the Go server on http://127.0.0.1:8000
 make tui      # the terminal client, in another shell
 ```
 
+`make serve` runs the Python one instead, on the same port and the same contract. Use it to read what a behaviour is supposed to be; use `serve-go` for anything else. Go 1.25 or newer builds it.
+
 Log in as `demo` / `demo`. There are also `alice` and `bob`, with passwords to match; a conversation needs two of them, so run `make tui` again in a third shell and log in as another. `demo` is the only administrator, which is what lets it found a permanent room or manage a group.
 
-`make serve` no longer needs a browser build. It warns and serves the API alone if `dist/` is empty, because the terminal client needs the routes and the websocket rather than a bundle.
+Neither server needs a browser build. Both warn and serve the API alone if `dist/` is empty, because the terminal client needs the routes and the websocket rather than a bundle.
 
 Inside the client, `/help` lists the commands. `/open alice` raises a room, `/meet alice` raises one that is discarded when everyone leaves, `/create Engineering` founds a permanent one, and `/invite @Team` admits a whole group.
 
 ```
-make test     # typecheck, vitest, pytest
-make conformance   # the wire contract alone, against any server
-make dev      # Vite with hot reload, for the retired web client
+make test          # typecheck, vitest, pytest
+make conformance-go  # the wire contract, against the Go server
+make conformance     # the same suite, against the Python one
+make dev           # Vite with hot reload, for the retired web client
 ```
 
-`make conformance` runs `tests/conformance/`, which talks to a server over HTTP
-and a websocket and imports none of its code. `MINOS_CONFORMANCE_CMD` points it
-at a different implementation and `MINOS_CONFORMANCE_URL` at one already
-running. The contract it checks is [docs/wire-contract.md](docs/wire-contract.md).
+`tests/conformance/` talks to a server over HTTP and a websocket and imports none
+of its code, which is what lets one suite hold two implementations to one
+contract. `MINOS_CONFORMANCE_CMD` points it at any server and
+`MINOS_CONFORMANCE_URL` at one already running.
 
 `make dev` opens a browser on http://localhost:5173/. `BROWSER=none make dev` starts the server without one. It builds `client/`, which no longer speaks the server's protocol -- see [TODO.md](TODO.md).
 
@@ -42,10 +47,11 @@ Python dependencies live in `pyproject.toml`: the four the server and terminal c
 |-|-|
 | `chat-concepts.md` | The model: what a room, group and channel are. Front-end independent. |
 | `docs/` | The wire contract, and development notes under `docs/dev/`. |
+| `go/` | The server. One process, a goroutine per connection, SQLite. |
 | `tui/` | The terminal client. Python, curses, no UI framework. |
 | `client/` | The retired web desktop. Speaks the old protocol -- see [TODO.md](TODO.md). |
-| `server/` | Flask app, VFS, websocket, config, and the adapter binding the two below. |
-| `messaging/` | Conversations: timeline, ZeroMQ bus, operations. Standalone. |
+| `server/` | The specification: Flask app, VFS, websocket, config, and the adapter binding the two below. |
+| `messaging/` | The specification's conversation half: timeline, ZeroMQ bus, operations. |
 | `tests/` | pytest. Most of it drives the Flask test client; the messaging tests need no server. |
 | `tests/conformance/` | The wire contract as a black-box suite. Imports no implementation. |
 | `dist/` | Build output. Generated, and optional. |
@@ -53,6 +59,32 @@ Python dependencies live in `pyproject.toml`: the four the server and terminal c
 | `.run/` | Timeline database, bus sockets, and the liveness locks. Generated. |
 | `TODO.md` | Known work not done, including the parked rewrite in a compiled language. |
 | `pyproject.toml` | Python dependencies and pytest configuration. |
+
+## The server
+
+`go/` is one process. A goroutine per connection, an in-process fan-out, and
+SQLite for the timeline. The message bus, the worker leases and the liveness
+locks in `messaging/` have no counterpart here: they existed because CPython
+needed several worker processes, and one process needs none of it.
+
+| Path | Contents |
+|-|-|
+| `go/cmd/minosd` | The entry point: configuration, start-up, shutdown. |
+| `go/internal/httpapi` | Routes, the signed session cookie, and the websocket upgrade. |
+| `go/internal/socket` | The frame format, the connection registry, and the fan-out. |
+| `go/internal/chat` | The seam: operation names to messaging calls, occupancy per connection. |
+| `go/internal/messaging` | The operations. Knows nothing about how a caller is connected. |
+| `go/internal/timeline` | The store: rooms, grants, messages, and the per-room sequence. |
+| `go/internal/vfs` | Mountpoints, path resolution, and file operations. |
+
+Two things it does that the specification does not, both found by porting:
+
+- **A send is a queue push.** Each connection has an outbound queue and one
+  writer goroutine, so a fan-out is never held up by the slowest recipient, and
+  a client that falls too far behind is disconnected rather than waited for.
+- **A websocket outlives the request that opened it.** Its lifetime is the
+  server's, not `r.Context()`, which `net/http` may cancel once a connection is
+  hijacked.
 
 ## Front end
 

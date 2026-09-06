@@ -115,6 +115,17 @@ def test_a_permanent_room_needs_a_name(demo):
     assert demo.refuse("create", title="   ") == "A permanent room needs a name"
 
 
+def test_a_permanent_room_cannot_be_transient(demo, unique):
+    """No room is both admin-founded and transient, and asking is not an error.
+
+    An admin who wants a transient room raises it the way anyone does, and gets
+    a user-authority room. See chat-concepts.md, core question 2.
+    """
+    room = demo.call("create", title=unique("Standing"), retention="transient")
+    assert room["retention"] == "persisted"
+    assert room["authority"] == "admin"
+
+
 def test_a_permanent_name_is_unique_without_case(demo, unique):
     """"Post it in Engineering" only works if that resolves to one room."""
     title = unique("Engineering")
@@ -401,6 +412,30 @@ def test_assigning_to_an_unknown_group_says_so(demo):
 def test_assigning_an_unknown_user_says_so(demo, unique):
     group = demo.call("group.create", name=unique("Team"))
     assert demo.refuse("group.assign", group=group["id"], username="ghost") == "No such user: ghost"
+
+
+# -- presence and occupancy -------------------------------------------------
+
+
+def test_presence_is_global_and_names_no_room(alice, bob, unique):
+    """Two facts, not one. Presence says whether someone could reply."""
+    room = alice.call("open", invite=[], title=unique("Alone"))
+    alice.call("enter", room=room["id"])
+
+    # bob shares no room with alice and still sees her online.
+    online = {user["username"]: user["online"] for user in bob.call("sync")["users"]}
+    assert online["alice"] is True
+
+
+def test_occupancy_is_per_room(alice, unique):
+    """And it is the fact a transient room's lifetime is measured from."""
+    here = alice.call("open", invite=[], title=unique("Here"))
+    elsewhere = alice.call("open", invite=[], title=unique("Elsewhere"))
+    alice.call("enter", room=here["id"])
+
+    rooms = {room["id"]: room for room in alice.call("sync")["rooms"]}
+    assert rooms[here["id"]]["occupants"] == ["alice"]
+    assert rooms[elsewhere["id"]]["occupants"] == []
 
 
 # -- channels ---------------------------------------------------------------
