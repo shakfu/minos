@@ -190,9 +190,7 @@ func describe(virtual, target string, info fs.FileInfo) Entry {
 	// three times come from the same place, so both go through the raw stat.
 	if raw, ok := info.Sys().(*syscall.Stat_t); ok {
 		entry.Stat.Mode = uint32(raw.Mode)
-		access := time.Unix(raw.Atim.Sec, raw.Atim.Nsec)
-		modify := time.Unix(raw.Mtim.Sec, raw.Mtim.Nsec)
-		change := time.Unix(raw.Ctim.Sec, raw.Ctim.Nsec)
+		access, modify, change := rawTimes(raw)
 		entry.Stat.Atime, entry.Stat.AtimeMs = stamp(access)
 		entry.Stat.Mtime, entry.Stat.MtimeMs = stamp(modify)
 		entry.Stat.Ctime, entry.Stat.CtimeMs = stamp(change)
