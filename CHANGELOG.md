@@ -45,6 +45,33 @@ and the wire format between them is still OS.js's without any OS.js code.
 
 ### Added
 
+- Two decisions in `chat-concepts.md` 5, both moved out of its open questions. A
+  channel may have no moderator, and such a channel accepts no submissions: a
+  price feed publishes to an audience and there is nothing to curate, so a
+  submission to a moderator-less channel is refused rather than queued. And a
+  rejected submission is deleted -- it never held a sequence number, so nothing is
+  left for a subscriber to re-request.
+
+  Read-only is not the reason for the first. Every channel is read-only to its
+  audience, so that cannot separate a curated one from a broadcast; what separates
+  them is whether submissions are taken, and the moderator set is how that is
+  said.
+
+  Two questions replace the one answered, both about a submission's lifetime.
+  Deleting a rejection at the moment a moderator makes it would turn the settled
+  "the author always learns the outcome" into "learns if connected", so *when* the
+  row goes is open. So is what happens to a queue when the last moderator is
+  revoked.
+
+- Go tests for the outbound queue in `go/internal/socket`: the depth a connection
+  absorbs, the hang-up on the frame past it, a send to a closed connection,
+  ordering through the writer goroutine, and a fan-out that reaches the reading
+  peer while reporting the saturated one as unreached. Unit tests rather than
+  conformance ones, because none of it is on the wire -- the depth is a constant,
+  and a client that stops reading without closing is not something the suite's
+  websocket can express. The send past a full queue runs under a deadline, so a
+  send that blocks fails one assertion instead of timing the package out.
+
 - `make demo`, a narrated run of the audience rule against the compiled server:
   three real websockets, its own database, and the refusals and pushes printed
   as they happen. It launches and drives the server through

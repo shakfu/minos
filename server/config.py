@@ -24,11 +24,14 @@ SESSION_LIFETIME = timedelta(hours=12)
 # Overridable so a conformance run can observe one without waiting half a minute.
 WS_PING_INTERVAL = float(os.environ.get("MINOS_WS_PING", "30"))
 
-# Cookie signing key. Override in any deployment that is not a local demo.
+# Cookie signing key. The default is usable, which is only safe because this
+# server runs locally; see USERS below.
 SECRET_KEY = os.environ.get("MINOS_SECRET", "minos-development-secret")
 
-# Demo credentials. Replace with a real adapter before exposing the server.
-# Three accounts, because one user cannot demonstrate a conversation.
+# Test credentials, in plain text, and a fixture rather than a placeholder: this
+# server is not to be exposed, so there is no adapter coming. Anything that
+# needs real accounts needs a real user store and a secret with no default.
+# Three of them, because one user cannot demonstrate a conversation.
 USERS = {"demo": "demo", "alice": "alice", "bob": "bob"}
 
 # Who may found a permanent room, invite to one, and manage groups. The name is

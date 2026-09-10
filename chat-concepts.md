@@ -565,15 +565,46 @@ admin's, and moderation is one.
 restricted to named groups; the rule is in section 2.4 rather than here, because
 it changes what a channel *is* rather than how one is curated.
 
+**A channel may have no moderator, and then it accepts no submissions.** A price
+feed is the case: a machine publishes, an audience reads, and there is nothing to
+curate. What makes the empty set safe is the second half -- a submission to a
+channel with no moderator is refused rather than queued, so the channel that
+collects work nobody can ever approve does not exist.
+
+Read-only is not what decides this. Every channel is read-only to its audience,
+`system` and a curated one alike, so that property cannot separate the two. What
+separates them is whether the channel takes submissions at all, and the moderator
+set is how that is said.
+
+**A rejected submission is deleted.** It never held a sequence number, so nothing
+is left behind for a subscriber to re-request, and the store does not accumulate
+content that only its author and the moderators ever saw. When it is deleted is
+the first open question below.
+
 ### Open questions
 
-1. **May a channel have no moderator?** Who appoints them is settled; whether
-   the set may be empty is not. The `system` channel is already one -- a machine
-   producer, no moderator, and no submission path -- which suggests the answer is
-   yes, and that such a channel is a broadcast that accepts no submissions. That
-   is an inference from the one channel that exists, not a decision. The case
-   for making it explicit: a channel that accepts submissions and has no
-   moderator collects work nobody can ever approve.
+1. **When is a rejected submission deleted -- at the rejection, or once its
+   author knows?** That it is deleted is settled; the moment is not, and the
+   Settled rule above is what makes it a question. A rejection reported only as a
+   push reaches a connected author and nobody else, and once the row is gone
+   there is nothing left to tell a returning one from -- so deleting at the
+   rejection turns "always learns the outcome" into "learns if connected".
+   Deleting on the author's acknowledgement instead keeps the promise and still
+   leaves nothing behind, at the cost of a state on the row and rows belonging to
+   authors who never come back. The `system` channel is not a way out: it carries
+   machine events to every subscriber, so a rejection routed through it would
+   disclose the rejected text to the whole audience.
+
+   The same moment decides whether an author can act on a rejection. "Rejected
+   with a comment, and resubmitted by its author" needs the text to outlive the
+   rejection somewhere its author can still reach.
+
+2. **What becomes of a queued submission when the last moderator is revoked?**
+   The channel becomes one that accepts no submissions, and whatever is already
+   queued has nobody left who may act on it. Auto-rejecting the queue costs no
+   new state and keeps the author informed; refusing the revocation while the
+   queue is not empty is the other answer. Leaving the rows orphaned is not one,
+   because it is exactly the silence the Settled rule rules out.
 
 ## 6. Deliberately excluded
 

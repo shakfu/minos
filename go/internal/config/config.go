@@ -49,8 +49,9 @@ type Config struct {
 	// Ping is how long a client may be silent before a keepalive frame.
 	Ping time.Duration
 
-	// Demo credentials, and who among them is an administrator. Replace both
-	// with a real adapter before exposing the server.
+	// Test credentials, and who among them is an administrator. A fixture
+	// rather than a placeholder: this server is not to be exposed, so no
+	// adapter is coming. See server/config.py.
 	Users  map[string]string
 	Admins map[string]bool
 }

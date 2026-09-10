@@ -2,14 +2,14 @@
 
 Work that is known and not done. Questions about the *model* rather than the
 code live in [chat-concepts.md](chat-concepts.md) -- three open in the core,
-eight more in the sections deferred there -- and are not duplicated here.
+six more in the sections deferred there -- and are not duplicated here.
 
 ## Done
 
 ### The server is reimplemented in Go
 
 `go/` is the server. `server/` and `messaging/` are the specification it was
-written from, and both pass `tests/conformance` -- 150 tests over HTTP and a
+written from, and both pass `tests/conformance` -- 161 tests over HTTP and a
 websocket, run by `make conformance-go` and `make conformance`. `tui/` drives
 either without knowing which.
 
@@ -109,12 +109,31 @@ What section 5 still owes is submissions: a user's message becoming a proposal a
 moderator approves, held outside the channel's sequence so a rejection leaves no
 gap for a client to re-request forever.
 
+### The specification is frozen at the core
+
+`server/` and `messaging/` specify section 2 and stop there. Sections 4 and 5 are
+written in Go alone.
+
+The two-implementation proof has already paid for itself -- it is what
+`docs/wire-contract.md` and 161 conformance tests were built on, and porting
+found two faults the specification did not have. What it costs per feature is
+measurable: the audience rule was 597 lines of Go and 329 of specification, so
+the second copy adds 55%. Submissions are larger than the audience rule and
+would be written twice in two languages for one client.
+
+So `tests/conformance/` splits. The suite that both servers pass covers the core
+and stays that way; anything section 5 adds is Go-only, and a test that reaches
+it does not run against `server/`.
+
+### The credentials are a fixture, not a placeholder
+
+`config.USERS` and `config.ADMINS` are three plain-text accounts and one
+administrator, in both servers. No adapter is coming, because this server is not
+to be exposed. That is now said where they are defined rather than standing here
+as work.
+
 ## Open
 
-### Administrators are a set in a config file
-
-`config.ADMINS` names them, and the role reaches the rest of the server on the
-session profile's `groups`. That is enough to demonstrate the authority split
-and is the same shape of placeholder as `config.USERS`; both want a real adapter
-before this server is exposed.
+Nothing in the core. See `chat-concepts.md` sections 4 and 5, and the three
+questions in section 3.
 
