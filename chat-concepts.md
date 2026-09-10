@@ -8,7 +8,7 @@ not yet a concept.
 The document is in two halves, because the model has two halves.
 
 **Sections 2 and 3 are the core**: users, groups, rooms, admission, messages.
-Everything here is load-bearing — remove any of it and something else stops
+Everything here is structural — remove any of it and something else stops
 being definable. This is what a first implementation builds, and what any front
 end needs in order to exist at all.
 
@@ -104,7 +104,7 @@ access is decided, so admission can be granted to a set of people once rather
 than to each of them repeatedly, and so a new user inherits access by being
 assigned rather than by being invited to everything individually.
 
-The load-bearing consequence: **groups have no message log.** If a group had its
+The structural consequence: **groups have no message log.** If a group had its
 own conversation it would be a room whose access rule is itself, and the two
 concepts would collapse. A group that wants to talk gets a room.
 

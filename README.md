@@ -75,7 +75,7 @@ needed several worker processes, and one process needs none of it.
 | `go/cmd/minosd` | The entry point: configuration, start-up, shutdown. |
 | `go/internal/httpapi` | Routes, the signed session cookie, and the websocket upgrade. |
 | `go/internal/socket` | The frame format, the connection registry, and the fan-out. |
-| `go/internal/chat` | The seam: operation names to messaging calls, occupancy per connection. |
+| `go/internal/chat` | The layer: operation names to messaging calls, occupancy per connection. |
 | `go/internal/messaging` | The operations. Knows nothing about how a caller is connected. |
 | `go/internal/timeline` | The store: rooms, grants, messages, and the per-room sequence. |
 | `go/internal/vfs` | Mountpoints, path resolution, and file operations. |
