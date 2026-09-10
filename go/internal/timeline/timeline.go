@@ -68,12 +68,23 @@ const (
 // ErrNoRoom is returned by Append for a room that does not exist.
 var ErrNoRoom = errors.New("no such room")
 
-// SchemaVersion is stamped in PRAGMA user_version and checked on open. It
-// covers the tables both servers read; presence and occupants belong to the
-// Python server alone and are not part of it. Raise it when the shared schema
-// changes, in both implementations at once -- SCHEMA_VERSION in
-// messaging/timeline.py is the same number.
-const SchemaVersion = 2
+// ErrNotPending is returned by Approve for a submission already decided.
+var ErrNotPending = errors.New("submission is not pending")
+
+// Where a submission stands. Approved is never stored: approval turns the row
+// into a message and deletes it, so that state exists only on the push.
+const (
+	Pending  = "pending"
+	Rejected = "rejected"
+	Approved = "approved"
+)
+
+// SchemaVersion is stamped in PRAGMA user_version and checked on open. Version 2
+// is the schema both servers read, and SCHEMA_VERSION in messaging/timeline.py
+// stays there, because the specification is frozen at the core. Later versions
+// are this server's alone, so a database it has upgraded is refused by the
+// Python one. presence and occupants belong to the Python server and are in none.
+const SchemaVersion = 3
 
 // migrations is how to reach each version from the one before it. A version
 // with no entry has no upgrade path and a database at the version below it is
@@ -84,6 +95,7 @@ const SchemaVersion = 2
 // Statements here run before schema, in one transaction with the stamp.
 var migrations = map[int][]string{
 	2: {}, // channel_audience, and nothing else to move
+	3: {}, // channel_moderators and submissions, both new
 }
 
 const schema = `
@@ -140,6 +152,28 @@ CREATE TABLE IF NOT EXISTS channel_audience (
     PRIMARY KEY (channel_id, group_id)
 );
 
+-- Who may publish to a channel directly and decide what others submit to it.
+-- No rows means the channel accepts no submissions.
+CREATE TABLE IF NOT EXISTS channel_moderators (
+    channel_id   TEXT NOT NULL,
+    username     TEXT NOT NULL,
+    appointed_at REAL NOT NULL,
+    PRIMARY KEY (channel_id, username)
+);
+
+-- A message proposed to a channel and not in it. No seq: one is issued only on
+-- approval, when the row becomes a message and is deleted. A rejected row stays
+-- until its author acknowledges it.
+CREATE TABLE IF NOT EXISTS submissions (
+    id         TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    author     TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    at         REAL NOT NULL,
+    state      TEXT NOT NULL,
+    comment    TEXT
+);
+
 CREATE TABLE IF NOT EXISTS messages (
     room_id TEXT NOT NULL,
     seq     INTEGER NOT NULL,
@@ -162,6 +196,12 @@ CREATE TABLE IF NOT EXISTS read_cursors (
 
 CREATE INDEX IF NOT EXISTS grants_by_principal
     ON grants (principal_kind, principal_id);
+
+CREATE INDEX IF NOT EXISTS submissions_by_channel
+    ON submissions (channel_id, state);
+
+CREATE INDEX IF NOT EXISTS submissions_by_author
+    ON submissions (author);
 `
 
 // Principal names who a grant admits: a user, or a whole group.
@@ -184,8 +224,11 @@ type Room struct {
 	// The groups a channel is restricted to; empty is open, and a room has no
 	// such rule at all.
 	RestrictedTo []string `json:"restrictedTo"`
-	Occupants    []string `json:"occupants"`
-	LastSeq      int64    `json:"lastSeq"`
+	// Who may publish to a channel directly and decide its submissions. Empty
+	// means it accepts none, and a room has no moderators.
+	Moderators []string `json:"moderators"`
+	Occupants  []string `json:"occupants"`
+	LastSeq    int64    `json:"lastSeq"`
 }
 
 // Message is one entry in a room's log.
@@ -196,6 +239,18 @@ type Message struct {
 	Kind   string  `json:"kind"`
 	Body   string  `json:"body"`
 	At     float64 `json:"at"`
+}
+
+// Submission is a message proposed to a channel, as the wire carries it.
+// Comment is null unless a moderator rejected it with one.
+type Submission struct {
+	ID      string  `json:"id"`
+	Channel string  `json:"channel"`
+	Author  string  `json:"author"`
+	Body    string  `json:"body"`
+	At      float64 `json:"at"`
+	State   string  `json:"state"`
+	Comment *string `json:"comment"`
 }
 
 // Group is a lasting set of users, named where access is decided.
@@ -467,7 +522,7 @@ func (t *Timeline) CreateRoom(
 func (t *Timeline) Room(roomID string) (*Room, error) {
 	room := Room{
 		ID: roomID, Grants: []Principal{}, Audience: []string{},
-		RestrictedTo: []string{}, Occupants: []string{},
+		RestrictedTo: []string{}, Moderators: []string{}, Occupants: []string{},
 	}
 	err := t.db.QueryRow(
 		"SELECT title, kind, authority, retention, created_by, created_at, high_seq"+
@@ -490,7 +545,11 @@ func (t *Timeline) Room(roomID string) (*Room, error) {
 		if err != nil {
 			return nil, err
 		}
-		room.Audience, room.RestrictedTo = audience, rule
+		moderators, err := t.Moderators(roomID)
+		if err != nil {
+			return nil, err
+		}
+		room.Audience, room.RestrictedTo, room.Moderators = audience, rule, moderators
 	} else {
 		grants, err := t.grantsOf(roomID)
 		if err != nil {
@@ -748,6 +807,8 @@ func (t *Timeline) DeleteRoom(roomID string) error {
 		"DELETE FROM grants WHERE room_id = ?",
 		"DELETE FROM subscriptions WHERE channel_id = ?",
 		"DELETE FROM channel_audience WHERE channel_id = ?",
+		"DELETE FROM channel_moderators WHERE channel_id = ?",
+		"DELETE FROM submissions WHERE channel_id = ?",
 		"DELETE FROM read_cursors WHERE room_id = ?",
 		"DELETE FROM rooms WHERE id = ?",
 	} {
@@ -832,8 +893,21 @@ func (t *Timeline) Append(roomID, author, body, kind string) (Message, error) {
 	}
 	defer transaction.Rollback()
 
+	message, err := appendIn(transaction, roomID, author, body, kind)
+	if err != nil {
+		return Message{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return Message{}, err
+	}
+	return message, nil
+}
+
+// appendIn is Append inside a transaction the caller owns, so an approval can
+// issue a number and delete its submission as one change.
+func appendIn(transaction *sql.Tx, roomID, author, body, kind string) (Message, error) {
 	var seq int64
-	err = transaction.QueryRow("SELECT high_seq FROM rooms WHERE id = ?", roomID).Scan(&seq)
+	err := transaction.QueryRow("SELECT high_seq FROM rooms WHERE id = ?", roomID).Scan(&seq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Message{}, fmt.Errorf("%w: %s", ErrNoRoom, roomID)
 	}
@@ -850,9 +924,6 @@ func (t *Timeline) Append(roomID, author, body, kind string) (Message, error) {
 	if _, err := transaction.Exec(
 		"INSERT INTO messages (room_id, seq, author, kind, body, at) VALUES (?, ?, ?, ?, ?, ?)",
 		roomID, seq, author, kind, body, at); err != nil {
-		return Message{}, err
-	}
-	if err := transaction.Commit(); err != nil {
 		return Message{}, err
 	}
 	return Message{Room: roomID, Seq: seq, Author: author, Kind: kind, Body: body, At: at}, nil
@@ -885,6 +956,152 @@ func (t *Timeline) ReadCursors(username string) (map[string]int64, error) {
 		cursors[room] = seq
 	}
 	return cursors, rows.Err()
+}
+
+// -- moderation and submissions ----------------------------------------------
+
+// Moderators is who moderates a channel, sorted. Empty means it takes no
+// submissions.
+func (t *Timeline) Moderators(channelID string) ([]string, error) {
+	return t.strings(
+		"SELECT username FROM channel_moderators WHERE channel_id = ? ORDER BY username",
+		channelID)
+}
+
+// Appoint makes a user a moderator, reporting whether they were not one already.
+func (t *Timeline) Appoint(channelID, username string) (bool, error) {
+	return t.changed(
+		"INSERT OR IGNORE INTO channel_moderators (channel_id, username, appointed_at)"+
+			" VALUES (?, ?, ?)", channelID, username, now())
+}
+
+func (t *Timeline) Dismiss(channelID, username string) (bool, error) {
+	return t.changed(
+		"DELETE FROM channel_moderators WHERE channel_id = ? AND username = ?",
+		channelID, username)
+}
+
+// Submit stores a pending submission, or returns nil when the channel has no
+// moderator to decide it. The check is part of the insert, so a submission
+// cannot land after the last moderator was dismissed and wait where nobody sees.
+func (t *Timeline) Submit(channelID, author, body string) (*Submission, error) {
+	submission := Submission{
+		ID: uuid.NewString(), Channel: channelID, Author: author,
+		Body: body, At: now(), State: Pending,
+	}
+	stored, err := t.changed(
+		"INSERT INTO submissions (id, channel_id, author, body, at, state)"+
+			" SELECT ?, ?, ?, ?, ?, ?"+
+			" WHERE EXISTS (SELECT 1 FROM channel_moderators WHERE channel_id = ?)",
+		submission.ID, channelID, author, body, submission.At, Pending, channelID)
+	if err != nil || !stored {
+		return nil, err
+	}
+	return &submission, nil
+}
+
+// Submission returns one submission, or nil when there is none.
+func (t *Timeline) Submission(id string) (*Submission, error) {
+	found, err := t.submissions("WHERE id = ?", id)
+	if err != nil || len(found) == 0 {
+		return nil, err
+	}
+	return &found[0], nil
+}
+
+// Queue is a channel's pending submissions, oldest first.
+func (t *Timeline) Queue(channelID string) ([]Submission, error) {
+	return t.submissions("WHERE channel_id = ? AND state = ? ORDER BY at, id", channelID, Pending)
+}
+
+// SubmissionsBy is every submission an author has not yet seen closed: pending,
+// or rejected and not acknowledged. Oldest first.
+func (t *Timeline) SubmissionsBy(author string) ([]Submission, error) {
+	return t.submissions("WHERE author = ? ORDER BY at, id", author)
+}
+
+// Approve publishes a pending submission under its author's name and deletes it.
+//
+// One transaction, so the number is issued and the submission removed together;
+// otherwise a failure between them leaves a message still awaiting a decision.
+func (t *Timeline) Approve(id string) (Message, error) {
+	transaction, err := t.db.Begin()
+	if err != nil {
+		return Message{}, err
+	}
+	defer transaction.Rollback()
+
+	var channelID, author, body, state string
+	err = transaction.QueryRow(
+		"SELECT channel_id, author, body, state FROM submissions WHERE id = ?", id,
+	).Scan(&channelID, &author, &body, &state)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && state != Pending) {
+		return Message{}, ErrNotPending
+	}
+	if err != nil {
+		return Message{}, err
+	}
+
+	message, err := appendIn(transaction, channelID, author, body, Text)
+	if err != nil {
+		return Message{}, err
+	}
+	if _, err := transaction.Exec("DELETE FROM submissions WHERE id = ?", id); err != nil {
+		return Message{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return Message{}, err
+	}
+	return message, nil
+}
+
+// Reject marks a pending submission rejected. It reports false for one already
+// decided, which is how two moderators deciding at once are told apart.
+func (t *Timeline) Reject(id string, comment *string) (bool, error) {
+	return t.changed(
+		"UPDATE submissions SET state = ?, comment = ? WHERE id = ? AND state = ?",
+		Rejected, comment, id, Pending)
+}
+
+// RejectAll rejects a channel's whole queue with one comment, and returns what
+// it rejected so that each author can be told.
+func (t *Timeline) RejectAll(channelID, comment string) ([]Submission, error) {
+	transaction, err := t.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer transaction.Rollback()
+
+	rows, err := transaction.Query(
+		"SELECT id, channel_id, author, body, at, state, comment FROM submissions"+
+			" WHERE channel_id = ? AND state = ? ORDER BY at, id", channelID, Pending)
+	if err != nil {
+		return nil, err
+	}
+	rejected, err := scanSubmissions(rows)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := transaction.Exec(
+		"UPDATE submissions SET state = ?, comment = ? WHERE channel_id = ? AND state = ?",
+		Rejected, comment, channelID, Pending); err != nil {
+		return nil, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return nil, err
+	}
+
+	for index := range rejected {
+		rejected[index].State, rejected[index].Comment = Rejected, &comment
+	}
+	return rejected, nil
+}
+
+// Acknowledge deletes a rejected submission, reporting whether there was one.
+// A pending one is left alone: acknowledging is closing an outcome, and a
+// pending submission has none yet.
+func (t *Timeline) Acknowledge(id string) (bool, error) {
+	return t.changed("DELETE FROM submissions WHERE id = ? AND state = ?", id, Rejected)
 }
 
 // -- presence and occupancy --------------------------------------------------
@@ -1017,4 +1234,33 @@ func (t *Timeline) changed(query string, args ...any) (bool, error) {
 	}
 	affected, err := result.RowsAffected()
 	return affected > 0, err
+}
+
+func (t *Timeline) submissions(clause string, args ...any) ([]Submission, error) {
+	rows, err := t.db.Query(
+		"SELECT id, channel_id, author, body, at, state, comment FROM submissions "+clause,
+		args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanSubmissions(rows)
+}
+
+func scanSubmissions(rows *sql.Rows) ([]Submission, error) {
+	defer rows.Close()
+
+	found := []Submission{}
+	for rows.Next() {
+		var submission Submission
+		var comment sql.NullString
+		if err := rows.Scan(&submission.ID, &submission.Channel, &submission.Author,
+			&submission.Body, &submission.At, &submission.State, &comment); err != nil {
+			return nil, err
+		}
+		if comment.Valid {
+			submission.Comment = &comment.String
+		}
+		found = append(found, submission)
+	}
+	return found, rows.Err()
 }

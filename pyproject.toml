@@ -40,3 +40,6 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "beyond_core: contract sections the Python specification does not implement",
+]

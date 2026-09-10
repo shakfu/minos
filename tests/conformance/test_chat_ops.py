@@ -6,6 +6,7 @@ client puts in front of a user -- so the messages are asserted verbatim.
 
 import pytest
 
+from . import harness
 from .wire import WireError
 
 SYSTEM_CHANNEL = "system"
@@ -16,7 +17,10 @@ SYSTEM_CHANNEL = "system"
 
 def test_sync_describes_the_whole_of_what_a_client_needs(demo):
     reply = demo.call("sync")
-    assert set(reply) == {"me", "isAdmin", "users", "groups", "rooms", "channels", "read"}
+    expected = {"me", "isAdmin", "users", "groups", "rooms", "channels", "read"}
+    if harness.scope() == "full":
+        expected |= {"submissions"}
+    assert set(reply) == expected, f"scope {harness.scope()}"
     assert reply["me"] == "demo"
     assert reply["isAdmin"] is True
 

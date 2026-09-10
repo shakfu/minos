@@ -38,10 +38,12 @@ demo: install go
 	$(PY) docs/dev/demo_audience.py
 
 ## The unit tests: pytest over the specification, go test over the server.
-## Both, because the store's schema check is not visible on the wire.
-test: install
+## Both, because the store's schema check is not visible on the wire. Then the
+## contract against the server, the only place sections beyond the core run.
+test: install go
 	$(VENV)/bin/pytest -q
 	cd go && go test ./...
+	$(MAKE) --no-print-directory conformance-go
 
 ## The wire contract alone, against any implementation of it.
 ## MINOS_CONFORMANCE_CMD launches a different server; MINOS_CONFORMANCE_URL
@@ -49,9 +51,11 @@ test: install
 conformance: install
 	$(VENV)/bin/pytest tests/conformance -q
 
-## The same suite against the compiled server.
+## The same suite against the compiled server, which claims the whole contract
+## rather than the core. MINOS_CONFORMANCE_SCOPE is how it says so.
 conformance-go: install go
-	MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd $(VENV)/bin/pytest tests/conformance -q
+	MINOS_CONFORMANCE_SCOPE=full MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd \
+	  $(VENV)/bin/pytest tests/conformance -q
 
 clean:
 	rm -rf $(VENV) .run go/minosd

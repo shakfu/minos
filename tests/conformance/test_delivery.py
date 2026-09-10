@@ -4,6 +4,7 @@ The reply to an operation says it succeeded. These tests are about the other
 half: the frames the server sends to people who did not ask for anything.
 """
 
+from . import harness
 from .wire import Socket, message_in, push_of
 
 SYSTEM_CHANNEL = "system"
@@ -60,11 +61,14 @@ def test_a_room_push_carries_the_whole_room(alice, bob, unique):
     alice.call("invite", room=room["id"], principal="bob")
 
     pushed = bob.expect_push(lambda e: e.get("type") == "room")["room"]
-    assert set(pushed) == {
+    expected = {
         "id", "title", "kind", "authority", "retention",
         "createdBy", "createdAt", "grants", "restrictedTo", "audience",
         "occupants", "lastSeq",
     }
+    if harness.scope() == "full":
+        expected |= {"moderators"}
+    assert set(pushed) == expected, f"scope {harness.scope()}"
 
 
 def test_removal_is_announced_to_the_person_removed(alice, bob, unique):

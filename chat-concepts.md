@@ -576,35 +576,18 @@ Read-only is not what decides this. Every channel is read-only to its audience,
 separates them is whether the channel takes submissions at all, and the moderator
 set is how that is said.
 
-**A rejected submission is deleted.** It never held a sequence number, so nothing
-is left behind for a subscriber to re-request, and the store does not accumulate
-content that only its author and the moderators ever saw. When it is deleted is
-the first open question below.
+**A rejected submission is deleted once its author has acknowledged it.** It
+never held a sequence number, so nothing is left behind for a subscriber to
+re-request. Deleting it at the moment of rejection would make "the author always
+learns the outcome" true only for an author who was connected then. Kept until
+acknowledged, it reaches a returning author on their next sync, and its text is
+still theirs to revise and resubmit. The cost is the rows of authors who never
+come back.
 
-### Open questions
-
-1. **When is a rejected submission deleted -- at the rejection, or once its
-   author knows?** That it is deleted is settled; the moment is not, and the
-   Settled rule above is what makes it a question. A rejection reported only as a
-   push reaches a connected author and nobody else, and once the row is gone
-   there is nothing left to tell a returning one from -- so deleting at the
-   rejection turns "always learns the outcome" into "learns if connected".
-   Deleting on the author's acknowledgement instead keeps the promise and still
-   leaves nothing behind, at the cost of a state on the row and rows belonging to
-   authors who never come back. The `system` channel is not a way out: it carries
-   machine events to every subscriber, so a rejection routed through it would
-   disclose the rejected text to the whole audience.
-
-   The same moment decides whether an author can act on a rejection. "Rejected
-   with a comment, and resubmitted by its author" needs the text to outlive the
-   rejection somewhere its author can still reach.
-
-2. **What becomes of a queued submission when the last moderator is revoked?**
-   The channel becomes one that accepts no submissions, and whatever is already
-   queued has nobody left who may act on it. Auto-rejecting the queue costs no
-   new state and keeps the author informed; refusing the revocation while the
-   queue is not empty is the other answer. Leaving the rows orphaned is not one,
-   because it is exactly the silence the Settled rule rules out.
+**Dismissing the last moderator rejects the queue.** The channel then accepts no
+submissions, and whatever was queued has nobody left who may decide it. Each
+author is told, with that reason, rather than left waiting on a queue nobody can
+see.
 
 ## 6. Deliberately excluded
 
@@ -640,14 +623,19 @@ What the core *is* on the wire, as opposed to what it means, is written down in
 any implementation in any language. This document answers "is this the right
 thing to implement", and the two should not be merged.
 
-### The later sections are not
+### Section 5 is built, in `go/` alone
+
+Moderators, and submissions held outside the channel's sequence: submitted, then
+approved into the log, or rejected and kept until the author acknowledges it.
+`server/` is frozen at the core and does not implement it.
+
+### Section 4 is not
 
 Section 4 needs an archival frequency per room, an `archived_messages` table,
 the pass that moves rows into it -- sharing the sweep with transient expiry,
 since both must run when nobody is connected -- and an admin-only, pageable read
 over the archive, as a separate operation from `history` rather than a widening
-of it. Section 5 needs moderators, and a submission queue held outside the
-channel's sequence.
+of it.
 
 ### Untouched
 

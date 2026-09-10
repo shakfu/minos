@@ -1,8 +1,8 @@
 # The wire contract
 
 What a minos server must do, stated without reference to the language it is
-written in. `server/` is one implementation; `tests/conformance/` decides
-whether a second one is correct.
+written in. `server/` implements sections 1-8, the core; `go/` implements all of
+it. `tests/conformance/` decides whether either is correct.
 
 The model behind the vocabulary -- room, group, channel, grant, occupancy -- is
 in [chat-concepts.md](../chat-concepts.md) and is not repeated here. This
@@ -244,6 +244,7 @@ A room, and a channel in the same shape:
 its subscribers. `audience` resolves group grants, so it lists users and never
 groups. `occupants` is who is in the room now, not who may be. `restrictedTo`
 is the groups a channel admits, empty on an open channel and on every room.
+Section 9 adds `moderators`.
 
 A message:
 
@@ -267,7 +268,7 @@ Sync:
 ```
 
 `users` is every account, sorted; `groups` sorted by name. `read` omits rooms
-with no cursor.
+with no cursor. Section 9 adds `submissions`.
 
 ### Rules a reimplementation must reproduce
 
@@ -376,7 +377,74 @@ This contract is transport-independent, which is the reason it survives any
 change of transport: it covers a reconnect, an hour offline and a lagging
 receiver as well as it covers a dropped frame.
 
-## 9. Not part of the contract
+## 9. Beyond the core: submissions and moderation
+
+[chat-concepts.md](../chat-concepts.md) section 5. `go/` implements this and
+`server/` does not, because the specification is frozen at the core. The
+conformance suite runs these tests only under `MINOS_CONFORMANCE_SCOPE=full`.
+
+### Fields added to core shapes
+
+- A room or channel carries `moderators`: the usernames that moderate a channel,
+  sorted. Empty on a channel that takes no submissions, and on every room.
+- `sync` carries `submissions`: the caller's own, pending or rejected and not
+  yet acknowledged, oldest first.
+
+### Operations
+
+| Op | Request fields | Reply |
+|-|-|-|
+| `channel.appoint` | `channel`, `username` | `{ok: true, channel}` |
+| `channel.dismiss` | `channel`, `username` | `{ok: true, channel}` |
+| `channel.submit` | `channel`, `body` | a submission |
+| `channel.queue` | `channel` | `{channel, submissions}` |
+| `submission.approve` | `submission` | `{ok: true, seq}` |
+| `submission.reject` | `submission`, `comment` | `{ok: true}` |
+| `submission.acknowledge` | `submission` | `{ok: true}` |
+
+A submission:
+
+```json
+{"id": "<hex>", "channel": "<id>", "author": "bob", "body": "a tip",
+ "at": 1757030400.0, "state": "pending", "comment": null}
+```
+
+`state` is `pending` or `rejected` while stored. `approved` appears only on a
+push, because approval turns a submission into a message and deletes it.
+`comment` is null unless a moderator rejected it with one.
+
+### Rules
+
+- A submission takes no sequence number. Approval appends it to the channel as a
+  `text` message authored by the submitter, with the next `seq`. Submitting and
+  rejecting move nothing, so the channel's sequence stays contiguous.
+- A channel with no moderators accepts no submissions. `channel.submit` to one
+  is refused with `That channel accepts no submissions`.
+- `channel.appoint` and `channel.dismiss` are administrators only, and each
+  announces the channel with a `room` push. Appointing names a user that exists.
+- `channel.queue`, `submission.approve` and `submission.reject` are the channel's
+  moderators only, refused with `Only a moderator may do that`. An administrator
+  is not implicitly a moderator and may appoint themselves.
+- A moderator may `channel.publish`. On a channel with moderators, anyone who is
+  neither a moderator nor an administrator is refused with `Only an
+  administrator or a moderator may do that`. A channel without moderators
+  refuses as the core does.
+- `channel.submit` needs access to the channel, as `history` does, and a body
+  that is not empty once trimmed.
+- A decided submission is refused with `That submission has been decided`.
+- A rejected submission stays until its author sends `submission.acknowledge`,
+  which deletes it. A pending one is refused with `That submission is still
+  pending`, and anyone else's reads as `No such submission: <id>`.
+- Dismissing the last moderator rejects every pending submission with the
+  comment `That channel no longer accepts submissions`.
+
+### Pushes
+
+| Type | Payload | Sent to |
+|-|-|-|
+| `submission` | `{"submission": <submission>}` | the moderators on submit; the author and the moderators on a decision |
+
+## 10. Not part of the contract
 
 An implementation may do any of this differently:
 

@@ -22,6 +22,18 @@ ADMIN = "demo"
 PASSWORDS = {"demo": "demo", "alice": "alice", "bob": "bob"}
 
 
+def pytest_collection_modifyitems(config, items):
+    """Skip what lies beyond the core unless the server claims it."""
+    if harness.scope() == "full":
+        return
+    skip = pytest.mark.skip(
+        reason="beyond the core contract; MINOS_CONFORMANCE_SCOPE=full runs it"
+    )
+    for item in items:
+        if "beyond_core" in item.keywords:
+            item.add_marker(skip)
+
+
 @pytest.fixture(scope="session")
 def server(tmp_path_factory):
     """The server under test, launched once."""

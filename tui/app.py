@@ -43,10 +43,24 @@ HELP = [
     ("/subscribe <id>  /unsubscribe", "a channel's audience is your own choice"),
     ("/channel new <title> [@group]...", "found a channel (admin)"),
     ("/channel admit|revoke <id> <group>", "restrict a channel to groups (admin)"),
+    ("/channel appoint|dismiss <id> <user>", "who moderates a channel (admin)"),
+    ("/queue", "what this channel's moderators have to decide"),
+    ("/approve <id>  /reject <id> [why]", "decide a submission (moderator)"),
+    ("/submissions  /ack <id>", "what you submitted, and closing a rejection"),
     ("/quit", "leave every room and stop"),
     ("Tab / S-Tab", "next or previous space"),
     ("PgUp / PgDn", "scroll this room"),
 ]
+
+
+def _resolve(prefix, pool):
+    """The one submission whose id starts with `prefix`, as the listings print it."""
+    matches = [s for sid, s in list(pool.items()) if sid.startswith(prefix)]
+    if len(matches) != 1:
+        raise ChatError(
+            f"No one submission matches {prefix!r}: /queue or /submissions lists them"
+        )
+    return matches[0]
 
 
 def run(client, profile):
@@ -74,6 +88,12 @@ class Ui:
         screen.nodelay(True)
         screen.timeout(120)
         self._init_colours()
+
+        # A rejection decided while this user was away is why those rows are
+        # kept, so it is the first thing said.
+        for submission in list(client.submissions.values()):
+            if submission.get("state") == "rejected":
+                self.notice(client.describe_submission(submission))
 
     def _init_colours(self):
         self.colour = {}
@@ -235,14 +255,31 @@ class Ui:
             return
         try:
             if self.selected in self.client.channels:
-                # A channel is read-only to its audience, so the composer takes
-                # the producer's path. Whether this caller may is the server's
-                # answer, and it arrives as an ordinary refusal.
-                self.client.publish(self.selected, text)
+                # A channel is read-only to its audience. A producer publishes and
+                # anyone else proposes, where there is a moderator to decide; which
+                # of those is allowed is the server's answer, as an ordinary refusal.
+                if self.submitting(self.selected):
+                    self.client.submit(self.selected, text)
+                    self.notice("Submitted: it reaches the channel if a moderator approves it")
+                else:
+                    self.client.publish(self.selected, text)
             else:
                 self.client.send(self.selected, text)
         except ChatError as error:
             self.notice(error)
+
+    def submitting(self, space_id):
+        """Whether the composer proposes rather than publishes here.
+
+        Only in a channel with moderators, to someone who is neither one nor an
+        administrator. A core server reports no moderators, so its channels
+        publish and refuse exactly as they did.
+        """
+        space = self.client.space(space_id) if space_id else None
+        if space is None or space["kind"] != "channel" or self.client.is_admin:
+            return False
+        moderators = space.get("moderators") or []
+        return bool(moderators) and self.client.me not in moderators
 
     # -- commands -------------------------------------------------------------
 
@@ -356,11 +393,25 @@ class Ui:
     def cmd_channel(self, args):
         if args and args[0].lower() == "new" and len(args) >= 2:
             return self._new_channel(args[1:])
-        if len(args) != 3 or args[0].lower() not in ("admit", "revoke"):
+        if len(args) != 3 or args[0].lower() not in ("admit", "revoke", "appoint", "dismiss"):
             raise ChatError(
                 "Usage: /channel new <title> [@group]... | admit|revoke <id> <group>"
+                " | appoint|dismiss <id> <user>"
             )
         action, channel_id, name = args[0].lower(), args[1], args[2]
+
+        if action == "appoint":
+            channel = self.client.appoint(channel_id, name)["channel"]
+            self.notice(f"{name} moderates {channel['title']}")
+            return
+        if action == "dismiss":
+            channel = self.client.dismiss(channel_id, name)["channel"]
+            if channel["moderators"]:
+                self.notice(f"{name} no longer moderates {channel['title']}")
+            else:
+                self.notice(f"{channel['title']} has no moderator left and takes no submissions")
+            return
+
         group = self.principal("@" + name)["id"]
 
         if action == "admit":
@@ -395,6 +446,42 @@ class Ui:
         self._release()
         self.client.unsubscribe(leaving)
         self.selected = None
+
+    def cmd_queue(self, args):
+        if self.selected not in self.client.channels:
+            raise ChatError("Select a channel first: /queue lists what it has to decide")
+        pending = self.client.queue(self.selected)
+        if not pending:
+            self.notice("Nothing waiting")
+        for submission in pending:
+            self.notice(self.client.describe_submission(submission))
+
+    def cmd_approve(self, args):
+        if len(args) != 1:
+            raise ChatError("Usage: /approve <id>")
+        submission = _resolve(args[0], self.client.queued)
+        self.client.approve(submission["id"])
+        self.notice(f"Approved; {submission['author']}'s words are in the channel now")
+
+    def cmd_reject(self, args):
+        if not args:
+            raise ChatError("Usage: /reject <id> [comment]")
+        submission = _resolve(args[0], self.client.queued)
+        self.client.reject(submission["id"], " ".join(args[1:]) or None)
+        self.notice(f"Rejected; {submission['author']} is told")
+
+    def cmd_submissions(self, args):
+        if not self.client.submissions:
+            self.notice("Nothing you submitted is waiting")
+        for submission in list(self.client.submissions.values()):
+            self.notice(self.client.describe_submission(submission))
+
+    def cmd_ack(self, args):
+        if len(args) != 1:
+            raise ChatError("Usage: /ack <id>")
+        submission = _resolve(args[0], self.client.submissions)
+        self.client.acknowledge(submission["id"])
+        self.notice("Closed")
 
     # -- drawing --------------------------------------------------------------
 
@@ -604,7 +691,12 @@ class Ui:
         read_only = space is not None and space["kind"] == "channel"
 
         self._put(height - 3, 0, "-" * width, width, self.colour.get("dim", 0))
-        prompt = "  (channel) " if read_only else "> "
+        if self.submitting(self.selected):
+            prompt = "  (submit) "
+        elif read_only:
+            prompt = "  (channel) "
+        else:
+            prompt = "> "
         text = prompt + self.input
         self._put(height - 2, 0, text, width - 1, pad=True)
 

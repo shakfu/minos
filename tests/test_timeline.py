@@ -342,17 +342,26 @@ def test_a_database_from_a_later_schema_is_refused(tmp_path):
         timeline_module.Timeline(db_path=path, run_dir=tmp_path).init()
 
 
-def test_both_servers_stamp_the_same_version():
+def test_the_go_server_reads_every_database_this_one_writes():
     """The two constants are the compatibility claim, and nothing else pins them.
 
-    Both implementations write this database, so a version raised in one and
-    not the other would leave each refusing what the other wrote.
+    This specification is frozen at the shared version and `go/` continues past
+    it, so they may differ in one direction only: Go at or above this server,
+    with an upgrade step for every version between. The reverse is refused on
+    purpose -- a database Go has upgraded holds state this server cannot honour.
     """
     source = (pathlib.Path(__file__).parent.parent / "go/internal/timeline/timeline.go").read_text()
     declared = re.search(r"const SchemaVersion = (\d+)", source)
+    steps = re.search(r"var migrations = map\[int\]\[\]string\{(.*?)\n\}", source, re.S)
 
     assert declared, "go/internal/timeline/timeline.go declares no SchemaVersion"
-    assert int(declared.group(1)) == timeline_module.SCHEMA_VERSION
+    assert steps, "go/internal/timeline/timeline.go declares no migrations"
+    go_version = int(declared.group(1))
+    assert go_version >= timeline_module.SCHEMA_VERSION
+
+    written = {int(step) for step in re.findall(r"^\s*(\d+):", steps.group(1), re.M)}
+    between = set(range(timeline_module.SCHEMA_VERSION + 1, go_version + 1))
+    assert between <= written, f"go/ has no upgrade to {sorted(between - written)}"
 
 
 # -- a channel's audience rule ------------------------------------------------

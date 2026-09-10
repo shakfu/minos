@@ -2,7 +2,7 @@
 
 Work that is known and not done. Questions about the *model* rather than the
 code live in [chat-concepts.md](chat-concepts.md) -- three open in the core,
-six more in the sections deferred there -- and are not duplicated here.
+four more in the sections deferred there -- and are not duplicated here.
 
 ## Done
 
@@ -132,8 +132,13 @@ administrator, in both servers. No adapter is coming, because this server is not
 to be exposed. That is now said where they are defined rather than standing here
 as work.
 
+### Submissions and moderation are built, in `go/`
+
+`chat-concepts.md` section 5, beyond the core. The wire additions are
+`docs/wire-contract.md` section 9, and the CHANGELOG has the rest.
+
 ## Open
 
-Nothing in the core. See `chat-concepts.md` sections 4 and 5, and the three
-questions in section 3.
+Nothing in the core. See `chat-concepts.md` section 4, and the three questions
+in section 3.
 

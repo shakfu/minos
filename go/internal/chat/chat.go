@@ -273,6 +273,27 @@ func (h *Handler) run(
 
 	case "channel.revoke":
 		return h.service.Revoke(isAdmin, text(fields, "channel"), text(fields, "group"))
+
+	case "channel.appoint":
+		return h.service.Appoint(isAdmin, text(fields, "channel"), text(fields, "username"))
+
+	case "channel.dismiss":
+		return h.service.Dismiss(isAdmin, text(fields, "channel"), text(fields, "username"))
+
+	case "channel.submit":
+		return h.service.Submit(username, text(fields, "channel"), text(fields, "body"))
+
+	case "channel.queue":
+		return h.service.Queue(username, text(fields, "channel"))
+
+	case "submission.approve":
+		return h.service.Approve(username, text(fields, "submission"))
+
+	case "submission.reject":
+		return h.service.Reject(username, text(fields, "submission"), text(fields, "comment"))
+
+	case "submission.acknowledge":
+		return h.service.Acknowledge(username, text(fields, "submission"))
 	}
 
 	return nil, &messaging.Refusal{Message: "No such chat operation: " + text(fields, "op")}

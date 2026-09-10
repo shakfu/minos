@@ -35,16 +35,18 @@ tests/conformance/
   test_delivery.py   who receives a push, and who does not
   test_sequence.py   the delivery contract: gaps, repair, ordering
   test_transient.py  occupancy and the grace period
+  test_submissions.py  section 5, beyond the core
 ```
 
 ## Selecting the implementation
 
-Two environment variables, and nothing else:
+Three environment variables, and nothing else:
 
 | Variable | Meaning |
 |-|-|
 | `MINOS_CONFORMANCE_CMD` | argv to launch a server. Default `python -m server.app` |
 | `MINOS_CONFORMANCE_URL` | test a server already running; nothing is launched |
+| `MINOS_CONFORMANCE_SCOPE` | `core` (default) or `full`: how much of the contract the server claims |
 
 The launcher passes the server its configuration through the environment
 (`MINOS_HOST`, `MINOS_PORT`, `MINOS_RUN`, `MINOS_VFS`, `MINOS_DIST`,
@@ -52,9 +54,20 @@ The launcher passes the server its configuration through the environment
 server that ignores `MINOS_PORT` cannot be tested at all, and one that ignores
 `MINOS_ROOM_GRACE` cannot have its transient rooms tested in under two minutes.
 
-Running the Go server is then:
+Running the Go server is then `make conformance-go`, which also declares
+`MINOS_CONFORMANCE_SCOPE=full`.
 
-    MINOS_CONFORMANCE_CMD="./minosd" make conformance
+## Scope
+
+`server/` is frozen at the core, and sections beyond it exist in `go/` alone.
+Their tests carry `pytest.mark.beyond_core` and are skipped unless
+`MINOS_CONFORMANCE_SCOPE=full`. The scope is declared rather than detected, so a
+server that loses an operation fails instead of being skipped.
+
+Two core tests pin an exact key set, `sync` and the room push, and each adds the
+fields beyond the core under `full`. A scope that does not match its server
+therefore fails both ways: Python under `full` fails the section 5 tests, and Go
+under `core` fails the two shape tests.
 
 ## Isolation
 

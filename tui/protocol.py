@@ -63,6 +63,11 @@ class ChatClient:
         self.read = {}
         self.connected = False
 
+        # Submissions: this user's own until closed, and those awaiting their
+        # decision as a moderator. Both keyed by id.
+        self.submissions = {}
+        self.queued = {}
+
         # Highest sequence applied per room: the cursor a gap is measured
         # against, and a different fact from `read`.
         self._cursors = {}
@@ -182,6 +187,9 @@ class ChatClient:
         elif kind == "group":
             self._track_group(event.get("group") or {})
             self.on_change()
+        elif kind == "submission":
+            self._track_submission(event.get("submission") or {}, announce=True)
+            self.on_change()
 
     # -- the sequence contract ------------------------------------------------
 
@@ -275,6 +283,8 @@ class ChatClient:
             self.rooms = {room["id"]: room for room in reply.get("rooms", [])}
             self.channels = {c["id"]: c for c in reply.get("channels", [])}
             self.read = dict(reply.get("read") or {})
+            # Absent from a server that implements only the core.
+            self.submissions = {s["id"]: s for s in reply.get("submissions") or []}
             self.connected = True
 
         # Backfill before announcing, so a view that draws on the change does
@@ -345,6 +355,43 @@ class ChatClient:
     def revoke_group(self, channel, group):
         return self.request("channel.revoke", channel=channel, group=group)
 
+    def appoint(self, channel, username):
+        return self.request("channel.appoint", channel=channel, username=username)
+
+    def dismiss(self, channel, username):
+        return self.request("channel.dismiss", channel=channel, username=username)
+
+    def submit(self, channel, body):
+        return self._track_submission(
+            self.request("channel.submit", channel=channel, body=body)
+        )
+
+    def queue(self, channel):
+        pending = self.request("channel.queue", channel=channel)["submissions"]
+        with self._lock:
+            self.queued = {
+                sid: s for sid, s in self.queued.items() if s.get("channel") != channel
+            }
+            self.queued.update({s["id"]: s for s in pending})
+        return pending
+
+    def approve(self, submission):
+        reply = self.request("submission.approve", submission=submission)
+        with self._lock:
+            self.queued.pop(submission, None)
+        return reply
+
+    def reject(self, submission, comment=None):
+        reply = self.request("submission.reject", submission=submission, comment=comment)
+        with self._lock:
+            self.queued.pop(submission, None)
+        return reply
+
+    def acknowledge(self, submission):
+        self.request("submission.acknowledge", submission=submission)
+        with self._lock:
+            self.submissions.pop(submission, None)
+
     def subscribe(self, channel):
         return self._track(self.request("subscribe", channel=channel))
 
@@ -374,6 +421,45 @@ class ChatClient:
             target = self.channels if space.get("kind") == "channel" else self.rooms
             target[space["id"]] = space
         return space
+
+    def _track_submission(self, submission, announce=False):
+        """Follow a submission into a queue, out of it, and back to its author.
+
+        The author's copy is kept until acknowledged, because a rejection is the
+        one outcome they have to act on. An approved one is a message now.
+        """
+        if not submission or "id" not in submission:
+            return submission
+        sid, state = submission["id"], submission.get("state")
+        mine = submission.get("author") == self.me
+        with self._lock:
+            if state == "pending" and not mine:
+                self.queued[sid] = submission
+            else:
+                self.queued.pop(sid, None)
+            if mine and state == "approved":
+                self.submissions.pop(sid, None)
+            elif mine:
+                self.submissions[sid] = submission
+        if announce and (mine or state == "pending"):
+            self.on_notice(self.describe_submission(submission))
+        return submission
+
+    def moderates(self, space_id):
+        space = self.space(space_id)
+        return space is not None and self.me in (space.get("moderators") or [])
+
+    def describe_submission(self, submission):
+        """One line: which, whose, where, and how it stands."""
+        space = self.space(submission.get("channel"))
+        where = space["title"] if space else str(submission.get("channel", "?"))[:8]
+        state = submission.get("state", "?")
+        if state == "rejected" and submission.get("comment"):
+            state += f" ({submission['comment']})"
+        return (
+            f"[{submission['id'][:8]}] {submission.get('author', '?')} -> {where},"
+            f" {state}: {submission.get('body', '')}"
+        )
 
     def _forget(self, space_id):
         with self._lock:

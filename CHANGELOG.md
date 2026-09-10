@@ -45,6 +45,28 @@ and the wire format between them is still OS.js's without any OS.js code.
 
 ### Added
 
+- Submissions and moderation (`chat-concepts.md` 5), in `go/` only. An
+  administrator appoints moderators with `channel.appoint` and `channel.dismiss`.
+  A channel with moderators takes `channel.submit` from its subscribers, and a
+  moderator decides with `submission.approve` or `submission.reject` and may
+  publish directly. Approval appends the text under its author's name with the
+  next `seq`; submitting and rejecting issue none, so the sequence stays
+  contiguous. A rejection is kept, and reported in `sync`, until its author sends
+  `submission.acknowledge`. The operations are `docs/wire-contract.md` section 9.
+
+  `moderators` goes on the channel object beside `restrictedTo`, rather than
+  behind an operation of its own, so it rides the `room` push the core already
+  sends. That extends two shapes core tests pin exactly, `sync` and the room
+  push; each test now adds the new fields under `MINOS_CONFORMANCE_SCOPE=full`,
+  so a scope that does not match its server fails instead of skipping.
+  `make test` now runs `conformance-go`, the only black-box run of section 5. The
+  schema is version 3 in `go/`, and the Python server, which stays at 2, refuses
+  a database Go has upgraded.
+
+  In `tui/`, the composer submits when a channel has moderators and the caller is
+  neither one nor an administrator. New commands: `/channel appoint|dismiss`,
+  `/queue`, `/approve`, `/reject`, `/submissions` and `/ack`.
+
 - Two decisions in `chat-concepts.md` 5, both moved out of its open questions. A
   channel may have no moderator, and such a channel accepts no submissions: a
   price feed publishes to an audience and there is nothing to curate, so a
@@ -57,11 +79,10 @@ and the wire format between them is still OS.js's without any OS.js code.
   them is whether submissions are taken, and the moderator set is how that is
   said.
 
-  Two questions replace the one answered, both about a submission's lifetime.
-  Deleting a rejection at the moment a moderator makes it would turn the settled
-  "the author always learns the outcome" into "learns if connected", so *when* the
-  row goes is open. So is what happens to a queue when the last moderator is
-  revoked.
+  Both lifetime questions this raised are settled too. A rejection is deleted
+  once its author acknowledges it, because deleting it when a moderator makes it
+  would make "the author always learns the outcome" true only for an author who
+  was connected. Dismissing the last moderator rejects the queue.
 
 - Go tests for the outbound queue in `go/internal/socket`: the depth a connection
   absorbs, the hang-up on the frame past it, a send to a closed connection,

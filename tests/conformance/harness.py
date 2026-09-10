@@ -37,6 +37,23 @@ def command():
     return shlex.split(override) if override else list(DEFAULT_COMMAND)
 
 
+# How much of the contract a server claims. `core` is what the specification in
+# `server/` implements; `full` adds the sections beyond it, which only `go/` does.
+SCOPES = ("core", "full")
+
+
+def scope():
+    """The scope the operator declared, defaulting to the default server's.
+
+    Declared rather than detected: a server that loses an operation must fail
+    the suite, not be skipped by it.
+    """
+    chosen = os.environ.get("MINOS_CONFORMANCE_SCOPE", "core")
+    if chosen not in SCOPES:
+        raise RuntimeError(f"MINOS_CONFORMANCE_SCOPE is {chosen!r}; expected one of {SCOPES}")
+    return chosen
+
+
 def external_url():
     """A server the operator is running themselves, if there is one."""
     return os.environ.get("MINOS_CONFORMANCE_URL")
@@ -83,8 +100,11 @@ class Server:
         return self.log.read_text(errors="replace")
 
 
-def launch(state_dir, **settings):
+def launch(state_dir, argv=None, **settings):
     """Start a server on a free port with its state under `state_dir`.
+
+    `argv` overrides `command()`, for a caller that is not a conformance run and
+    knows which server it wants.
 
     `settings` are extra environment variables, which is how a test asks for a
     short room grace or a fast keepalive. The names are the contract's; see
@@ -120,7 +140,7 @@ def launch(state_dir, **settings):
     log = state_dir / "server.log"
     handle = log.open("wb")
     process = subprocess.Popen(
-        command(), cwd=ROOT, env=environment, stdout=handle, stderr=subprocess.STDOUT
+        argv or command(), cwd=ROOT, env=environment, stdout=handle, stderr=subprocess.STDOUT
     )
 
     server = Server(f"http://127.0.0.1:{port}", process, log, run_dir)

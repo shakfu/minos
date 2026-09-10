@@ -87,7 +87,8 @@ func TestOlderDatabaseIsUpgradedInPlace(t *testing.T) {
 
 	// Wind it back to version 1, tables and all.
 	for _, statement := range []string{
-		"DROP TABLE IF EXISTS channel_audience", "PRAGMA user_version = 1",
+		"DROP TABLE IF EXISTS channel_audience", "DROP TABLE IF EXISTS channel_moderators",
+		"DROP TABLE IF EXISTS submissions", "PRAGMA user_version = 1",
 	} {
 		if _, err := raw(t, path).Exec(statement); err != nil {
 			t.Fatalf("cannot arrange the database: %v", err)
@@ -109,6 +110,48 @@ func TestOlderDatabaseIsUpgradedInPlace(t *testing.T) {
 	}
 	if rule, err := store.AudienceRule("anything"); err != nil || len(rule) != 0 {
 		t.Fatalf("channel_audience was not restored: %v, %v", rule, err)
+	}
+	if found, err := store.SubmissionsBy("anyone"); err != nil || len(found) != 0 {
+		t.Fatalf("submissions was not restored: %v, %v", found, err)
+	}
+}
+
+func TestADatabaseAtTheSharedVersionIsUpgraded(t *testing.T) {
+	// The Python server is frozen at version 2, so a database it wrote must open
+	// here and gain what version 3 adds, with nothing it held disturbed.
+	path := filepath.Join(t.TempDir(), "timeline.db")
+	store, err := open(t, path)
+	if err != nil {
+		t.Fatalf("cannot open a new database: %v", err)
+	}
+	channel, err := store.CreateRoom("News", "demo", ChannelKind, Admin, Persisted, "", nil)
+	if err != nil {
+		t.Fatalf("cannot arrange a channel: %v", err)
+	}
+	store.Close()
+
+	for _, statement := range []string{
+		"DROP TABLE channel_moderators", "DROP TABLE submissions", "PRAGMA user_version = 2",
+	} {
+		if _, err := raw(t, path).Exec(statement); err != nil {
+			t.Fatalf("cannot arrange the database: %v", err)
+		}
+	}
+
+	store, err = open(t, path)
+	if err != nil {
+		t.Fatalf("cannot upgrade a version 2 database: %v", err)
+	}
+	defer store.Close()
+
+	if got := userVersion(t, path); got != SchemaVersion {
+		t.Fatalf("user_version is %d, want %d", got, SchemaVersion)
+	}
+	if _, err := store.Appoint(channel.ID, "alice"); err != nil {
+		t.Fatalf("channel_moderators was not created: %v", err)
+	}
+	if kept, err := store.Room(channel.ID); err != nil || kept == nil || kept.Moderators[0] != "alice" {
+		t.Fatalf("the upgrade lost the channel: %v, %v", kept, err)
 	}
 }
 

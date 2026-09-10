@@ -1,5 +1,5 @@
 // Package messaging holds the conversation operations: groups, rooms, channels,
-// occupancy and presence.
+// moderation, occupancy and presence.
 //
 // A room is a place, not a set of people. Its identity is its own; adding or
 // removing someone leaves the same room. Who may enter is a set of grants naming
@@ -20,6 +20,7 @@
 package messaging
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -34,6 +35,8 @@ const (
 	RoomGonePush = "roomGone"
 	PresencePush = "presence"
 	GroupPush    = "group"
+
+	SubmissionPush = "submission"
 )
 
 // Refusal is a request that cannot be carried out, reportable to whoever asked.
@@ -91,6 +94,11 @@ type groupEvent struct {
 	Group *timeline.Group `json:"group"`
 }
 
+type submissionEvent struct {
+	Type       string               `json:"type"`
+	Submission *timeline.Submission `json:"submission"`
+}
+
 // -- replies -----------------------------------------------------------------
 
 // UserState is one account and whether it is connected.
@@ -108,6 +116,10 @@ type SyncReply struct {
 	Rooms    []timeline.Room  `json:"rooms"`
 	Channels []timeline.Room  `json:"channels"`
 	Read     map[string]int64 `json:"read"`
+	// The caller's own submissions, pending or rejected and not acknowledged.
+	// Here rather than only on a push, so an author who was offline for the
+	// decision still learns it.
+	Submissions []timeline.Submission `json:"submissions"`
 }
 
 // HistoryReply carries the backfill and where the room actually ends.
@@ -148,6 +160,12 @@ type ReadReply struct {
 	Ok   bool   `json:"ok"`
 	Room string `json:"room"`
 	Seq  int64  `json:"seq"`
+}
+
+// QueueReply is what a channel's moderators have to decide.
+type QueueReply struct {
+	Channel     string                `json:"channel"`
+	Submissions []timeline.Submission `json:"submissions"`
 }
 
 // -- access ------------------------------------------------------------------
@@ -229,6 +247,10 @@ func (m *Messaging) Sync(username string, isAdmin bool) (*SyncReply, error) {
 	if err != nil {
 		return nil, err
 	}
+	submissions, err := m.store.SubmissionsBy(username)
+	if err != nil {
+		return nil, err
+	}
 
 	online := m.store.Online()
 	names := m.roster()
@@ -242,6 +264,7 @@ func (m *Messaging) Sync(username string, isAdmin bool) (*SyncReply, error) {
 	return &SyncReply{
 		Me: username, IsAdmin: isAdmin, Users: users,
 		Groups: groups, Rooms: rooms, Channels: channels, Read: cursors,
+		Submissions: submissions,
 	}, nil
 }
 
@@ -266,9 +289,9 @@ func (m *Messaging) Send(username, roomID, body string) (*SendReply, error) {
 		return nil, err
 	}
 	if room.Kind == timeline.ChannelKind {
-		// A channel is read-only to its audience. Submission for approval is a
-		// separate feature and deliberately not implemented, so there is nothing
-		// for this to fall back to.
+		// A channel is read-only to its audience. What a subscriber may do is
+		// propose a message, and that is Submit: a separate operation, because a
+		// proposal is not a message until a moderator approves it.
 		return nil, refuse("A channel is read-only")
 	}
 
@@ -847,7 +870,8 @@ func (m *Messaging) CreateChannel(
 	return m.store.Room(channel.ID)
 }
 
-// PublishMessage is an administrator's own words on a channel.
+// PublishMessage is a producer's own words on a channel: an administrator's, or
+// one of the channel's moderators'.
 //
 // The producer's path, and separate from Send: a channel is read-only to its
 // audience, so the operation that writes to one is not the operation a
@@ -855,12 +879,22 @@ func (m *Messaging) CreateChannel(
 func (m *Messaging) PublishMessage(
 	username string, isAdmin bool, channelID, body string,
 ) (*SendReply, error) {
-	if err := requireAdmin(isAdmin); err != nil {
-		return nil, err
-	}
-	channel, err := m.requireRoom(channelID, timeline.ChannelKind)
+	channel, err := m.store.Room(channelID)
 	if err != nil {
 		return nil, err
+	}
+	// Moderators widen the set of producers rather than defining it. Where there
+	// are none the administrator is the only one, refused exactly as before.
+	if !isAdmin {
+		if channel == nil || len(channel.Moderators) == 0 {
+			return nil, refuse("Only an administrator may do that")
+		}
+		if requireModerator(channel, username) != nil {
+			return nil, refuse("Only an administrator or a moderator may do that")
+		}
+	}
+	if channel == nil || channel.Kind != timeline.ChannelKind {
+		return nil, refuse("No such room: %s", channelID)
 	}
 	body = strings.TrimSpace(body)
 	if body == "" {
@@ -977,6 +1011,222 @@ func (m *Messaging) audienceChanged(channelID string, reached []string) (*Channe
 		}
 	}
 	return &ChannelReply{Ok: true, Channel: channel}, nil
+}
+
+// -- moderation --------------------------------------------------------------
+
+// dismissedQueue is the comment on a submission rejected because the last
+// moderator went and nobody was left who could decide it.
+const dismissedQueue = "That channel no longer accepts submissions"
+
+// Appoint makes a user a moderator of a channel. Administrators only.
+//
+// The first appointment is what makes a channel accept submissions, so the
+// channel is announced and its subscribers' clients learn they may submit.
+func (m *Messaging) Appoint(isAdmin bool, channelID, username string) (*ChannelReply, error) {
+	if err := requireAdmin(isAdmin); err != nil {
+		return nil, err
+	}
+	if _, err := m.requireRoom(channelID, timeline.ChannelKind); err != nil {
+		return nil, err
+	}
+	if !m.known(username) {
+		return nil, refuse("No such user: %s", username)
+	}
+	if _, err := m.store.Appoint(channelID, username); err != nil {
+		return nil, err
+	}
+	channel, err := m.store.Room(channelID)
+	if err != nil {
+		return nil, err
+	}
+	m.announceRoom(channel, nil)
+	return &ChannelReply{Ok: true, Channel: channel}, nil
+}
+
+// Dismiss removes a moderator. Administrators only.
+//
+// Dismissing the last one leaves a channel that accepts no submissions, and the
+// queue has nobody left who may decide it. It is rejected rather than left, so
+// each author is told.
+func (m *Messaging) Dismiss(isAdmin bool, channelID, username string) (*ChannelReply, error) {
+	if err := requireAdmin(isAdmin); err != nil {
+		return nil, err
+	}
+	if _, err := m.requireRoom(channelID, timeline.ChannelKind); err != nil {
+		return nil, err
+	}
+	if _, err := m.store.Dismiss(channelID, username); err != nil {
+		return nil, err
+	}
+	channel, err := m.store.Room(channelID)
+	if err != nil {
+		return nil, err
+	}
+	if len(channel.Moderators) == 0 {
+		rejected, err := m.store.RejectAll(channelID, dismissedQueue)
+		if err != nil {
+			return nil, err
+		}
+		for index := range rejected {
+			m.announceSubmission(&rejected[index], nil)
+		}
+	}
+	m.announceRoom(channel, nil)
+	return &ChannelReply{Ok: true, Channel: channel}, nil
+}
+
+// Submit proposes a message to a channel. It reaches only the moderators until
+// one approves it, and takes no sequence number until then: a rejected one
+// would otherwise leave every subscriber a gap to re-request forever.
+func (m *Messaging) Submit(username, channelID, body string) (*timeline.Submission, error) {
+	channel, err := m.requireAccess(channelID, username, timeline.ChannelKind)
+	if err != nil {
+		return nil, err
+	}
+	if len(channel.Moderators) == 0 {
+		return nil, refuse("That channel accepts no submissions")
+	}
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return nil, refuse("Empty message")
+	}
+
+	submission, err := m.store.Submit(channelID, username, body)
+	if err != nil {
+		return nil, err
+	}
+	if submission == nil {
+		// The last moderator was dismissed after the check above.
+		return nil, refuse("That channel accepts no submissions")
+	}
+	m.deliver(channel.Moderators, submissionEvent{Type: SubmissionPush, Submission: submission})
+	return submission, nil
+}
+
+// Queue is what a channel's moderators have to decide, oldest first.
+func (m *Messaging) Queue(username, channelID string) (*QueueReply, error) {
+	channel, err := m.requireRoom(channelID, timeline.ChannelKind)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireModerator(channel, username); err != nil {
+		return nil, err
+	}
+	queue, err := m.store.Queue(channelID)
+	if err != nil {
+		return nil, err
+	}
+	return &QueueReply{Channel: channelID, Submissions: queue}, nil
+}
+
+// Approve publishes a submission as its author wrote it and under their name.
+// A moderator may not edit one, so attribution is a fact rather than a rule.
+func (m *Messaging) Approve(username, submissionID string) (*SendReply, error) {
+	submission, channel, err := m.pendingFor(username, submissionID)
+	if err != nil {
+		return nil, err
+	}
+	message, err := m.store.Approve(submissionID)
+	if errors.Is(err, timeline.ErrNotPending) {
+		return nil, refuse("That submission has been decided")
+	}
+	if err != nil {
+		return nil, err
+	}
+	m.deliver(channel.Audience, messageEvent{Type: MessagePush, Message: message})
+	submission.State = timeline.Approved
+	m.announceSubmission(submission, channel.Moderators)
+	return &SendReply{Ok: true, Seq: message.Seq}, nil
+}
+
+// Reject turns a submission down, with a comment if the moderator gives one.
+//
+// The row stays until its author acknowledges it, so an author who is offline
+// now learns the outcome on their next sync rather than never.
+func (m *Messaging) Reject(username, submissionID, comment string) (*Ok, error) {
+	submission, channel, err := m.pendingFor(username, submissionID)
+	if err != nil {
+		return nil, err
+	}
+	var note *string
+	if comment = strings.TrimSpace(comment); comment != "" {
+		note = &comment
+	}
+	decided, err := m.store.Reject(submissionID, note)
+	if err != nil {
+		return nil, err
+	}
+	if !decided {
+		return nil, refuse("That submission has been decided")
+	}
+	submission.State, submission.Comment = timeline.Rejected, note
+	m.announceSubmission(submission, channel.Moderators)
+	return &Ok{Ok: true}, nil
+}
+
+// Acknowledge is an author closing a rejection they have seen, which is what
+// deletes it.
+func (m *Messaging) Acknowledge(username, submissionID string) (*Ok, error) {
+	submission, err := m.store.Submission(submissionID)
+	if err != nil {
+		return nil, err
+	}
+	// Someone else's reads as absent: acknowledging is the author's act alone.
+	if submission == nil || submission.Author != username {
+		return nil, refuse("No such submission: %s", submissionID)
+	}
+	if submission.State == timeline.Pending {
+		return nil, refuse("That submission is still pending")
+	}
+	if _, err := m.store.Acknowledge(submissionID); err != nil {
+		return nil, err
+	}
+	return &Ok{Ok: true}, nil
+}
+
+// pendingFor returns a submission and its channel, if this user moderates it and
+// nobody has decided it yet.
+func (m *Messaging) pendingFor(
+	username, submissionID string,
+) (*timeline.Submission, *timeline.Room, error) {
+	submission, err := m.store.Submission(submissionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if submission == nil {
+		return nil, nil, refuse("No such submission: %s", submissionID)
+	}
+	channel, err := m.requireRoom(submission.Channel, timeline.ChannelKind)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := requireModerator(channel, username); err != nil {
+		return nil, nil, err
+	}
+	if submission.State != timeline.Pending {
+		return nil, nil, refuse("That submission has been decided")
+	}
+	return submission, channel, nil
+}
+
+// requireModerator refuses anyone the channel has not appointed, administrators
+// included. Whether a channel takes submissions is whether it has moderators, so
+// an implicit one would make every channel take them.
+func requireModerator(channel *timeline.Room, username string) error {
+	for _, moderator := range channel.Moderators {
+		if moderator == username {
+			return nil
+		}
+	}
+	return refuse("Only a moderator may do that")
+}
+
+// announceSubmission tells a submission's author where it stands, and the
+// moderators, whose queues drop it.
+func (m *Messaging) announceSubmission(submission *timeline.Submission, moderators []string) {
+	m.deliver(union([]string{submission.Author}, moderators),
+		submissionEvent{Type: SubmissionPush, Submission: submission})
 }
 
 // -- events and announcements ------------------------------------------------

@@ -9,7 +9,7 @@
 // What it speaks is docs/wire-contract.md, and what says so is
 // tests/conformance:
 //
-//	MINOS_CONFORMANCE_CMD="./minosd" make conformance
+//	make conformance-go
 package main
 
 import (

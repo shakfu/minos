@@ -2,7 +2,7 @@
 
 A conversation server in Go, a terminal client, and a frozen wire contract between them.
 
-There are two servers and that is deliberate. `go/` is the implementation. `server/` and `messaging/` are the specification it was written from -- executable, readable, and not meant to be deployed. Neither is authoritative on its own: [docs/wire-contract.md](docs/wire-contract.md) is, and `tests/conformance/` holds both to it.
+There are two servers and that is deliberate. `go/` is the implementation. `server/` and `messaging/` are the specification it was written from -- executable, readable, and not meant to be deployed. The specification stops at the core; sections beyond it exist in `go/` alone. Neither is authoritative on its own: [docs/wire-contract.md](docs/wire-contract.md) is, and `tests/conformance/` holds both to it.
 
 It started as the [OS.js](https://www.os-js.org) v3 client against a Python server that reimplements the contract OS.js expects. Two front ends have been removed since: the OS.js client, and the web desktop written to replace it. `tui/` is the current one, and the desktop metaphor it dropped took the old conversation model with it. The server still speaks the OS.js wire format -- route shapes, `osjs/*` websocket message names, and the `osjs:` mountpoint are all kept as-is, which is what lets a front end be replaced without touching the server.
 
@@ -15,13 +15,13 @@ make serve-go # the Go server on http://127.0.0.1:8000
 make tui      # the terminal client, in another shell
 ```
 
-`make serve` runs the Python one instead, on the same port and the same contract. Use it to read what a behaviour is supposed to be; use `serve-go` for anything else. Go 1.25 or newer builds it.
+`make serve` runs the Python one instead, on the same port and the core of the same contract. Use it to read what a behaviour is supposed to be; use `serve-go` for anything else. Go 1.25 or newer builds it.
 
 Log in as `demo` / `demo`. There are also `alice` and `bob`, with passwords to match; a conversation needs two of them, so run `make tui` again in a third shell and log in as another. `demo` is the only administrator, which is what lets it found a permanent room or manage a group.
 
 Neither server needs a browser build. Both warn and serve the API alone if `dist/` is empty, because the terminal client needs the routes and the websocket rather than a bundle.
 
-Inside the client, `/help` lists the commands. `/open alice` raises a room, `/meet alice` raises one that is discarded when everyone leaves, `/create Engineering` founds a permanent one, and `/invite @Team` admits a whole group. `/channel new Announcements @Ops` founds a channel restricted to a group, and `/channel admit system @Ops` restricts an existing one. Typing in a channel publishes to it, which only an administrator may do.
+Inside the client, `/help` lists the commands. `/open alice` raises a room, `/meet alice` raises one that is discarded when everyone leaves, `/create Engineering` founds a permanent one, and `/invite @Team` admits a whole group. `/channel new Announcements @Ops` founds a channel restricted to a group, and `/channel admit system @Ops` restricts an existing one. Typing in a channel publishes to it if you are an administrator or one of its moderators, and otherwise submits it to them. `/channel appoint <id> alice` appoints one, who decides with `/queue`, `/approve` and `/reject`.
 
 ```
 make demo # the audience rule, narrated, against the compiled server
@@ -30,15 +30,16 @@ make demo # the audience rule, narrated, against the compiled server
 It launches a server of its own on a database of its own and drives three real websockets, so it neither needs nor disturbs anything you have running.
 
 ```
-make test            # pytest over the specification, go test over the server
+make test            # pytest, go test, and the wire contract against the Go server
 make conformance-go  # the wire contract, against the Go server
-make conformance     # the same suite, against the Python one
+make conformance     # its core, against the Python one
 ```
 
 `tests/conformance/` talks to a server over HTTP and a websocket and imports none
 of its code, which is what lets one suite hold two implementations to one
 contract. `MINOS_CONFORMANCE_CMD` points it at any server and
-`MINOS_CONFORMANCE_URL` at one already running.
+`MINOS_CONFORMANCE_URL` at one already running. `MINOS_CONFORMANCE_SCOPE=full`
+says a server implements the sections beyond the core, which only `go/` does.
 
 `serve`, `tui` and `test` install what they need first, which needs [uv](https://docs.astral.sh/uv/) for the Python venv. There is no JavaScript toolchain any more.
 

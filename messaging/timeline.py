@@ -71,9 +71,9 @@ logger = logging.getLogger(__name__)
 
 # The schema version, stamped in `PRAGMA user_version` and checked on open. It
 # covers the tables both servers read; `presence` and `occupants` are this
-# server's alone and are not part of it. Raise it when the shared schema
-# changes, in both implementations at once -- `SchemaVersion` in
-# `go/internal/timeline/timeline.go` is the same number.
+# server's alone and are not part of it. Frozen with the rest of this
+# specification: `go/` continues from here, so a database it has upgraded is
+# refused by this server as written by a later one.
 SCHEMA_VERSION = 2
 
 # How to reach each version from the one before it. A version with no entry has
