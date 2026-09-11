@@ -321,7 +321,8 @@ func TestAMessageCarriesTheWholeShape(t *testing.T) {
 	alice.Call("send", "room", room["id"], "body", "hello")
 
 	message := obj(list(alice.Call("history", "room", room["id"], "since", 0)["messages"])[0])
-	keySet(t, message, "room", "seq", "author", "kind", "body", "at")
+	keySet(t, message, "room", "seq", "author", "kind", "subject", "body", "at")
+	null(t, message, "subject")
 	same(t, message["author"], "alice")
 	same(t, message["kind"], "text")
 	same(t, message["body"], "hello")
@@ -456,6 +457,63 @@ func TestOccupancyIsPerRoom(t *testing.T) {
 	rooms := byID(alice.Call("sync")["rooms"])
 	same(t, rooms[str(here["id"])]["occupants"], []string{"alice"})
 	same(t, rooms[str(elsewhere["id"])]["occupants"], []any{})
+}
+
+func occupying(room any, occupants string) Pred {
+	return func(e Obj) bool {
+		pushed := obj(e["room"])
+		return e["type"] == "room" && pushed["id"] == room && encode(pushed["occupants"]) == occupants
+	}
+}
+
+// A person is in one place at a time: entering a room leaves the one they were in.
+func TestEnteringARoomLeavesTheRoomYouWereIn(t *testing.T) {
+	alice, bob := connect(t, "alice"), connect(t, "bob")
+	first := alice.Call("open", "invite", []string{"bob"}, "title", unique("First"))
+	second := alice.Call("open", "invite", []string{}, "title", unique("Second"))
+	held := alice.Call("enter", "room", first["id"])["occupancy"]
+	bob.ExpectPush(occupying(first["id"], `["alice"]`))
+
+	alice.Call("enter", "room", second["id"])
+	same(t, alice.ExpectPush(PushOf("exited")), Obj{"type": "exited", "room": first["id"], "occupancy": held})
+	bob.ExpectPush(occupying(first["id"], `[]`))
+
+	rooms := byID(alice.Call("sync")["rooms"])
+	same(t, rooms[str(first["id"])]["occupants"], []any{})
+	same(t, rooms[str(second["id"])]["occupants"], []string{"alice"})
+}
+
+// On any device: entering on one takes the person out on the other.
+func TestEnteringOnAnotherConnectionReleasesThisOne(t *testing.T) {
+	laptop, phone := connect(t, "alice"), connect(t, "alice")
+	here := laptop.Call("open", "invite", []string{}, "title", unique("Laptop"))
+	there := laptop.Call("open", "invite", []string{}, "title", unique("Phone"))
+	held := laptop.Call("enter", "room", here["id"])["occupancy"]
+
+	phone.Call("enter", "room", there["id"])
+	same(t, laptop.ExpectPush(PushOf("exited")), Obj{"type": "exited", "room": here["id"], "occupancy": held})
+	// Released rather than refused: the laptop may still say it has left.
+	same(t, laptop.Call("exit", "occupancy", held), Obj{"ok": true})
+}
+
+// Two devices in the same room are still one person in one place.
+func TestTwoConnectionsMayShareOneRoom(t *testing.T) {
+	laptop, phone := connect(t, "alice"), connect(t, "alice")
+	room := laptop.Call("open", "invite", []string{}, "title", unique("Shared"))
+	laptop.Call("enter", "room", room["id"])
+	phone.Call("enter", "room", room["id"])
+
+	// Both entries are announced; a release would have come before the second.
+	entries := 0
+	_, before := laptop.CollectPush(func(e Obj) bool {
+		if occupying(room["id"], `["alice"]`)(e) {
+			entries++
+		}
+		return entries == 2
+	})
+	for _, event := range before {
+		truth(t, obj(event)["type"] != "exited", "a second device in the same room released the first: %s", encode(event))
+	}
 }
 
 // -- channels -----------------------------------------------------------------

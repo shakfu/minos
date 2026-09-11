@@ -29,7 +29,9 @@ func emptyARoom(socket *Socket, title string) any {
 }
 
 // awaitASweep blocks until a sweep has demonstrably run past the grace, then one
-// interval more, so a room deleted in the same pass has been announced too.
+// interval more, so a room deleted in the same pass has been announced too. The
+// socket enters a room to prove it, which leaves any room its user is in, so it
+// must belong to a user whose occupancy the test does not depend on.
 func awaitASweep(socket *Socket) {
 	doomed := emptyARoom(socket, unique("Doomed"))
 	socket.ExpectPushWithin(gone(doomed), deletionTimeout)
@@ -58,16 +60,30 @@ func TestARoomIsDeletedOnceItsLastOccupantHasBeenGone(t *testing.T) {
 	truth(t, !listed(bob, room["id"]), "bob still lists the room")
 }
 
+// Entering another room is leaving: the meeting left behind counts down.
+func TestEnteringAnotherRoomLetsAMeetingGo(t *testing.T) {
+	server := freshServer(t, grace)
+	alice := attach(t, server, "alice")
+	meeting := alice.Call("open", "invite", []string{}, "retention", "transient", "title", unique("Meeting"))
+	office := alice.Call("open", "invite", []string{}, "title", unique("Office"))
+	alice.Call("enter", "room", meeting["id"])
+
+	alice.Call("enter", "room", office["id"])
+	alice.ExpectPushWithin(gone(meeting["id"]), deletionTimeout)
+}
+
 // A reload or a dropped connection must not destroy a live conversation.
 func TestReturningDuringTheGracePeriodRescuesTheRoom(t *testing.T) {
-	alice := attach(t, freshServer(t, grace), "alice")
+	server := freshServer(t, grace)
+	alice, bob := attach(t, server, "alice"), attach(t, server, "bob")
 
 	room := alice.Call("open", "invite", []string{}, "retention", "transient", "title", unique("Rescued"))
 	occupancy := alice.Call("enter", "room", room["id"])["occupancy"]
 	alice.Call("exit", "occupancy", occupancy)
 	alice.Call("enter", "room", room["id"])
 
-	awaitASweep(alice)
+	// bob proves the sweep ran: alice entering a room of her own would leave this one.
+	awaitASweep(bob)
 	truth(t, listed(alice, room["id"]), "the room was deleted")
 }
 

@@ -5,7 +5,7 @@ written in. `go/` implements it, and `go/conformance/` decides whether it is
 correct.
 
 The model behind the vocabulary -- room, group, channel, grant, occupancy -- is
-in [chat-concepts.md](../chat-concepts.md) and is not repeated here. This
+in [chat-concepts.md](dev/chat-concepts.md) and is not repeated here. This
 document covers only what crosses the wire.
 
 Two halves, and they differ in kind:
@@ -28,6 +28,7 @@ Read from the environment. A server that ignores these cannot be tested.
 | `MINOS_DIST` | `./dist` | the `osjs:` mountpoint, and the static build |
 | `MINOS_SECRET` | a development value | session cookie signing key |
 | `MINOS_ROOM_GRACE` | `120` | seconds a transient room outlives its last occupant |
+| `MINOS_ROOM_SWEEP` | `15` | seconds between sweeps for expired rooms and due archival |
 | `MINOS_WS_PING` | `30` | seconds of client silence before a keepalive frame |
 
 A missing `dist/index.html` is not fatal. The server logs and serves the API
@@ -244,7 +245,7 @@ A room, and a channel in the same shape:
 its subscribers. `audience` resolves group grants, so it lists users and never
 groups. `occupants` is who is in the room now, not who may be. `restrictedTo`
 is the groups a channel admits, empty on an open channel and on every room.
-Section 9 adds `moderators`.
+Section 9 adds `moderators`, and section 11 adds `archive`.
 
 A message:
 
@@ -255,6 +256,7 @@ A message:
 
 `kind` is `text` for what a person typed, `event` for what happened to the
 room. An `event` has author `system`. `at` is a Unix timestamp as a float.
+Section 10 adds `subject`.
 
 A group: `{"id": "<hex>", "name": "Team", "members": ["alice"]}`.
 
@@ -268,7 +270,8 @@ Sync:
 ```
 
 `users` is every account, sorted; `groups` sorted by name. `read` omits rooms
-with no cursor. Section 9 adds `submissions`.
+with no cursor. Section 9 adds `submissions`, and section 10 removes channels
+from `read`.
 
 ### Rules a reimplementation must reproduce
 
@@ -308,6 +311,11 @@ with no cursor. Section 9 adds `submissions`.
 - An empty or whitespace-only body is refused.
 - `exit` may only release an occupancy the same connection took. Another
   connection's is refused with `Not in that room`.
+- A user occupies at most one room. `enter` first releases every occupancy the
+  user holds in another room, on any connection: each room left is announced
+  with a `room` push, and the user is sent `exited` for each occupancy
+  released. Occupancies in the entered room, on other connections, are kept.
+- `exit` of an occupancy already released answers `{ok: true}`.
 - `read` never moves a cursor backwards.
 - An unparseable `since` or `seq` means zero rather than an error.
 - A room id that is not a string is "no such room", not a type error.
@@ -335,6 +343,7 @@ with no cursor. Section 9 adds `submissions`.
 | `roomGone` | `{"room": "<id>"}` | whoever must drop it |
 | `presence` | `{"username", "online"}` | everyone but its subject |
 | `group` | `{"group": <group>}` | everyone |
+| `exited` | `{"room": "<id>", "occupancy": "<id>"}` | the user whose occupancy `enter` released |
 
 A `room` push carries the whole object rather than a delta, so a client that
 missed one is not left behind. It is what tells a newly invited user the room
@@ -379,7 +388,7 @@ receiver as well as it covers a dropped frame.
 
 ## 9. Beyond the core: submissions and moderation
 
-[chat-concepts.md](../chat-concepts.md) section 5.
+[chat-concepts.md](dev/chat-concepts.md) section 5.
 
 ### Fields added to core shapes
 
@@ -442,7 +451,115 @@ push, because approval turns a submission into a message and deletes it.
 |-|-|-|
 | `submission` | `{"submission": <submission>}` | the moderators on submit; the author and the moderators on a decision |
 
-## 10. Not part of the contract
+## 10. The channel feed
+
+[chat-concepts.md](dev/chat-concepts.md) 2.4 and 2.5.
+
+### Fields added to core shapes
+
+- A message carries `subject`. In a channel it is never empty. In a room it is
+  `null`.
+- A submission carries `subject`, under the same rules as a channel message.
+- On a channel, a `history` reply carries `opened`: the `seq`s among its
+  `messages` that the caller has opened, ascending.
+- `sync`'s `read` omits channels.
+
+### Operations
+
+| Op | Request fields | Reply |
+|-|-|-|
+| `channel.publish` | `channel`, `subject`, `body` | `{ok: true, seq}` |
+| `channel.submit` | `channel`, `subject`, `body` | a submission |
+| `channel.open` | `channel`, `seq` | `{ok: true, channel, seq}` |
+
+`subject` is optional in both writes.
+
+### Rules
+
+- A subject is trimmed. An empty one is replaced by the first line of the
+  trimmed body, cut to 200 characters. A given subject over 200 characters is
+  refused with `A subject is at most 200 characters`.
+- `channel.publish` and `channel.submit` are refused with `Empty message` only
+  when subject and body are both empty once trimmed. For these two operations
+  this replaces the empty-body rule in section 6.
+- An event the server writes to a channel follows the same rule, so its subject
+  is its event line and its body is unchanged.
+- A message is opened for its author when it is published. For an approved
+  submission, the author is the submitter.
+- `channel.open` needs access to the channel, as `history` does, and is
+  idempotent. A `seq` that is not a live message in the channel is refused with
+  `No such message: <seq>`. On `system` it is refused with `Nothing in system is
+  opened`, and on a room with `No such room: <id>`, as the other `channel.*`
+  operations are.
+- `read` on a channel is refused with `A channel's items are opened, not read`.
+- A caller's pending stack is the channel's live messages they have not opened.
+  The server does not report its size.
+
+### Pushes
+
+| Type | Payload | Sent to |
+|-|-|-|
+| `opened` | `{"channel": "<id>", "seq": n}` | the caller's own connections |
+
+## 11. Archival
+
+[chat-concepts.md](dev/chat-concepts.md) section 4.
+
+### Fields added to core shapes
+
+A room or channel carries `archive`: `{"period": <seconds or null>,
+"searchable": <bool>}`. A user-created room always carries `{"period": null,
+"searchable": false}`.
+
+### Operations
+
+| Op | Request fields | Reply |
+|-|-|-|
+| `archive.set` | `room`, `period`, `searchable` | `{ok: true, room}` |
+| `archive.read` | `room`, `after` | `{room, after, messages, more}` |
+| `archive.search` | `room`, `query` | `{room, query, messages}` |
+
+`room` names a room or a channel.
+
+### Rules
+
+- `archive.set` is administrators only, on a permanent room or a channel.
+  Anywhere else it is refused with `Only a permanent room or a channel is
+  archived`. From anyone but an administrator it is refused with `Only an
+  administrator may do that`. An absent field keeps its value. `period` is a
+  positive number of seconds, or null for never; anything else is refused with
+  `A period is a positive number of seconds`. `searchable` is a boolean; anything
+  else is refused with `Searchable is true or false`. The space is announced
+  with a `room` push.
+- Every `MINOS_ROOM_SWEEP` seconds, each space with a period archives its longest
+  run of live messages, from the lowest `seq`, whose `at` is at least `period`
+  seconds ago. A changed period applies at the next sweep. Nothing is restored.
+- Archival neither moves `lastSeq` nor renumbers anything. `history` returns live
+  messages only, so a cursor below the first live `seq` meets a shortfall
+  (section 8).
+- Archiving a message deletes every opened mark on it.
+- `archive.read` is administrators only, refused to anyone else as `archive.set`
+  is. It returns up to 200 archived messages
+  with `seq` above `after` (default 0), ascending. `more` says whether others
+  follow.
+- `archive.search` is open to administrators always, and to the space's audience
+  when `searchable` is true. The rest of the audience is refused with `That
+  archive is not searchable`; anyone outside it is refused as `history` refuses
+  them. `query` is trimmed, and an empty one is refused with `Empty query`. It
+  matches archived messages
+  whose subject or body contains it, compared without case: at most 100, newest
+  first.
+- An archived message has the message shape, unchanged.
+
+### Pushes
+
+| Type | Payload | Sent to |
+|-|-|-|
+| `archived` | `{"room": "<id>", "through": n}` | the space's audience |
+
+A client drops its copies of the messages up to `through`.
+
+## 12. Not part of the contract
 
 An implementation may do any of this differently:
 

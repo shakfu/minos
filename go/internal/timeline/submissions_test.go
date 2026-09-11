@@ -34,7 +34,7 @@ func moderated(t *testing.T) (*Timeline, string) {
 
 func submit(t *testing.T, store *Timeline, channelID, author, body string) *Submission {
 	t.Helper()
-	submission, err := store.Submit(channelID, author, body)
+	submission, err := store.Submit(channelID, author, "", body)
 	if err != nil || submission == nil {
 		t.Fatalf("cannot submit: %v, %v", submission, err)
 	}
@@ -44,7 +44,7 @@ func submit(t *testing.T, store *Timeline, channelID, author, body string) *Subm
 func TestAChannelWithNoModeratorStoresNoSubmission(t *testing.T) {
 	store, id := channel(t)
 
-	submission, err := store.Submit(id, "bob", "hello")
+	submission, err := store.Submit(id, "bob", "", "hello")
 	if err != nil {
 		t.Fatalf("submit failed: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestRejectingTheWholeQueueLeavesNothingPending(t *testing.T) {
 		t.Fatalf("%d submissions still pending", len(queue))
 	}
 	// And nothing new can arrive: the insert itself checks for a moderator.
-	if late, _ := store.Submit(id, "bob", "late"); late != nil {
+	if late, _ := store.Submit(id, "bob", "", "late"); late != nil {
 		t.Fatal("a submission landed after the last moderator went")
 	}
 }

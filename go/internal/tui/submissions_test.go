@@ -98,7 +98,7 @@ func TestARejectionReachesItsAuthorAndAckClosesIt(t *testing.T) {
 	told := &collector{}
 	bob.SetHandlers(func() {}, told.add)
 
-	submission, err := bob.Submit(channel, "nearly")
+	submission, err := bob.Submit(channel, "", "nearly")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestAReturningAuthorFindsTheRejectionWaiting(t *testing.T) {
 	server := testserver.Start(t, config.HistoryLimit)
 	demo, alice, bob := connect(t, server.Base, "demo"), connect(t, server.Base, "alice"), connect(t, server.Base, "bob")
 	channel := moderated(t, demo, alice, bob)
-	submission, err := bob.Submit(channel, "while away")
+	submission, err := bob.Submit(channel, "", "while away")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestAReturningAuthorFindsTheRejectionWaiting(t *testing.T) {
 func TestDismissingTheLastModeratorIsSaidAndRejectsTheQueue(t *testing.T) {
 	demo, alice, bob := three(t)
 	channel := moderated(t, demo, alice, bob)
-	submission, err := bob.Submit(channel, "orphaned")
+	submission, err := bob.Submit(channel, "", "orphaned")
 	if err != nil {
 		t.Fatal(err)
 	}

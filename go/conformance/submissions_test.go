@@ -99,7 +99,7 @@ func TestASubmissionWaitsForAModeratorAndTakesNoSequence(t *testing.T) {
 	channel := found(demo, bob)
 
 	submission := bob.Call("channel.submit", "channel", channel, "body", "  a tip  ")
-	keySet(t, submission, "id", "channel", "author", "body", "at", "state", "comment")
+	keySet(t, submission, "id", "channel", "author", "subject", "body", "at", "state", "comment")
 	same(t, []any{submission["channel"], submission["author"]}, []any{channel, "bob"})
 	same(t, submission["body"], "a tip")
 	same(t, submission["state"], "pending")

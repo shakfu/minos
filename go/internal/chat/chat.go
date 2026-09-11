@@ -127,7 +127,7 @@ func (h *Handler) StartSweeper() {
 				return
 			case <-ticker.C:
 				if _, err := h.service.Sweep(); err != nil {
-					log.Printf("Transient room sweep failed: %v", err)
+					log.Printf("Sweep failed: %v", err)
 				}
 			}
 		}
@@ -266,7 +266,7 @@ func (h *Handler) run(
 
 	case "channel.publish":
 		return h.service.PublishMessage(
-			username, isAdmin, text(fields, "channel"), text(fields, "body"))
+			username, isAdmin, text(fields, "channel"), text(fields, "subject"), text(fields, "body"))
 
 	case "channel.admit":
 		return h.service.Admit(isAdmin, text(fields, "channel"), text(fields, "group"))
@@ -281,7 +281,29 @@ func (h *Handler) run(
 		return h.service.Dismiss(isAdmin, text(fields, "channel"), text(fields, "username"))
 
 	case "channel.submit":
-		return h.service.Submit(username, text(fields, "channel"), text(fields, "body"))
+		return h.service.Submit(
+			username, text(fields, "channel"), text(fields, "subject"), text(fields, "body"))
+
+	case "channel.open":
+		// The machine channel is a log with nothing pending, and the host is where
+		// its id lives.
+		if text(fields, "channel") == config.SystemChannel {
+			return nil, &messaging.Refusal{Message: "Nothing in system is opened"}
+		}
+		return h.service.Open(username, text(fields, "channel"), cursor(fields, "seq"))
+
+	case "archive.set":
+		change, err := archiveChange(fields)
+		if err != nil {
+			return nil, err
+		}
+		return h.service.SetArchive(isAdmin, roomID(fields), change)
+
+	case "archive.read":
+		return h.service.ArchiveRead(isAdmin, roomID(fields), cursor(fields, "after"))
+
+	case "archive.search":
+		return h.service.ArchiveSearch(username, isAdmin, roomID(fields), text(fields, "query"))
 
 	case "channel.queue":
 		return h.service.Queue(username, text(fields, "channel"))
@@ -409,6 +431,24 @@ func value(fields map[string]json.RawMessage, name string) (any, error) {
 		return nil, err
 	}
 	return decoded, nil
+}
+
+// archiveChange reads archive.set, telling an absent field from a null one:
+// absent keeps the setting, and a null period means never.
+func archiveChange(fields map[string]json.RawMessage) (messaging.ArchiveChange, error) {
+	var change messaging.ArchiveChange
+	var err error
+	if _, change.PeriodGiven = fields["period"]; change.PeriodGiven {
+		if change.Period, err = value(fields, "period"); err != nil {
+			return change, err
+		}
+	}
+	if _, change.SearchableGiven = fields["searchable"]; change.SearchableGiven {
+		if change.Searchable, err = value(fields, "searchable"); err != nil {
+			return change, err
+		}
+	}
+	return change, nil
 }
 
 func list(fields map[string]json.RawMessage, name string) ([]any, error) {

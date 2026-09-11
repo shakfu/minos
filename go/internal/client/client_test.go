@@ -296,3 +296,92 @@ func TestTheReadCursorIsSeparateFromTheDeliveryCursor(t *testing.T) {
 		t.Fatalf("unread %d after marking", demo.Unread(room.ID))
 	}
 }
+
+// -- channels ----------------------------------------------------------------
+
+// channel is a new channel with each client given subscribed to it.
+func channel(t *testing.T, demo *Client, subscribers ...*Client) string {
+	t.Helper()
+	founded, err := demo.CreateChannel("Feed "+t.Name(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range subscribers {
+		if _, err := c.Subscribe(founded.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return founded.ID
+}
+
+func TestAChannelItemIsOpenedAndEveryDeviceAgrees(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	phone := connect(t, server.Base, "alice")
+	feed := channel(t, demo, demo, alice, phone)
+	if err := demo.Publish(feed, "Deploy", "at four"); err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, "the item", func() bool { return len(alice.Log(feed)) == 1 && len(phone.Log(feed)) == 1 })
+	if item := alice.Log(feed)[0]; item.Subject == nil || *item.Subject != "Deploy" || item.Body != "at four" {
+		t.Fatalf("alice received %+v", item)
+	}
+	// Opened for its author, and for nobody else yet.
+	waitFor(t, "demo's copy", func() bool { return demo.Opened(feed)[1] })
+	if alice.Opened(feed)[1] {
+		t.Fatal("alice's item arrived opened")
+	}
+
+	if err := alice.Open(feed, 1); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the other device", func() bool { return phone.Opened(feed)[1] })
+	// A connection made afterwards learns it from the backfill.
+	if later := connect(t, server.Base, "alice"); !later.Opened(feed)[1] {
+		t.Fatal("a new connection does not know the item was opened")
+	}
+}
+
+func TestAChannelCountsNothingUnread(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	feed := channel(t, demo, alice)
+	if err := demo.Publish(feed, "", "news"); err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, "the item", func() bool { return len(alice.Log(feed)) == 1 })
+	if unread := alice.Unread(feed); unread != 0 {
+		t.Fatalf("a channel counts %d unread", unread)
+	}
+}
+
+func TestAnArchivedPushDropsWhatItNames(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	feed := channel(t, demo, alice)
+	for _, body := range []string{"one", "two", "three"} {
+		if err := demo.Publish(feed, "", body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor(t, "three items", func() bool { return len(alice.Log(feed)) == 3 })
+	if err := alice.Open(feed, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	alice.dispatch(json.RawMessage(`{"type": "archived", "room": "` + feed + `", "through": 2}`))
+	if got := bodies(alice.Log(feed)); !slices.Equal(got, []string{"three"}) {
+		t.Fatalf("the log is %v", got)
+	}
+	if opened := alice.Opened(feed); len(opened) != 0 {
+		t.Fatalf("opened marks outlived their items: %v", opened)
+	}
+	alice.mutex.Lock()
+	cursor := alice.cursors[feed]
+	alice.mutex.Unlock()
+	if cursor != 3 {
+		t.Fatalf("the cursor moved to %d", cursor)
+	}
+}

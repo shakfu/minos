@@ -63,15 +63,33 @@ type Room struct {
 	Audience     []string    `json:"audience"`
 	Occupants    []string    `json:"occupants"`
 	LastSeq      int64       `json:"lastSeq"`
+	Archive      Archive     `json:"archive"`
+}
+
+// Archive is when a room's messages leave it, and whether its audience may
+// search them afterwards. A nil period is never.
+type Archive struct {
+	Period     *float64 `json:"period"`
+	Searchable bool     `json:"searchable"`
+}
+
+// ArchiveChange is what an archive.set asks for. An unset field is kept:
+// Period counts only when SetPeriod is true, and nil then means never.
+type ArchiveChange struct {
+	SetPeriod  bool
+	Period     *float64
+	Searchable *bool
 }
 
 type Message struct {
-	Room   string  `json:"room"`
-	Seq    int64   `json:"seq"`
-	Author string  `json:"author"`
-	Kind   string  `json:"kind"`
-	Body   string  `json:"body"`
-	At     float64 `json:"at"`
+	Room   string `json:"room"`
+	Seq    int64  `json:"seq"`
+	Author string `json:"author"`
+	Kind   string `json:"kind"`
+	// A channel message's headline, and nil in a room.
+	Subject *string `json:"subject"`
+	Body    string  `json:"body"`
+	At      float64 `json:"at"`
 }
 
 type Group struct {
@@ -91,6 +109,7 @@ type Submission struct {
 	ID      string  `json:"id"`
 	Channel string  `json:"channel"`
 	Author  string  `json:"author"`
+	Subject string  `json:"subject"`
 	Body    string  `json:"body"`
 	At      float64 `json:"at"`
 	State   string  `json:"state"`
@@ -133,6 +152,14 @@ type Client struct {
 	cursors   map[string]int64
 	repairing map[string]bool
 
+	// Which items this user has opened, per channel: a channel's read state, in
+	// place of the read cursor a room keeps.
+	opened map[string]map[int64]bool
+
+	// Occupancies this connection holds. The server may release one when the user
+	// enters a room on another connection, and says so with an exited push.
+	occupancies map[string]bool
+
 	pid     int64
 	pending map[int64]chan json.RawMessage
 
@@ -156,6 +183,8 @@ func NewClient(socket *Socket) *Client {
 		queued:      map[string]Submission{},
 		cursors:     map[string]int64{},
 		repairing:   map[string]bool{},
+		opened:      map[string]map[int64]bool{},
+		occupancies: map[string]bool{},
 		pending:     map[int64]chan json.RawMessage{},
 		wake:        make(chan struct{}, 1),
 		stopping:    make(chan struct{}),
@@ -387,7 +416,57 @@ func (c *Client) dispatch(raw json.RawMessage) {
 			c.trackSubmission(*event.Submission, true)
 		}
 		c.changed()
+	case "opened":
+		var event struct {
+			Channel string `json:"channel"`
+			Seq     int64  `json:"seq"`
+		}
+		if json.Unmarshal(raw, &event) == nil {
+			c.mutex.Lock()
+			c.markOpenedLocked(event.Channel, event.Seq)
+			c.mutex.Unlock()
+		}
+		c.changed()
+	case "archived":
+		var event struct {
+			Room    string `json:"room"`
+			Through int64  `json:"through"`
+		}
+		if json.Unmarshal(raw, &event) == nil {
+			c.dropThrough(event.Room, event.Through)
+		}
+		c.changed()
+	case "exited":
+		var event struct {
+			Occupancy string `json:"occupancy"`
+		}
+		if json.Unmarshal(raw, &event) == nil {
+			c.mutex.Lock()
+			delete(c.occupancies, event.Occupancy)
+			c.mutex.Unlock()
+		}
+		c.changed()
 	}
+}
+
+// dropThrough forgets what the server archived. The cursor stays: a sequence is
+// never reissued, so nothing at or below it can arrive again.
+func (c *Client) dropThrough(room string, through int64) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.log[room] = slices.DeleteFunc(slices.Clone(c.log[room]), func(m Message) bool { return m.Seq <= through })
+	for seq := range c.opened[room] {
+		if seq <= through {
+			delete(c.opened[room], seq)
+		}
+	}
+}
+
+func (c *Client) markOpenedLocked(channel string, seq int64) {
+	if c.opened[channel] == nil {
+		c.opened[channel] = map[int64]bool{}
+	}
+	c.opened[channel][seq] = true
 }
 
 // -- the sequence contract ---------------------------------------------------
@@ -410,6 +489,10 @@ func (c *Client) apply(message Message) {
 	}
 	c.cursors[message.Room] = message.Seq
 	c.appendLocked(message.Room, message)
+	// Opened for its author, as the server records it: they wrote it.
+	if _, isChannel := c.channels[message.Room]; isChannel && message.Author == c.me && message.Kind == "text" {
+		c.markOpenedLocked(message.Room, message.Seq)
+	}
 	c.mutex.Unlock()
 	c.changed()
 }
@@ -431,6 +514,8 @@ func (c *Client) repair(room string) {
 
 	var reply struct {
 		Messages []Message `json:"messages"`
+		// On a channel, which of these this user has opened.
+		Opened []int64 `json:"opened"`
 	}
 	if err := c.call("history", map[string]any{"room": room, "since": before}, &reply); err != nil {
 		// The cursor stays put, so the next message re-detects the gap.
@@ -456,6 +541,9 @@ func (c *Client) repair(room string) {
 			c.cursors[room] = message.Seq
 			c.appendLocked(room, message)
 		}
+	}
+	for _, seq := range reply.Opened {
+		c.markOpenedLocked(room, seq)
 	}
 	c.mutex.Unlock()
 	c.changed()
@@ -580,12 +668,28 @@ func (c *Client) Enter(room string) (string, error) {
 	var reply struct {
 		Occupancy string `json:"occupancy"`
 	}
-	err := c.call("enter", map[string]any{"room": room}, &reply)
-	return reply.Occupancy, err
+	if err := c.call("enter", map[string]any{"room": room}, &reply); err != nil {
+		return "", err
+	}
+	c.mutex.Lock()
+	c.occupancies[reply.Occupancy] = true
+	c.mutex.Unlock()
+	return reply.Occupancy, nil
 }
 
 func (c *Client) Exit(occupancy string) error {
+	c.mutex.Lock()
+	delete(c.occupancies, occupancy)
+	c.mutex.Unlock()
 	return c.call("exit", map[string]any{"occupancy": occupancy}, nil)
+}
+
+// Holds is whether this connection is still in the room an occupancy was taken
+// for, rather than released by an entry elsewhere.
+func (c *Client) Holds(occupancy string) bool {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return c.occupancies[occupancy]
 }
 
 // MarkRead moves the read cursor, which is seen rather than received.
@@ -627,8 +731,23 @@ func (c *Client) CreateChannel(title string, groups []string) (Room, error) {
 	return channel, err
 }
 
-func (c *Client) Publish(channel, body string) error {
-	return c.call("channel.publish", map[string]any{"channel": channel, "body": body}, nil)
+// Publish writes to a channel. An empty subject lets the server take the body's
+// first line.
+func (c *Client) Publish(channel, subject, body string) error {
+	return c.call("channel.publish",
+		map[string]any{"channel": channel, "subject": subject, "body": body}, nil)
+}
+
+// Open marks one channel item opened. The server tells this user's other
+// connections, so every device agrees.
+func (c *Client) Open(channel string, seq int64) error {
+	if err := c.call("channel.open", map[string]any{"channel": channel, "seq": seq}, nil); err != nil {
+		return err
+	}
+	c.mutex.Lock()
+	c.markOpenedLocked(channel, seq)
+	c.mutex.Unlock()
+	return nil
 }
 
 func (c *Client) AdmitGroup(channel, group string) (Room, error) {
@@ -656,9 +775,10 @@ func (c *Client) rule(op, channel, field, value string) (Room, error) {
 	return reply.Channel, err
 }
 
-func (c *Client) Submit(channel, body string) (Submission, error) {
+func (c *Client) Submit(channel, subject, body string) (Submission, error) {
 	var submission Submission
-	if err := c.call("channel.submit", map[string]any{"channel": channel, "body": body}, &submission); err != nil {
+	fields := map[string]any{"channel": channel, "subject": subject, "body": body}
+	if err := c.call("channel.submit", fields, &submission); err != nil {
 		return submission, err
 	}
 	return c.trackSubmission(submission, false), nil
@@ -720,6 +840,46 @@ func (c *Client) Acknowledge(submission string) error {
 	delete(c.submissions, submission)
 	c.mutex.Unlock()
 	return nil
+}
+
+// SetArchive changes when a permanent room's or a channel's messages are
+// archived, and whether its audience may search them. Administrators only.
+func (c *Client) SetArchive(room string, change ArchiveChange) (Room, error) {
+	body := map[string]any{"room": room}
+	if change.SetPeriod {
+		body["period"] = change.Period
+	}
+	if change.Searchable != nil {
+		body["searchable"] = *change.Searchable
+	}
+	var reply struct {
+		Room Room `json:"room"`
+	}
+	if err := c.call("archive.set", body, &reply); err != nil {
+		return reply.Room, err
+	}
+	return c.track(reply.Room), nil
+}
+
+// ArchiveRead is one page of an archive after `after`, oldest first, and
+// whether more follows. Administrators only.
+func (c *Client) ArchiveRead(room string, after int64) ([]Message, bool, error) {
+	var reply struct {
+		Messages []Message `json:"messages"`
+		More     bool      `json:"more"`
+	}
+	err := c.call("archive.read", map[string]any{"room": room, "after": after}, &reply)
+	return reply.Messages, reply.More, err
+}
+
+// ArchiveSearch is the archived messages whose subject or body contains query,
+// newest first.
+func (c *Client) ArchiveSearch(room, query string) ([]Message, error) {
+	var reply struct {
+		Messages []Message `json:"messages"`
+	}
+	err := c.call("archive.search", map[string]any{"room": room, "query": query}, &reply)
+	return reply.Messages, err
 }
 
 func (c *Client) Subscribe(channel string) (Room, error) {
@@ -808,6 +968,7 @@ func (c *Client) forget(space string) {
 	delete(c.log, space)
 	delete(c.cursors, space)
 	delete(c.read, space)
+	delete(c.opened, space)
 }
 
 // -- reading state -----------------------------------------------------------
@@ -892,16 +1053,22 @@ func (c *Client) Moderates(space string) bool {
 	return ok && slices.Contains(room.Moderators, c.Me())
 }
 
-// Unread is how far this person is behind in a space: the furthest sequence
-// known, received or announced, less the furthest seen.
+// Opened is which of a channel's items this user has opened.
+func (c *Client) Opened(channel string) map[int64]bool {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return maps.Clone(c.opened[channel])
+}
+
+// Unread is how far this person is behind in a room: the furthest sequence
+// known, received or announced, less the furthest seen. A channel counts as
+// zero: its items are opened one at a time, inside it, and counted nowhere else.
 func (c *Client) Unread(space string) int64 {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	room, ok := c.rooms[space]
 	if !ok {
-		if room, ok = c.channels[space]; !ok {
-			return 0
-		}
+		return 0
 	}
 	known := max(room.LastSeq, c.cursors[space])
 	return max(0, known-c.read[space])

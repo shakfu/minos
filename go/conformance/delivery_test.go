@@ -64,7 +64,7 @@ func TestARoomPushCarriesTheWholeRoom(t *testing.T) {
 
 	pushed := obj(bob.ExpectPush(PushOf("room"))["room"])
 	keySet(t, pushed, "id", "title", "kind", "authority", "retention", "createdBy", "createdAt",
-		"grants", "restrictedTo", "audience", "occupants", "lastSeq", "moderators")
+		"grants", "restrictedTo", "audience", "occupants", "lastSeq", "moderators", "archive")
 }
 
 // The audience is read before the change, or nobody would tell them.

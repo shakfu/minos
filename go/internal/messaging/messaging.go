@@ -35,7 +35,13 @@ const (
 	GroupPush    = "group"
 
 	SubmissionPush = "submission"
+	OpenedPush     = "opened"
+	ArchivedPush   = "archived"
+	ExitedPush     = "exited"
 )
+
+// ArchiveSearchLimit is the most messages one archive search returns.
+const ArchiveSearchLimit = 100
 
 // Refusal is a request that cannot be carried out, reportable to whoever asked.
 // Distinct from a bug: the host turns this into an error reply and anything else
@@ -97,6 +103,24 @@ type submissionEvent struct {
 	Submission *timeline.Submission `json:"submission"`
 }
 
+type openedEvent struct {
+	Type    string `json:"type"`
+	Channel string `json:"channel"`
+	Seq     int64  `json:"seq"`
+}
+
+type archivedEvent struct {
+	Type    string `json:"type"`
+	Room    string `json:"room"`
+	Through int64  `json:"through"`
+}
+
+type exitedEvent struct {
+	Type      string `json:"type"`
+	Room      string `json:"room"`
+	Occupancy string `json:"occupancy"`
+}
+
 // -- replies -----------------------------------------------------------------
 
 // UserState is one account and whether it is connected.
@@ -126,6 +150,9 @@ type HistoryReply struct {
 	Since    int64              `json:"since"`
 	LastSeq  int64              `json:"lastSeq"`
 	Messages []timeline.Message `json:"messages"`
+	// On a channel, which of these messages the caller has opened. Absent on a
+	// room, which keeps a read cursor instead.
+	Opened *[]int64 `json:"opened,omitempty"`
 }
 
 // Ok is the shape of an operation that answers nothing else.
@@ -164,6 +191,35 @@ type ReadReply struct {
 type QueueReply struct {
 	Channel     string                `json:"channel"`
 	Submissions []timeline.Submission `json:"submissions"`
+}
+
+type OpenReply struct {
+	Ok      bool   `json:"ok"`
+	Channel string `json:"channel"`
+	Seq     int64  `json:"seq"`
+}
+
+// ArchiveReadReply is one page of an archive, and whether more follows.
+type ArchiveReadReply struct {
+	Room     string             `json:"room"`
+	After    int64              `json:"after"`
+	Messages []timeline.Message `json:"messages"`
+	More     bool               `json:"more"`
+}
+
+type ArchiveSearchReply struct {
+	Room     string             `json:"room"`
+	Query    string             `json:"query"`
+	Messages []timeline.Message `json:"messages"`
+}
+
+// ArchiveChange is an archive.set request, as it arrived. A field not given is
+// left as it is; a nil Period that was given means never.
+type ArchiveChange struct {
+	Period          any
+	PeriodGiven     bool
+	Searchable      any
+	SearchableGiven bool
 }
 
 // -- access ------------------------------------------------------------------
@@ -278,7 +334,19 @@ func (m *Messaging) History(username, roomID string, since int64) (*HistoryReply
 	// lastSeq is what makes a truncated reply detectable: the cap is on the
 	// tail, so a client further behind than the limit gets the newest slice and
 	// would otherwise have no way to know it skipped the rest.
-	return &HistoryReply{Room: roomID, Since: since, LastSeq: room.LastSeq, Messages: messages}, nil
+	reply := &HistoryReply{Room: roomID, Since: since, LastSeq: room.LastSeq, Messages: messages}
+	if room.Kind == timeline.ChannelKind {
+		opened := []int64{}
+		if len(messages) > 0 {
+			opened, err = m.store.OpenedBetween(
+				roomID, username, messages[0].Seq, messages[len(messages)-1].Seq)
+			if err != nil {
+				return nil, err
+			}
+		}
+		reply.Opened = &opened
+	}
+	return reply, nil
 }
 
 func (m *Messaging) Send(username, roomID, body string) (*SendReply, error) {
@@ -298,7 +366,7 @@ func (m *Messaging) Send(username, roomID, body string) (*SendReply, error) {
 		return nil, refuse("Empty message")
 	}
 
-	message, err := m.store.Append(roomID, username, body, timeline.Text)
+	message, err := m.store.Append(roomID, username, "", body, timeline.Text)
 	if err != nil {
 		return nil, err
 	}
@@ -595,11 +663,29 @@ func (m *Messaging) Leave(username, roomID string) (*Ok, error) {
 //
 // A transient room's life is measured from the moment its last occupant leaves,
 // so this is what keeps one alive -- and what rescues one during its grace.
+//
+// A person is in one room at a time, so entering first leaves any other room
+// they are in, on any connection. The connection that held it is told with an
+// exited push; the same room on another connection is left alone.
 func (m *Messaging) Enter(username, roomID string) (*EnterReply, error) {
 	room, err := m.requireAccess(roomID, username, timeline.RoomKind)
 	if err != nil {
 		return nil, err
 	}
+	for _, held := range m.store.OccupanciesElsewhere(username, roomID) {
+		left, err := m.store.Exit(held)
+		if err != nil {
+			return nil, err
+		}
+		if left == "" {
+			continue
+		}
+		if previous, err := m.store.Room(left); err == nil && previous != nil {
+			m.announceRoom(previous, nil)
+		}
+		m.deliver([]string{username}, exitedEvent{Type: ExitedPush, Room: left, Occupancy: held})
+	}
+
 	occupancy, err := m.store.Enter(roomID, username)
 	if err != nil {
 		return nil, err
@@ -627,9 +713,10 @@ func (m *Messaging) Exit(occupancyID string) (*Ok, error) {
 	return &Ok{Ok: true}, nil
 }
 
-// Sweep deletes transient rooms whose grace period has run out.
+// Sweep deletes transient rooms whose grace period has run out, then archives
+// aged messages. One pass, because both must run when nobody is connected.
 //
-// The audience is read before the room goes, because afterwards there is nobody
+// The audience is read before a room goes, because afterwards there is nobody
 // to tell: a client that is not told would keep the room in its list forever.
 func (m *Messaging) Sweep() ([]string, error) {
 	expired, err := m.store.ExpiredTransientRooms()
@@ -649,14 +736,43 @@ func (m *Messaging) Sweep() ([]string, error) {
 		m.deliver(audience, roomGoneEvent{Type: RoomGonePush, Room: roomID})
 		gone = append(gone, roomID)
 	}
-	return gone, nil
+	return gone, m.archiveAged()
+}
+
+// archiveAged moves each archiving room's aged messages out, and tells its
+// audience which to drop.
+func (m *Messaging) archiveAged() error {
+	archiving, err := m.store.Archiving()
+	if err != nil {
+		return err
+	}
+	for _, roomID := range archiving {
+		through, err := m.store.ArchiveAged(roomID)
+		if err != nil {
+			return err
+		}
+		if through == 0 {
+			continue
+		}
+		audience, err := m.store.Audience(roomID)
+		if err != nil {
+			return err
+		}
+		m.deliver(audience, archivedEvent{Type: ArchivedPush, Room: roomID, Through: through})
+	}
+	return nil
 }
 
 // -- read state --------------------------------------------------------------
 
 func (m *Messaging) MarkRead(username, roomID string, seq int64) (*ReadReply, error) {
-	if _, err := m.requireAccess(roomID, username, ""); err != nil {
+	room, err := m.requireAccess(roomID, username, "")
+	if err != nil {
 		return nil, err
+	}
+	if room.Kind == timeline.ChannelKind {
+		// Items opened in any order are not something one cursor can record.
+		return nil, refuse("A channel's items are opened, not read")
 	}
 	if err := m.store.MarkRead(roomID, username, seq); err != nil {
 		return nil, err
@@ -875,7 +991,7 @@ func (m *Messaging) CreateChannel(
 // audience, so the operation that writes to one is not the operation a
 // participant uses in a room.
 func (m *Messaging) PublishMessage(
-	username string, isAdmin bool, channelID, body string,
+	username string, isAdmin bool, channelID, subject, body string,
 ) (*SendReply, error) {
 	channel, err := m.store.Room(channelID)
 	if err != nil {
@@ -894,12 +1010,12 @@ func (m *Messaging) PublishMessage(
 	if channel == nil || channel.Kind != timeline.ChannelKind {
 		return nil, refuse("No such room: %s", channelID)
 	}
-	body = strings.TrimSpace(body)
-	if body == "" {
-		return nil, refuse("Empty message")
+	subject, body, err = content(subject, body)
+	if err != nil {
+		return nil, err
 	}
 
-	message, err := m.store.Append(channelID, username, body, timeline.Text)
+	message, err := m.store.Append(channelID, username, subject, body, timeline.Text)
 	if err != nil {
 		return nil, err
 	}
@@ -1077,7 +1193,7 @@ func (m *Messaging) Dismiss(isAdmin bool, channelID, username string) (*ChannelR
 // Submit proposes a message to a channel. It reaches only the moderators until
 // one approves it, and takes no sequence number until then: a rejected one
 // would otherwise leave every subscriber a gap to re-request forever.
-func (m *Messaging) Submit(username, channelID, body string) (*timeline.Submission, error) {
+func (m *Messaging) Submit(username, channelID, subject, body string) (*timeline.Submission, error) {
 	channel, err := m.requireAccess(channelID, username, timeline.ChannelKind)
 	if err != nil {
 		return nil, err
@@ -1085,12 +1201,12 @@ func (m *Messaging) Submit(username, channelID, body string) (*timeline.Submissi
 	if len(channel.Moderators) == 0 {
 		return nil, refuse("That channel accepts no submissions")
 	}
-	body = strings.TrimSpace(body)
-	if body == "" {
-		return nil, refuse("Empty message")
+	subject, body, err = content(subject, body)
+	if err != nil {
+		return nil, err
 	}
 
-	submission, err := m.store.Submit(channelID, username, body)
+	submission, err := m.store.Submit(channelID, username, timeline.Subject(subject, body), body)
 	if err != nil {
 		return nil, err
 	}
@@ -1227,11 +1343,141 @@ func (m *Messaging) announceSubmission(submission *timeline.Submission, moderato
 		submissionEvent{Type: SubmissionPush, Submission: submission})
 }
 
+// content checks a channel message's subject and body. A given subject has a
+// limit, and one of the two must say something.
+func content(subject, body string) (string, string, error) {
+	subject, body = strings.TrimSpace(subject), strings.TrimSpace(body)
+	if len([]rune(subject)) > timeline.SubjectLimit {
+		return "", "", refuse("A subject is at most %d characters", timeline.SubjectLimit)
+	}
+	if subject == "" && body == "" {
+		return "", "", refuse("Empty message")
+	}
+	return subject, body, nil
+}
+
+// -- opening -----------------------------------------------------------------
+
+// Open marks one channel item opened for this subscriber, and tells their other
+// connections, so that every device agrees.
+func (m *Messaging) Open(username, channelID string, seq int64) (*OpenReply, error) {
+	if _, err := m.requireAccess(channelID, username, timeline.ChannelKind); err != nil {
+		return nil, err
+	}
+	live, err := m.store.HasMessage(channelID, seq)
+	if err != nil {
+		return nil, err
+	}
+	if !live {
+		return nil, refuse("No such message: %d", seq)
+	}
+	if err := m.store.MarkOpened(channelID, username, seq); err != nil {
+		return nil, err
+	}
+	m.deliver([]string{username}, openedEvent{Type: OpenedPush, Channel: channelID, Seq: seq})
+	return &OpenReply{Ok: true, Channel: channelID, Seq: seq}, nil
+}
+
+// -- archival ----------------------------------------------------------------
+
+// SetArchive sets how long a permanent room's or a channel's messages stay live,
+// and whether its audience may search them once archived. Administrators only.
+func (m *Messaging) SetArchive(isAdmin bool, roomID string, change ArchiveChange) (*RoomReply, error) {
+	if err := requireAdmin(isAdmin); err != nil {
+		return nil, err
+	}
+	room, err := m.requireRoom(roomID, "")
+	if err != nil {
+		return nil, err
+	}
+	// A user-founded room keeps everything: retention there is chat-concepts.md
+	// section 4's open question, not a setting.
+	if room.Kind == timeline.RoomKind && room.Authority != timeline.Admin {
+		return nil, refuse("Only a permanent room or a channel is archived")
+	}
+
+	archive := room.Archive
+	if change.PeriodGiven {
+		switch period := change.Period.(type) {
+		case nil:
+			archive.Period = nil
+		case float64:
+			if period <= 0 {
+				return nil, refuse("A period is a positive number of seconds")
+			}
+			archive.Period = &period
+		default:
+			return nil, refuse("A period is a positive number of seconds")
+		}
+	}
+	if change.SearchableGiven {
+		searchable, ok := change.Searchable.(bool)
+		if !ok {
+			return nil, refuse("Searchable is true or false")
+		}
+		archive.Searchable = searchable
+	}
+
+	if err := m.store.SetArchive(roomID, archive); err != nil {
+		return nil, err
+	}
+	updated, err := m.store.Room(roomID)
+	if err != nil {
+		return nil, err
+	}
+	m.announceRoom(updated, nil)
+	return &RoomReply{Ok: true, Room: updated}, nil
+}
+
+// ArchiveRead is the administrator's walk through an archive, a page at a time.
+func (m *Messaging) ArchiveRead(isAdmin bool, roomID string, after int64) (*ArchiveReadReply, error) {
+	if err := requireAdmin(isAdmin); err != nil {
+		return nil, err
+	}
+	if _, err := m.requireRoom(roomID, ""); err != nil {
+		return nil, err
+	}
+	messages, more, err := m.store.Archived(roomID, after)
+	if err != nil {
+		return nil, err
+	}
+	return &ArchiveReadReply{Room: roomID, After: after, Messages: messages, More: more}, nil
+}
+
+// ArchiveSearch finds archived messages. Administrators may always; the room's
+// audience may where the administrator enabled it.
+func (m *Messaging) ArchiveSearch(
+	username string, isAdmin bool, roomID, query string,
+) (*ArchiveSearchReply, error) {
+	room, err := m.requireRoom(roomID, "")
+	if err != nil {
+		return nil, err
+	}
+	if !isAdmin {
+		if _, err := m.requireAccess(roomID, username, ""); err != nil {
+			return nil, err
+		}
+		if !room.Archive.Searchable {
+			return nil, refuse("That archive is not searchable")
+		}
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, refuse("Empty query")
+	}
+	messages, err := m.store.SearchArchive(roomID, query, ArchiveSearchLimit)
+	if err != nil {
+		return nil, err
+	}
+	return &ArchiveSearchReply{Room: roomID, Query: query, Messages: messages}, nil
+}
+
 // -- events and announcements ------------------------------------------------
 
-// PostEvent appends a machine event to a room or channel and pushes it.
+// PostEvent appends a machine event to a room or channel and pushes it. In a
+// channel its line becomes its subject, by the rule a publisher's message follows.
 func (m *Messaging) PostEvent(roomID, text string, audience []string) (timeline.Message, error) {
-	message, err := m.store.Append(roomID, "system", text, timeline.Event)
+	message, err := m.store.Append(roomID, "system", "", text, timeline.Event)
 	if err != nil {
 		return message, err
 	}
