@@ -51,7 +51,7 @@ type Config struct {
 
 	// Test credentials, and who among them is an administrator. A fixture
 	// rather than a placeholder: this server is not to be exposed, so no
-	// adapter is coming. See server/config.py.
+	// adapter is coming.
 	Users  map[string]string
 	Admins map[string]bool
 }

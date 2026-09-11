@@ -7,14 +7,10 @@
 // one that just arrived asks for the difference. Nothing else detects a dropped,
 // duplicated or out-of-order frame.
 //
-// Two things in here differ from the Python server this replaces, and both
-// follow from one process rather than several:
+// Two things follow from one process serving every connection:
 //
 //   - **Presence and occupancy are in memory.** They describe live connections,
-//     and the process that holds the connections is the process that answers
-//     for them. As rows they needed a worker column, liveness locks and a sweep
-//     to reclaim what a dead worker left behind; none of that has anything to
-//     answer here.
+//     and the process that holds the connections answers for them.
 //   - **`empty_since` is still stored**, because it outlives the connections.
 //     A restart empties every room at once, so start-up stamps every transient
 //     room that is not already counting down -- which is what makes the promise
@@ -79,11 +75,9 @@ const (
 	Approved = "approved"
 )
 
-// SchemaVersion is stamped in PRAGMA user_version and checked on open. Version 2
-// is the schema both servers read, and SCHEMA_VERSION in messaging/timeline.py
-// stays there, because the specification is frozen at the core. Later versions
-// are this server's alone, so a database it has upgraded is refused by the
-// Python one. presence and occupants belong to the Python server and are in none.
+// SchemaVersion is stamped in PRAGMA user_version and checked on open. The
+// retired Python server wrote versions 1 and 2, plus presence and occupants
+// tables that no version covers.
 const SchemaVersion = 3
 
 // migrations is how to reach each version from the one before it. A version

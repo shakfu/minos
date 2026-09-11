@@ -6,6 +6,13 @@ four more in the sections deferred there -- and are not duplicated here.
 
 ## Done
 
+### The tree is Go only
+
+`server/`, `messaging/` and the pytest suite are deleted. The conformance suite,
+the terminal client and the demo are ported to `go/conformance`, `go/cmd/minos`
+and `go/cmd/demo`. The entries below predate this and describe the tree at the
+time; the CHANGELOG has the details.
+
 ### The server is reimplemented in Go
 
 `go/` is the server. `server/` and `messaging/` are the specification it was

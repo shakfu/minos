@@ -1,15 +1,10 @@
 // Command minosd is the minos server.
 //
-// One process, a goroutine per connection, and an in-process fan-out. What the
-// Python server needed a message bus for -- several worker processes, because
-// CPython cannot use several cores in one -- has no counterpart here, so the
-// broker, the worker leases, the liveness locks and the propagation delays are
-// all absent rather than ported.
+// One process, a goroutine per connection, and an in-process fan-out.
 //
-// What it speaks is docs/wire-contract.md, and what says so is
-// tests/conformance:
+// What it speaks is docs/wire-contract.md, and what says so is go/conformance:
 //
-//	make conformance-go
+//	make conformance
 package main
 
 import (

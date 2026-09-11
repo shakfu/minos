@@ -6,10 +6,19 @@ yet, so everything so far sits under Unreleased.
 
 ## [Unreleased]
 
-Both web front ends are gone. `tui/` is the only client, `go/` is the server,
-and the wire format between them is still OS.js's without any OS.js code.
+Both web front ends and the Python server are gone. `go/` holds the server and
+the terminal client, and the wire format between them is still OS.js's without
+any OS.js code.
 
 ### Removed
+
+- The Python tree: `server/`, `messaging/`, `tui/`, the pytest suite,
+  `pyproject.toml`, the uv venv, and the `install`, `serve-go` and
+  `conformance-go` make targets. A second implementation of the core cost about
+  55% more code per feature, and it described behaviour `go/` already had.
+  Three parts were ported rather than dropped: the conformance suite, the only
+  black-box test of the server; the terminal client, its only client; and the
+  audience demo.
 
 - `client/`, the web desktop, and the last JavaScript in the tree with it: Vite,
   Vitest, TypeScript, `client/node_modules`, and the `client` and `dev` make
@@ -44,6 +53,17 @@ and the wire format between them is still OS.js's without any OS.js code.
   and `tests/test_watcher.py`.
 
 ### Added
+
+- `go/conformance/`, the conformance suite in Go: 164 tests, one per Python
+  test, 176 cases with subtests. `MINOS_CONFORMANCE_SCOPE` is gone, because one
+  server claims the whole contract. The handshake workaround for
+  `simple_websocket` went with that library. With `MINOS_CONFORMANCE_CMD` unset,
+  the suite builds `cmd/minosd` itself.
+
+- `go/cmd/minos`, the terminal client, on tcell; `make tui` runs it with
+  `-server`, `-user` and `-password`. It behaves like `tui/`, with two
+  exceptions. Control characters show as `?` rather than `^[`. Wrapping
+  collapses runs of spaces.
 
 - Submissions and moderation (`chat-concepts.md` 5), in `go/` only. An
   administrator appoints moderators with `channel.appoint` and `channel.dismiss`.

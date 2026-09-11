@@ -357,7 +357,8 @@ func text(fields map[string]json.RawMessage, name string) string {
 }
 
 // roomID renders a room field the way an error message quotes it: a string as
-// itself, anything else as it arrived, and a missing one as Python's None.
+// itself, anything else as it arrived, and a missing one as None, the spelling
+// inherited from the retired Python server.
 func roomID(fields map[string]json.RawMessage) string {
 	raw, ok := fields["room"]
 	if !ok || string(raw) == "null" {

@@ -117,8 +117,8 @@ func TestOlderDatabaseIsUpgradedInPlace(t *testing.T) {
 }
 
 func TestADatabaseAtTheSharedVersionIsUpgraded(t *testing.T) {
-	// The Python server is frozen at version 2, so a database it wrote must open
-	// here and gain what version 3 adds, with nothing it held disturbed.
+	// The retired Python server stopped at version 2, so a database it wrote must
+	// open here and gain what version 3 adds, with nothing it held disturbed.
 	path := filepath.Join(t.TempDir(), "timeline.db")
 	store, err := open(t, path)
 	if err != nil {
@@ -196,9 +196,8 @@ func TestDatabaseFromALaterSchemaIsRefused(t *testing.T) {
 }
 
 func TestADatabaseWrittenByTheOtherServerIsAccepted(t *testing.T) {
-	// The Python server creates presence and occupants for its own use. They are
-	// not part of the shared schema, and their absence here is not a difference
-	// the version marker is claiming anything about.
+	// The retired Python server created presence and occupants for its own use.
+	// No version covers them, so a database that has them still opens.
 	path := filepath.Join(t.TempDir(), "timeline.db")
 	store, err := open(t, path)
 	if err != nil {

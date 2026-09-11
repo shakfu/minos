@@ -1,61 +1,38 @@
-VENV := .venv
-PY := $(VENV)/bin/python
+.PHONY: go serve tui demo test conformance clean
 
-.PHONY: install go serve serve-go tui demo test conformance conformance-go clean
+GO_SOURCES := $(shell find go -name '*.go' 2>/dev/null) go/go.mod go/go.sum
 
-install: $(VENV)/bin/pytest
+## The server, go/minosd, and the terminal client, go/minos.
+go: go/minosd go/minos
 
-$(VENV)/bin/pytest: pyproject.toml
-	@command -v uv >/dev/null 2>&1 || { \
-	  echo "uv is required: https://docs.astral.sh/uv/getting-started/installation/"; \
-	  exit 1; }
-	uv venv --allow-existing $(VENV)
-	uv pip install --python $(PY) -r pyproject.toml --group dev
-	@touch $@
-
-## The server -> go/minosd. This is the implementation; server/ is the
-## specification it was written from. See docs/wire-contract.md.
-go: go/minosd
-
-go/minosd: $(shell find go -name '*.go' 2>/dev/null) go/go.mod
+go/minosd: $(GO_SOURCES)
 	cd go && go build -o minosd ./cmd/minosd
 
-## The Python server: the executable specification, not the deployable one.
-serve: install
-	$(PY) -m server.app
+go/minos: $(GO_SOURCES)
+	cd go && go build -o minos ./cmd/minos
 
-## The compiled server, on the same port and the same contract.
-serve-go: go
+## The server, on http://127.0.0.1:8000.
+serve: go/minosd
 	./go/minosd
 
 ## The terminal client, against a running `make serve`.
-## MINOS_SERVER overrides the address; --user skips the username prompt.
-tui: install
-	$(PY) -m tui
+## MINOS_SERVER overrides the address; -user skips the username prompt.
+tui: go/minos
+	./go/minos
 
-## A narrated run of the channel audience rule against the compiled server.
-demo: install go
-	$(PY) docs/dev/demo_audience.py
+## A narrated run of the channel audience rule against a server of its own.
+demo: go/minosd
+	cd go && MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd go run ./cmd/demo
 
-## The unit tests: pytest over the specification, go test over the server.
-## Both, because the store's schema check is not visible on the wire. Then the
-## contract against the server, the only place sections beyond the core run.
-test: install go
-	$(VENV)/bin/pytest -q
-	cd go && go test ./...
-	$(MAKE) --no-print-directory conformance-go
+## Unit tests, then the wire contract against the built server. -count=1
+## because go test cannot see that the binary under test changed.
+test: go/minosd
+	cd go && MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd go test -count=1 ./...
 
-## The wire contract alone, against any implementation of it.
-## MINOS_CONFORMANCE_CMD launches a different server; MINOS_CONFORMANCE_URL
-## points at one that is already running. See docs/dev/conformance-plan.md.
-conformance: install
-	$(VENV)/bin/pytest tests/conformance -q
-
-## The same suite against the compiled server, which claims the whole contract
-## rather than the core. MINOS_CONFORMANCE_SCOPE is how it says so.
-conformance-go: install go
-	MINOS_CONFORMANCE_SCOPE=full MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd \
-	  $(VENV)/bin/pytest tests/conformance -q
+## The wire contract alone. MINOS_CONFORMANCE_URL points it at a server that is
+## already running. See docs/dev/conformance-plan.md.
+conformance: go/minosd
+	cd go && MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd go test -count=1 ./conformance
 
 clean:
-	rm -rf $(VENV) .run go/minosd
+	rm -rf .run go/minosd go/minos

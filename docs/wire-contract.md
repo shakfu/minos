@@ -1,8 +1,8 @@
 # The wire contract
 
 What a minos server must do, stated without reference to the language it is
-written in. `server/` implements sections 1-8, the core; `go/` implements all of
-it. `tests/conformance/` decides whether either is correct.
+written in. `go/` implements it, and `go/conformance/` decides whether it is
+correct.
 
 The model behind the vocabulary -- room, group, channel, grant, occupancy -- is
 in [chat-concepts.md](../chat-concepts.md) and is not repeated here. This
@@ -379,9 +379,7 @@ receiver as well as it covers a dropped frame.
 
 ## 9. Beyond the core: submissions and moderation
 
-[chat-concepts.md](../chat-concepts.md) section 5. `go/` implements this and
-`server/` does not, because the specification is frozen at the core. The
-conformance suite runs these tests only under `MINOS_CONFORMANCE_SCOPE=full`.
+[chat-concepts.md](../chat-concepts.md) section 5.
 
 ### Fields added to core shapes
 

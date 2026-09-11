@@ -11,12 +11,10 @@
 // provides. Whether a caller is an administrator is likewise the host's
 // business, passed in rather than looked up.
 //
-// Unlike the Python server this replaces, delivery is a direct call rather than
-// a publish. One process serves every connection, so there is no second process
-// to tell and nothing to serialise a message through: `deliver(audience, event)`
-// reaches the sockets in the same goroutine that appended the message. The
-// sequence number survives that change untouched, because it never repaired the
-// bus alone -- it also covers a reconnect, an hour offline and a lagging reader.
+// Delivery is a direct call rather than a publish. One process serves every
+// connection, so `deliver(audience, event)` reaches the sockets in the same
+// goroutine that appended the message. The sequence number still matters: it
+// covers a reconnect, an hour offline and a lagging reader.
 package messaging
 
 import (
