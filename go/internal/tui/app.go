@@ -102,6 +102,11 @@ type Ui struct {
 	known map[string]bool
 	held  []string
 
+	// A command that would take the user out of the room they are in, waiting
+	// for y; confirmed while it runs.
+	pending   string
+	confirmed bool
+
 	running bool
 	colours map[string]tcell.Color
 
@@ -369,6 +374,10 @@ func (u *Ui) loop() {
 }
 
 func (u *Ui) key(event *tcell.EventKey) {
+	if u.pending != "" && event.Key() != tcell.KeyCtrlC {
+		u.answer(event)
+		return
+	}
 	switch event.Key() {
 	case tcell.KeyEnter, tcell.KeyCtrlJ:
 		u.submit()
@@ -564,6 +573,23 @@ func (u *Ui) chat(name, text string) {
 
 func refusal(text string) error { return &client.ChatError{Message: text} }
 
+// leavesRoom is the commands that show another space, and so take the user out
+// of the room they are in. Inside a room they ask first.
+var leavesRoom = map[string]bool{"open": true, "meet": true, "create": true, "subscribe": true}
+
+// answer settles a pending command: y goes ahead, anything else stays.
+func (u *Ui) answer(event *tcell.EventKey) {
+	pending := u.pending
+	u.pending = ""
+	if event.Key() == tcell.KeyRune && (event.Rune() == 'y' || event.Rune() == 'Y') {
+		u.confirmed = true
+		u.command(pending)
+		u.confirmed = false
+		return
+	}
+	u.notice("Stayed in the room")
+}
+
 func (u *Ui) command(text string) {
 	parts := strings.Fields(text[1:])
 	if len(parts) == 0 {
@@ -573,6 +599,10 @@ func (u *Ui) command(text string) {
 	handler, ok := u.commands()[name]
 	if !ok {
 		u.notice(fmt.Sprintf("No such command: /%s -- try /help", name))
+		return
+	}
+	if leavesRoom[name] && u.occupancy != "" && !u.confirmed {
+		u.pending = text
 		return
 	}
 	if err := handler(args); err != nil {
@@ -1245,8 +1275,9 @@ func (u *Ui) draw() {
 	} else {
 		u.drawSidebar(height)
 	}
-	u.drawStatus(width)
+	// The pane first: it marks what is on screen read, and the status counts it.
 	u.drawPane(height, width, left)
+	u.drawStatus(width)
 	u.drawComposer(height, width)
 	u.screen.Show()
 }
@@ -1284,10 +1315,11 @@ func (u *Ui) drawStatus(width int) {
 	}
 	if space, ok := u.client.Space(u.selected); ok && u.occupancy != "" {
 		who += "  in " + space.Title
-		if n := u.elsewhere(); n > 0 {
-			who += fmt.Sprintf("  (%d elsewhere)", n)
-		}
 	}
+	// Two counts, never mixed: rooms not yet entered, and what is unread in rooms
+	// that have been. A channel's items are counted only inside the channel.
+	who += count(int64(u.client.OpenInvitations()), "open invitation")
+	who += count(u.client.UnreadMessages(), "unread message")
 	state, colour := "disconnected", "bad"
 	if u.client.Connected() {
 		state, colour = "connected", "good"
@@ -1298,19 +1330,15 @@ func (u *Ui) drawStatus(width int) {
 	u.put(0, max(0, width-len(state)-2), state, len(state)+1, u.tint(reverse, colour), false)
 }
 
-// elsewhere is how many other rooms want attention: unread messages, or an
-// invitation held until the user steps out. Counted, and named nowhere.
-func (u *Ui) elsewhere() int {
-	rooms := map[string]bool{}
-	for id := range u.client.Rooms() {
-		if id != u.selected && u.client.Unread(id) > 0 {
-			rooms[id] = true
-		}
+// count is "  n things" for the status line, and nothing at zero.
+func count(n int64, thing string) string {
+	switch n {
+	case 0:
+		return ""
+	case 1:
+		return "  1 " + thing
 	}
-	for _, id := range u.held {
-		rooms[id] = true
-	}
-	return len(rooms)
+	return fmt.Sprintf("  %d %ss", n, thing)
 }
 
 func (u *Ui) drawSidebar(height int) {
@@ -1415,7 +1443,12 @@ func (u *Ui) drawSpace(row int, space client.Room, ambiguous map[string]bool) in
 		style = style.Bold(true)
 	}
 	text := marker + " " + label
-	if unread > 0 && !selected {
+	switch {
+	case space.Kind == "room" && u.client.OpenInvitation(space.ID):
+		// Not yet entered, so its messages are not unread: they have never been seen.
+		style = u.tint(style, "me")
+		text += " (invited)"
+	case unread > 0 && !selected:
 		style = u.tint(style, "me")
 		text = fmt.Sprintf("%s (%d)", text, unread)
 	}
@@ -1476,8 +1509,9 @@ func (u *Ui) drawPane(height, width, left int) {
 		u.put(4+offset, left, line.text, pane, line.style, true)
 	}
 
-	// Only a room has a read cursor; system is a channel, and keeps none.
-	if u.scroll == 0 && space.Kind == "room" {
+	// Only a room has a read cursor, and only one the user is in counts as seen: a
+	// highlighted room is a preview.
+	if u.scroll == 0 && space.Kind == "room" && u.occupancy != "" {
 		u.markRead(space)
 	}
 }
@@ -1673,6 +1707,14 @@ func (u *Ui) drawComposer(height, width int) {
 	}
 	if u.results != nil {
 		hint = " Esc: back  PgUp/PgDn: scroll  ^C: quit"
+	}
+	if u.pending != "" {
+		title := "this room"
+		if ok {
+			title = space.Title
+		}
+		prompt = fmt.Sprintf("  %s takes you out of %s. y to go, any other key to stay ", u.pending, title)
+		hint = " y: go  any other key: stay  ^C: quit"
 	}
 	text := prompt + string(u.input)
 	u.put(height-2, 0, text, width-1, plain, true)

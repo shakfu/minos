@@ -28,9 +28,11 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 ### Added
 
+- A room's first entry is recorded as a visit, on the server, so an invitation is open until then and is the same fact on every device. `sync` carries `visited`, and the schema is version 5. Upgrading fills visits from read cursors, because a user who has read a room has been in it; a room entered and never read is missed, and counts as an open invitation until the next entry. Nothing reopens an invitation, including being removed and invited again. The terminal client counts open invitations apart from unread messages, which it counts only in visited rooms, and marks a room not yet entered `(invited)`.
+
 - A user occupies at most one room. `enter` first releases the user's place in any other room, on every connection, and tells the connection that held it with a new `exited` push. Two devices in the same room are kept. The rule is the server's rather than the client's, so a second device cannot put the same person in two meetings.
 
-  In the terminal client, Tab highlights a room and Enter goes in. Inside, the screen is that room: no sidebar, Tab ignored, and a status line that counts other rooms with something new without naming them. `/exit` steps out and keeps your place; `/leave` still gives it up. An invitation is offered rather than entered, and one that arrives while you are in a room waits until you step out. The zoom also ends when the room closes, or when you enter a room on another device.
+  In the terminal client, Tab highlights a room and Enter goes in. Inside, the screen is that room: no sidebar, Tab ignored, and a status line that counts open invitations and unread messages apart. `/exit` steps out and keeps your place; `/leave` still gives it up. An invitation is offered rather than entered, and one that arrives while you are in a room waits until you step out. The zoom also ends when the room closes, or when you enter a room on another device. Inside a room, `/open`, `/meet`, `/create` and `/subscribe` ask before taking you out of it. A room you only highlight is a preview, and nothing in it is marked read.
 
 - The terminal client takes a channel's name, its id, or the start of its id wherever it asked for the full id: `/subscribe` and `/channel
   admit|revoke|appoint|dismiss`. It learns names of channels it is not
@@ -103,6 +105,8 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 - `MINOS_WS_PING` and `MINOS_ROOM_SWEEP`, overriding the keepalive interval and the transient-room sweep. Both were constants, and both are timings the conformance suite has to wait out: a run that observed a keepalive and an expiring room at the defaults would take three minutes.
 
 ### Fixed
+
+- Subscribing to a channel showed none of what it already held. The client fetches history only at sync or when an arriving message reveals a gap, and nothing is pushed to someone outside the audience, so a new subscriber saw the channel's past only after its next post. It now backfills on subscribing, and on any `room` push whose `lastSeq` is ahead. Found by driving the real client in a pseudo-terminal; every earlier test subscribed before publishing.
 
 - `/help` showed only its last six entries, the key hints, because it wrote a notice per entry and the notice area keeps six lines. It now fills the pane like archive results, and a test fails if a command is missing from it.
 

@@ -5,6 +5,7 @@ package conformance
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -15,7 +16,7 @@ const systemChannel = "system"
 
 func TestSyncDescribesTheWholeOfWhatAClientNeeds(t *testing.T) {
 	reply := connect(t, admin).Call("sync")
-	keySet(t, reply, "me", "isAdmin", "users", "groups", "rooms", "channels", "read", "submissions")
+	keySet(t, reply, "me", "isAdmin", "users", "groups", "rooms", "channels", "read", "visited", "submissions")
 	same(t, reply["me"], "demo")
 	same(t, reply["isAdmin"], true)
 }
@@ -514,6 +515,35 @@ func TestTwoConnectionsMayShareOneRoom(t *testing.T) {
 	for _, event := range before {
 		truth(t, obj(event)["type"] != "exited", "a second device in the same room released the first: %s", encode(event))
 	}
+}
+
+func visited(socket *Socket) []any { return list(socket.Call("sync")["visited"]) }
+
+// An invitation is open until its first entry; leaving does not reopen it.
+func TestEnteringARoomIsRememberedAsAVisit(t *testing.T) {
+	alice, bob := connect(t, "alice"), connect(t, "bob")
+	entered := alice.Call("open", "invite", []string{"bob"}, "title", unique("Entered"))
+	never := alice.Call("open", "invite", []string{"bob"}, "title", unique("Never"))
+
+	occupancy := alice.Call("enter", "room", entered["id"])["occupancy"]
+	alice.Call("exit", "occupancy", occupancy)
+
+	truth(t, slices.Contains(visited(alice), entered["id"]), "alice's visit was not kept: %v", visited(alice))
+	truth(t, !slices.Contains(visited(alice), never["id"]), "a room alice never entered counts as visited")
+	// A visit is the visitor's: bob was invited to both and entered neither.
+	truth(t, !slices.Contains(visited(bob), entered["id"]), "bob inherited alice's visit")
+}
+
+// Losing access and being invited again does not reopen an invitation.
+func TestAVisitOutlivesAccess(t *testing.T) {
+	alice, bob := connect(t, "alice"), connect(t, "bob")
+	room := alice.Call("open", "invite", []string{"bob"}, "title", unique("Again"))
+	occupancy := bob.Call("enter", "room", room["id"])["occupancy"]
+	bob.Call("exit", "occupancy", occupancy)
+
+	alice.Call("uninvite", "room", room["id"], "principal", "bob")
+	alice.Call("invite", "room", room["id"], "principal", "bob")
+	truth(t, slices.Contains(visited(bob), room["id"]), "re-invitation reopened bob's invitation")
 }
 
 // -- channels -----------------------------------------------------------------

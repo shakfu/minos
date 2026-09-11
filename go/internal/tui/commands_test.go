@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gdamore/tcell/v2"
+
 	"minos/internal/client"
 	"minos/internal/config"
 	"minos/internal/testserver"
@@ -364,6 +366,35 @@ func TestEnterGoesIntoARoomAndExitStepsOut(t *testing.T) {
 	ui.mustSay(t, "not in a room")
 }
 
+// A command that would take the user out of the room they are in asks first:
+// any key but y stays, and y goes.
+func TestLeavingARoomByCommandAsksFirst(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo := connect(t, server.Base, "demo")
+	room, err := demo.OpenRoom(nil, "Standup", "persisted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := headless(demo)
+	ui.enterRoom(room.ID)
+
+	ui.command("/open alice")
+	if ui.pending == "" || ui.occupancy == "" || len(demo.Rooms()) != 1 {
+		t.Fatalf("/open went without asking: pending %q, rooms %d", ui.pending, len(demo.Rooms()))
+	}
+	ui.key(tcell.NewEventKey(tcell.KeyRune, 'n', tcell.ModNone))
+	if ui.pending != "" || ui.selected != room.ID || ui.occupancy == "" || len(demo.Rooms()) != 1 {
+		t.Fatalf("n did not stay: pending %q, selected %q, rooms %d", ui.pending, ui.selected, len(demo.Rooms()))
+	}
+	ui.mustSay(t, "Stayed in the room")
+
+	ui.command("/open alice")
+	ui.key(tcell.NewEventKey(tcell.KeyRune, 'y', tcell.ModNone))
+	if len(demo.Rooms()) != 2 || ui.selected == room.ID || ui.occupancy == "" {
+		t.Fatalf("y did not go: selected %q, rooms %d", ui.selected, len(demo.Rooms()))
+	}
+}
+
 // An invitation is offered, not entered, and waits while the user is in a room.
 func TestAnInvitationIsOfferedAndHeldWhileInARoom(t *testing.T) {
 	server := testserver.Start(t, config.HistoryLimit)
@@ -389,8 +420,8 @@ func TestAnInvitationIsOfferedAndHeldWhileInARoom(t *testing.T) {
 	}
 	waitFor(t, "the second invitation", func() bool { _, ok := alice.Rooms()[second.ID]; return ok })
 	ui.watch()
-	if _, said := ui.said("invited to Second"); said || ui.elsewhere() != 1 {
-		t.Fatalf("in a room, said %v and counted %d elsewhere", said, ui.elsewhere())
+	if _, said := ui.said("invited to Second"); said || alice.OpenInvitations() != 1 {
+		t.Fatalf("in a room, said %v and counted %d open invitations", said, alice.OpenInvitations())
 	}
 	ui.command("/exit")
 	ui.mustSay(t, "invited to Second")

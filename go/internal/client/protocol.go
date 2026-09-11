@@ -124,6 +124,7 @@ type SyncReply struct {
 	Rooms       []Room           `json:"rooms"`
 	Channels    []Room           `json:"channels"`
 	Read        map[string]int64 `json:"read"`
+	Visited     []string         `json:"visited"`
 	Submissions []Submission     `json:"submissions"`
 }
 
@@ -149,12 +150,17 @@ type Client struct {
 
 	// Highest sequence applied per room: what a gap is measured against, and a
 	// different fact from read.
-	cursors   map[string]int64
-	repairing map[string]bool
+	cursors map[string]int64
+	// Backfills in flight, each closed when it finishes.
+	repairing map[string]chan struct{}
 
 	// Which items this user has opened, per channel: a channel's read state, in
 	// place of the read cursor a room keeps.
 	opened map[string]map[int64]bool
+
+	// Rooms this user has ever entered, on any device. An invitation is open
+	// until then, and nothing reopens it, so forgetting a room keeps its entry.
+	visited map[string]bool
 
 	// Occupancies this connection holds. The server may release one when the user
 	// enters a room on another connection, and says so with an exited push.
@@ -182,9 +188,10 @@ func NewClient(socket *Socket) *Client {
 		submissions: map[string]Submission{},
 		queued:      map[string]Submission{},
 		cursors:     map[string]int64{},
-		repairing:   map[string]bool{},
+		repairing:   map[string]chan struct{}{},
 		opened:      map[string]map[int64]bool{},
 		occupancies: map[string]bool{},
+		visited:     map[string]bool{},
 		pending:     map[int64]chan json.RawMessage{},
 		wake:        make(chan struct{}, 1),
 		stopping:    make(chan struct{}),
@@ -378,6 +385,7 @@ func (c *Client) dispatch(raw json.RawMessage) {
 		}
 		if json.Unmarshal(raw, &event) == nil && event.Room != nil {
 			c.track(*event.Room)
+			c.catchUp(event.Room.ID)
 		}
 		c.changed()
 	case "roomGone":
@@ -497,19 +505,24 @@ func (c *Client) apply(message Message) {
 	c.changed()
 }
 
+// repair backfills a room from its cursor. One backfill runs per room at a time;
+// a second caller waits for it rather than returning before the log is filled.
 func (c *Client) repair(room string) {
 	c.mutex.Lock()
-	if c.repairing[room] {
+	if running, inFlight := c.repairing[room]; inFlight {
 		c.mutex.Unlock()
+		<-running
 		return
 	}
-	c.repairing[room] = true
+	done := make(chan struct{})
+	c.repairing[room] = done
 	before := c.cursors[room]
 	c.mutex.Unlock()
 	defer func() {
 		c.mutex.Lock()
 		delete(c.repairing, room)
 		c.mutex.Unlock()
+		close(done)
 	}()
 
 	var reply struct {
@@ -592,6 +605,9 @@ func (c *Client) Sync() (*SyncReply, error) {
 	for _, submission := range reply.Submissions {
 		c.submissions[submission.ID] = submission
 	}
+	for _, room := range reply.Visited {
+		c.visited[room] = true
+	}
 	c.connected = true
 
 	var behind []string
@@ -673,6 +689,7 @@ func (c *Client) Enter(room string) (string, error) {
 	}
 	c.mutex.Lock()
 	c.occupancies[reply.Occupancy] = true
+	c.visited[room] = true
 	c.mutex.Unlock()
 	return reply.Occupancy, nil
 }
@@ -887,7 +904,25 @@ func (c *Client) Subscribe(channel string) (Room, error) {
 	if err := c.call("subscribe", map[string]any{"channel": channel}, &room); err != nil {
 		return room, err
 	}
-	return c.track(room), nil
+	tracked := c.track(room)
+	c.catchUp(tracked.ID)
+	return tracked, nil
+}
+
+// catchUp backfills a space that holds more than this client has seen. A channel
+// just subscribed to has history nobody pushed here, and a room push may announce
+// messages that were lost; neither waits for the next message to show the gap.
+func (c *Client) catchUp(id string) {
+	c.mutex.Lock()
+	space, ok := c.rooms[id]
+	if !ok {
+		space, ok = c.channels[id]
+	}
+	behind := ok && space.LastSeq > c.cursors[id]
+	c.mutex.Unlock()
+	if behind {
+		c.repair(id)
+	}
 }
 
 func (c *Client) Unsubscribe(channel string) error {
@@ -930,6 +965,10 @@ func (c *Client) track(space Room) Room {
 		c.channels[space.ID] = space
 	} else {
 		c.rooms[space.ID] = space
+		// Among the occupants is how an entry on another device reaches this one.
+		if slices.Contains(space.Occupants, c.me) {
+			c.visited[space.ID] = true
+		}
 	}
 	return space
 }
@@ -1051,6 +1090,46 @@ func (c *Client) Queued() map[string]Submission {
 func (c *Client) Moderates(space string) bool {
 	room, ok := c.Space(space)
 	return ok && slices.Contains(room.Moderators, c.Me())
+}
+
+// OpenInvitation is whether a room is one this user may enter and never has. A
+// room they raised themselves is not an invitation to them.
+func (c *Client) OpenInvitation(room string) bool {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return c.openLocked(room)
+}
+
+func (c *Client) openLocked(room string) bool {
+	space, ok := c.rooms[room]
+	return ok && !c.visited[room] && space.CreatedBy != c.me
+}
+
+// OpenInvitations is how many rooms are open invitations.
+func (c *Client) OpenInvitations() int {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	open := 0
+	for id := range c.rooms {
+		if c.openLocked(id) {
+			open++
+		}
+	}
+	return open
+}
+
+// UnreadMessages is the unread messages across the rooms this user has visited.
+// Open invitations are counted apart, and channels not at all.
+func (c *Client) UnreadMessages() int64 {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	var unread int64
+	for id, room := range c.rooms {
+		if c.visited[id] {
+			unread += max(0, max(room.LastSeq, c.cursors[id])-c.read[id])
+		}
+	}
+	return unread
 }
 
 // Opened is which of a channel's items this user has opened.

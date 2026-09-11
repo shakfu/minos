@@ -266,10 +266,11 @@ Sync:
 {"me": "demo", "isAdmin": true,
  "users": [{"username": "alice", "online": false}],
  "groups": [...], "rooms": [...], "channels": [...],
- "read": {"<room id>": 4}}
+ "read": {"<room id>": 4}, "visited": ["<room id>"]}
 ```
 
-`users` is every account, sorted; `groups` sorted by name. `read` omits rooms
+`users` is every account, sorted; `groups` sorted by name. `visited` is every
+room the caller has ever entered, sorted. `read` omits rooms
 with no cursor. Section 9 adds `submissions`, and section 10 removes channels
 from `read`.
 
@@ -316,6 +317,8 @@ from `read`.
   with a `room` push, and the user is sent `exited` for each occupancy
   released. Occupancies in the entered room, on other connections, are kept.
 - `exit` of an occupancy already released answers `{ok: true}`.
+- `enter` records a visit. The room stays in the caller's `visited` from then
+  on, whatever becomes of their access.
 - `read` never moves a cursor backwards.
 - An unparseable `since` or `seq` means zero rather than an error.
 - A room id that is not a string is "no such room", not a type error.

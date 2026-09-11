@@ -297,6 +297,43 @@ func TestTheReadCursorIsSeparateFromTheDeliveryCursor(t *testing.T) {
 	}
 }
 
+// Open invitations and unread messages are counted apart, and channels in neither.
+func TestInvitationsAndUnreadMessagesAreCountedApart(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	room := pair(t, demo)
+	send(t, demo, room.ID, "one", "two")
+	waitFor(t, "the invitation", func() bool { return len(alice.Log(room.ID)) == 2 })
+
+	if alice.OpenInvitations() != 1 || alice.UnreadMessages() != 0 {
+		t.Fatalf("before entering: %d invitations, %d unread", alice.OpenInvitations(), alice.UnreadMessages())
+	}
+	if _, err := alice.Enter(room.ID); err != nil {
+		t.Fatal(err)
+	}
+	if alice.OpenInvitations() != 0 || alice.UnreadMessages() != 2 {
+		t.Fatalf("after entering: %d invitations, %d unread", alice.OpenInvitations(), alice.UnreadMessages())
+	}
+
+	// A room of her own is not an invitation, and a channel's items are not counted.
+	if _, err := alice.OpenRoom(nil, "Mine", "persisted"); err != nil {
+		t.Fatal(err)
+	}
+	feed := channel(t, demo, alice)
+	if err := demo.Publish(feed, "", "news"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the channel item", func() bool { return len(alice.Log(feed)) == 1 })
+	if alice.OpenInvitations() != 0 || alice.UnreadMessages() != 2 {
+		t.Fatalf("with a room and a channel: %d invitations, %d unread", alice.OpenInvitations(), alice.UnreadMessages())
+	}
+
+	// The visit is the server's, so another device knows it from the start.
+	if later := connect(t, server.Base, "alice"); later.OpenInvitations() != 0 || later.UnreadMessages() != 2 {
+		t.Fatalf("a new connection counts %d invitations, %d unread", later.OpenInvitations(), later.UnreadMessages())
+	}
+}
+
 // -- channels ----------------------------------------------------------------
 
 // channel is a new channel with each client given subscribed to it.
@@ -340,6 +377,26 @@ func TestAChannelItemIsOpenedAndEveryDeviceAgrees(t *testing.T) {
 	// A connection made afterwards learns it from the backfill.
 	if later := connect(t, server.Base, "alice"); !later.Opened(feed)[1] {
 		t.Fatal("a new connection does not know the item was opened")
+	}
+}
+
+// Nothing was pushed to a client outside the audience, so subscribing to a
+// channel with history has to fetch it.
+func TestSubscribingFetchesWhatWasAlreadyPublished(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	feed := channel(t, demo)
+	for _, body := range []string{"one", "two"} {
+		if err := demo.Publish(feed, "", body); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := alice.Subscribe(feed); err != nil {
+		t.Fatal(err)
+	}
+	if got := bodies(alice.Log(feed)); !slices.Equal(got, []string{"one", "two"}) {
+		t.Fatalf("after subscribing the log is %v", got)
 	}
 }
 

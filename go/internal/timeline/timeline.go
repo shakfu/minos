@@ -79,7 +79,7 @@ const (
 // SchemaVersion is stamped in PRAGMA user_version and checked on open. The
 // retired Python server wrote versions 1 and 2, plus presence and occupants
 // tables that no version covers.
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 // SubjectLimit is the most characters a channel message's subject may have.
 const SubjectLimit = 200
@@ -111,6 +111,15 @@ var migrations = map[int][]string{
 		"UPDATE messages SET subject = " + firstLine("body") +
 			" WHERE room_id IN (SELECT id FROM rooms WHERE kind = 'channel')",
 		"UPDATE submissions SET subject = " + firstLine("body"),
+	},
+	// Visits, created here so they can be filled at once: a user with a read
+	// cursor in a room has been in it. A room entered and never read is missed.
+	5: {
+		"CREATE TABLE IF NOT EXISTS visits (room_id TEXT NOT NULL, username TEXT NOT NULL," +
+			" PRIMARY KEY (room_id, username))",
+		"INSERT OR IGNORE INTO visits (room_id, username)" +
+			" SELECT c.room_id, c.username FROM read_cursors c" +
+			" JOIN rooms r ON r.id = c.room_id WHERE r.kind = 'room'",
 	},
 }
 
@@ -234,6 +243,14 @@ CREATE TABLE IF NOT EXISTS read_cursors (
     room_id  TEXT NOT NULL,
     username TEXT NOT NULL,
     seq      INTEGER NOT NULL,
+    PRIMARY KEY (room_id, username)
+);
+
+-- Rooms each user has entered at least once. An invitation is open until then,
+-- and nothing reopens it.
+CREATE TABLE IF NOT EXISTS visits (
+    room_id  TEXT NOT NULL,
+    username TEXT NOT NULL,
     PRIMARY KEY (room_id, username)
 );
 
@@ -890,6 +907,7 @@ func (t *Timeline) DeleteRoom(roomID string) error {
 		"DELETE FROM submissions WHERE channel_id = ?",
 		"DELETE FROM read_cursors WHERE room_id = ?",
 		"DELETE FROM opened WHERE room_id = ?",
+		"DELETE FROM visits WHERE room_id = ?",
 		"DELETE FROM archived_messages WHERE room_id = ?",
 		"DELETE FROM rooms WHERE id = ?",
 	} {
@@ -1039,6 +1057,11 @@ func (t *Timeline) MarkRead(roomID, username string, seq int64) error {
 			" ON CONFLICT (room_id, username) DO UPDATE SET seq = MAX(seq, excluded.seq)",
 		roomID, username, seq)
 	return err
+}
+
+// Visited is every room this user has entered at least once, sorted.
+func (t *Timeline) Visited(username string) ([]string, error) {
+	return t.strings("SELECT room_id FROM visits WHERE username = ? ORDER BY room_id", username)
 }
 
 // ReadCursors is this user's read cursor in each room. Channels are left out:
@@ -1249,7 +1272,12 @@ func (t *Timeline) Enter(roomID, username string) (string, error) {
 	t.occupancies[id] = seat{room: roomID, user: username}
 	t.live.Unlock()
 
-	_, err := t.db.Exec("UPDATE rooms SET empty_since = NULL WHERE id = ?", roomID)
+	if _, err := t.db.Exec("UPDATE rooms SET empty_since = NULL WHERE id = ?", roomID); err != nil {
+		return id, err
+	}
+	// The first entry takes up the invitation.
+	_, err := t.db.Exec(
+		"INSERT OR IGNORE INTO visits (room_id, username) VALUES (?, ?)", roomID, username)
 	return id, err
 }
 

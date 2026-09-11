@@ -101,6 +101,8 @@ Invitation grants access; it is not an offer awaiting acceptance. This is what k
 
 > Invitation makes you a **participant**. Entering makes you an **occupant**.
 
+**An invitation is open until it is first taken up.** The first time a participant enters a room, they have visited it, and that is kept: leaving, being removed and being invited again do not reopen it. A room a user raised is never an open invitation to them. The server keeps the fact, because it is the same from every device.
+
 A participant who never enters is still a participant. An occupant who leaves is still a participant — unless the room was transient, in which case there is shortly nothing left to be a participant of.
 
 **An invitation names either a user or a group.** Inviting a group is the whole reason groups exist, and the grant *tracks* the group rather than expanding to a list of names at the moment it is issued: a user later assigned to the group gains access without a second invitation, and a user removed from it loses access. That second half is the consequence worth being deliberate about — a single change to a group assignment silently revokes access to every room the group was invited to, which is exactly what makes groups worth having and exactly what makes them dangerous to edit casually.

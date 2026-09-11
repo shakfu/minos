@@ -101,6 +101,16 @@ func TestTheScreenIsDrawnAndATinyOneIsRefused(t *testing.T) {
 		}
 	}
 
+	// A highlighted room is a preview: drawing it marks nothing read.
+	if err := demo.Send(room, "later"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the second message", func() bool { return len(demo.Log(room)) == 2 })
+	ui.draw()
+	if unread := demo.Unread(room); unread != 1 {
+		t.Errorf("the preview marked the room read: unread %d", unread)
+	}
+
 	screen.SetSize(30, 5)
 	ui.draw()
 	if drawn := contents(screen); !strings.Contains(drawn, "Terminal too small") {
@@ -169,6 +179,52 @@ func TestAChannelShowsSubjectsAndTheOpenedBody(t *testing.T) {
 		if !strings.Contains(drawn, want) {
 			t.Errorf("the opened item lacks %q:\n%s", want, drawn)
 		}
+	}
+}
+
+// The status line counts open invitations and unread messages apart, and the
+// sidebar marks a room not yet entered.
+func TestInvitationsAndUnreadMessagesAreShownApart(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	room, err := demo.OpenRoom([]client.Principal{{Kind: "user", ID: "alice"}}, "Standup", "persisted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := demo.Send(room.ID, "one"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the invitation", func() bool { return len(alice.Log(room.ID)) == 1 })
+
+	screen := simulated(t, 100, 24)
+	ui := newUi(screen, alice, client.Profile{Username: "alice"})
+	ui.ensureSelection()
+	ui.draw()
+	drawn := contents(screen)
+	for _, want := range []string{"1 open invitation", "Standup (invited)"} {
+		if !strings.Contains(drawn, want) {
+			t.Errorf("before entering, the screen lacks %q:\n%s", want, drawn)
+		}
+	}
+	if strings.Contains(drawn, "unread message") {
+		t.Errorf("an invitation's messages were counted unread:\n%s", drawn)
+	}
+
+	// Entered and read, then out again with something new: unread, and no longer invited.
+	ui.compose("")
+	ui.draw()
+	ui.command("/exit")
+	if err := demo.Send(room.ID, "two"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the second message", func() bool { return len(alice.Log(room.ID)) == 2 })
+	ui.draw()
+	drawn = contents(screen)
+	// The header's "2 invited" is the audience, not an invitation, so the check
+	// names the marker and the count exactly.
+	if !strings.Contains(drawn, "1 unread message") ||
+		strings.Contains(drawn, "(invited)") || strings.Contains(drawn, "open invitation") {
+		t.Errorf("after the visit the screen is wrong:\n%s", drawn)
 	}
 }
 

@@ -76,6 +76,41 @@ func TestAVersion3DatabaseGainsSubjectsAndArchival(t *testing.T) {
 	}
 }
 
+// A read cursor is evidence of a visit, so the upgrade counts it as one.
+func TestAVersion4DatabaseGainsVisits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "timeline.db")
+	store, err := open(t, path)
+	if err != nil {
+		t.Fatalf("cannot open a new database: %v", err)
+	}
+	read, _ := store.CreateRoom("Read", "demo", RoomKind, User, Persisted, "", nil)
+	if err := store.MarkRead(read.ID, "alice", 1); err != nil {
+		t.Fatalf("cannot arrange a read cursor: %v", err)
+	}
+	store.Close()
+	for _, statement := range []string{"DROP TABLE visits", "PRAGMA user_version = 4"} {
+		if _, err := raw(t, path).Exec(statement); err != nil {
+			t.Fatalf("cannot arrange the database: %v", err)
+		}
+	}
+
+	store, err = open(t, path)
+	if err != nil {
+		t.Fatalf("cannot upgrade a version 4 database: %v", err)
+	}
+	defer store.Close()
+	if visited, err := store.Visited("alice"); err != nil || !slices.Equal(visited, []string{read.ID}) {
+		t.Fatalf("after the upgrade visited is %v, %v", visited, err)
+	}
+	room, _ := store.CreateRoom("Chat", "demo", RoomKind, User, Persisted, "", nil)
+	if _, err := store.Enter(room.ID, "alice"); err != nil {
+		t.Fatalf("cannot enter: %v", err)
+	}
+	if visited, _ := store.Visited("alice"); !slices.Contains(visited, room.ID) || len(visited) != 2 {
+		t.Fatalf("after entering visited is %v", visited)
+	}
+}
+
 // A young message holds back an older one behind it, or the live tail would
 // have a hole in it.
 func TestArchivalTakesTheAgedRunFromTheOldestOnly(t *testing.T) {
@@ -132,8 +167,9 @@ func raw(t *testing.T, path string) *sql.DB {
 	return db
 }
 
-// sinceVersion3 undoes what version 4 added, to wind a database back past it.
+// sinceVersion3 undoes what versions 4 and 5 added, to wind a database back past them.
 var sinceVersion3 = []string{
+	"DROP TABLE visits",
 	"ALTER TABLE messages DROP COLUMN subject",
 	"ALTER TABLE rooms DROP COLUMN archive_period",
 	"ALTER TABLE rooms DROP COLUMN archive_searchable",

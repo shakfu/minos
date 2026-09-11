@@ -138,6 +138,8 @@ type SyncReply struct {
 	Rooms    []timeline.Room  `json:"rooms"`
 	Channels []timeline.Room  `json:"channels"`
 	Read     map[string]int64 `json:"read"`
+	// Rooms the caller has ever entered. An invitation is open until then.
+	Visited []string `json:"visited"`
 	// The caller's own submissions, pending or rejected and not acknowledged.
 	// Here rather than only on a push, so an author who was offline for the
 	// decision still learns it.
@@ -305,6 +307,10 @@ func (m *Messaging) Sync(username string, isAdmin bool) (*SyncReply, error) {
 	if err != nil {
 		return nil, err
 	}
+	visited, err := m.store.Visited(username)
+	if err != nil {
+		return nil, err
+	}
 
 	online := m.store.Online()
 	names := m.roster()
@@ -318,7 +324,7 @@ func (m *Messaging) Sync(username string, isAdmin bool) (*SyncReply, error) {
 	return &SyncReply{
 		Me: username, IsAdmin: isAdmin, Users: users,
 		Groups: groups, Rooms: rooms, Channels: channels, Read: cursors,
-		Submissions: submissions,
+		Visited: visited, Submissions: submissions,
 	}, nil
 }
 
