@@ -80,5 +80,11 @@ So `tests/conformance/` splits. The suite that both servers pass covers the core
 
 ## Open
 
-Nothing in the code. See the three questions in `chat-concepts.md` section 3, and the open questions in its section 4.
+Model questions are the three in `chat-concepts.md` section 3, and the open questions in its section 4.
+
+### The client does not reconnect
+
+When the socket closes, `go/internal/client` fails pending requests with `Disconnected`, and the terminal client shows `disconnected` until restarted. Nothing redials. The server's hang-up on a full outbound queue assumes a client that comes back: `go/internal/socket/socket.go:40` says it "reconnects and repairs from its cursor". So does the port entry under *Done*.
+
+Reconnecting is: redial, log in again if the session has expired, `sync`, then backfill each room from its cursor. The last step exists. Occupancy does not survive, because a closed connection releases every occupancy it held, so a client that was in a room must `enter` it again.
 
