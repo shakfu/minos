@@ -4,8 +4,13 @@ package conformance
 // frame costs the sender a frame rather than a connection.
 
 import (
+	"context"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // Policy violation: the upgrade completes and the server then closes.
@@ -23,6 +28,58 @@ func TestAnAnonymousUpgradeIsClosed(t *testing.T) {
 		t.Fatal("an anonymous socket was left open")
 	}
 	same(t, []any{int(socket.CloseCode), socket.CloseReason}, []any{closePolicyViolation, "Not authenticated"})
+}
+
+// A browser names the page's origin on every upgrade. One naming another host
+// is refused, so a page elsewhere cannot ride the viewer's cookie.
+func TestAnUpgradeFromAnotherOriginIsRefused(t *testing.T) {
+	cookie := session(t, "alice").CookieHeader()
+	target := "ws" + strings.TrimPrefix(shared.Base, "http") + "/"
+	for origin, status := range map[string]int{
+		"http://elsewhere.example":                             http.StatusForbidden,
+		"http://" + strings.TrimPrefix(shared.Base, "http://"): http.StatusSwitchingProtocols,
+	} {
+		t.Run(origin, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), HandshakeTimeout)
+			defer cancel()
+			conn, response, _ := websocket.Dial(ctx, target, &websocket.DialOptions{
+				HTTPHeader: http.Header{"Cookie": {cookie}, "Origin": {origin}},
+			})
+			if conn != nil {
+				conn.CloseNow()
+			}
+			truth(t, response != nil, "no response to the upgrade")
+			same(t, response.StatusCode, status)
+		})
+	}
+}
+
+// The one malformed frame that does cost the connection: it cannot be skipped
+// without reading it.
+func TestAFrameOverAMebibyteClosesTheSocket(t *testing.T) {
+	demo := connect(t, admin)
+	demo.SendFrame(strings.Repeat("x", 1<<20+1))
+	select {
+	case <-demo.Closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("an oversized frame was read")
+	}
+	same(t, int(demo.CloseCode), 1009)
+}
+
+func TestTheSocketIsOnlyAtTheRoot(t *testing.T) {
+	cookie := session(t, "alice").CookieHeader()
+	ctx, cancel := context.WithTimeout(context.Background(), HandshakeTimeout)
+	defer cancel()
+	target := "ws" + strings.TrimPrefix(shared.Base, "http") + "/elsewhere"
+	conn, response, _ := websocket.Dial(ctx, target, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Cookie": {cookie}},
+	})
+	if conn != nil {
+		conn.CloseNow()
+	}
+	truth(t, response != nil, "no response to the upgrade")
+	same(t, response.StatusCode, http.StatusNotFound)
 }
 
 func TestTheHandshakeIsTheFirstFrame(t *testing.T) {

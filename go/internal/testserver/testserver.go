@@ -41,7 +41,7 @@ func Start(t testing.TB, historyLimit int) *Server {
 		t.Fatalf("cannot write the index: %v", err)
 	}
 
-	store, err := timeline.Open(filepath.Join(settings.RunDir, "timeline.db"), historyLimit, settings.Grace)
+	store, err := timeline.Open(filepath.Join(settings.RunDir, "timeline.db"), historyLimit, settings.Grace, settings.Unentered)
 	if err != nil {
 		t.Fatalf("cannot open the timeline: %v", err)
 	}

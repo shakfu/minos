@@ -43,6 +43,27 @@ const (
 // ArchiveSearchLimit is the most messages one archive search returns.
 const ArchiveSearchLimit = 100
 
+// BodyLimit is the most bytes a message body or a rejection comment may hold,
+// and NameLimit the most characters a title or a group name may have.
+const (
+	BodyLimit = 64 << 10
+	NameLimit = 200
+)
+
+func checkBody(body string) error {
+	if len(body) > BodyLimit {
+		return refuse("A message is at most %d bytes", BodyLimit)
+	}
+	return nil
+}
+
+func checkName(name string) error {
+	if len([]rune(name)) > NameLimit {
+		return refuse("A name is at most %d characters", NameLimit)
+	}
+	return nil
+}
+
 // Refusal is a request that cannot be carried out, reportable to whoever asked.
 // Distinct from a bug: the host turns this into an error reply and anything else
 // into a generic failure.
@@ -371,6 +392,9 @@ func (m *Messaging) Send(username, roomID, body string) (*SendReply, error) {
 	if body == "" {
 		return nil, refuse("Empty message")
 	}
+	if err := checkBody(body); err != nil {
+		return nil, err
+	}
 
 	message, err := m.store.Append(roomID, username, "", body, timeline.Text)
 	if err != nil {
@@ -397,6 +421,9 @@ func (m *Messaging) OpenRoom(username string, invitees []any, title, retention s
 	}
 
 	title = strings.TrimSpace(title)
+	if err := checkName(title); err != nil {
+		return nil, err
+	}
 	if title == "" {
 		title, err = m.deriveTitle(grants)
 		if err != nil {
@@ -421,6 +448,9 @@ func (m *Messaging) CreateRoom(username string, isAdmin bool, title string, invi
 	title = strings.TrimSpace(title)
 	if title == "" {
 		return nil, refuse("A permanent room needs a name")
+	}
+	if err := checkName(title); err != nil {
+		return nil, err
 	}
 
 	// A permanent room's title is a name: institutional, chosen, and meant to be
@@ -571,18 +601,11 @@ func (m *Messaging) Invite(username string, isAdmin bool, roomID string, value a
 		return &RoomReply{Ok: true, Room: room}, nil
 	}
 
-	label := principal.ID
-	if principal.Kind == timeline.PrincipalGroup {
-		if group, err := m.store.Group(principal.ID); err == nil && group != nil {
-			label = "group " + group.Name
-		}
-	}
-
 	updated, err := m.store.Room(roomID)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := m.PostEvent(roomID, username+" invited "+label, updated.Audience); err != nil {
+	if _, err := m.PostEvent(roomID, username+" invited "+m.label(principal), updated.Audience); err != nil {
 		return nil, err
 	}
 
@@ -608,26 +631,10 @@ func (m *Messaging) Uninvite(username string, isAdmin bool, roomID string, value
 		return nil, err
 	}
 
-	// Read before the change: afterwards the person removed is not in the
-	// audience, and this is the last moment their client can be told.
-	audience := room.Audience
-
-	removed, err := m.store.RemoveGrant(roomID, principal.Kind, principal.ID)
-	if err != nil {
+	updated, err := m.withdraw(room, principal, username+" removed "+m.label(principal))
+	if err != nil && !errors.Is(err, errNotGranted) {
 		return nil, err
 	}
-	if !removed {
-		return &RoomReply{Ok: true, Room: room}, nil
-	}
-
-	if _, err := m.PostEvent(roomID, username+" removed "+principal.ID, audience); err != nil {
-		return nil, err
-	}
-	updated, err := m.store.Room(roomID)
-	if err != nil {
-		return nil, err
-	}
-	m.announceRoom(updated, audience)
 	return &RoomReply{Ok: true, Room: updated}, nil
 }
 
@@ -642,25 +649,103 @@ func (m *Messaging) Leave(username, roomID string) (*Ok, error) {
 	if err != nil {
 		return nil, err
 	}
-	audience := room.Audience
-
-	removed, err := m.store.RemoveGrant(roomID, timeline.PrincipalUser, username)
-	if err != nil {
-		return nil, err
-	}
-	if !removed {
+	principal := timeline.Principal{Kind: timeline.PrincipalUser, ID: username}
+	if _, err := m.withdraw(room, principal, username+" left"); errors.Is(err, errNotGranted) {
 		return nil, refuse("Access to this room comes from a group, so it cannot be left")
-	}
-
-	if _, err := m.PostEvent(roomID, username+" left", audience); err != nil {
+	} else if err != nil {
 		return nil, err
 	}
-	updated, err := m.store.Room(roomID)
+	return &Ok{Ok: true}, nil
+}
+
+// errNotGranted is withdraw's report that the grant was not there to remove.
+var errNotGranted = errors.New("not granted")
+
+// withdraw removes a grant and tells everyone it concerns. It returns the room
+// as it now is, or nil when the grant was an ad-hoc room's last and the room is
+// gone. A grant that was not there changes nothing and returns errNotGranted,
+// which Uninvite takes as success and Leave as a refusal.
+func (m *Messaging) withdraw(room *timeline.Room, principal timeline.Principal, event string) (*timeline.Room, error) {
+	// Read before the change: afterwards the people removed are not in the
+	// audience, and this is the last moment their clients can be told.
+	before := room.Audience
+
+	withdrawal, err := m.store.RemoveGrant(room.ID, principal.Kind, principal.ID)
 	if err != nil {
 		return nil, err
 	}
-	m.announceRoom(updated, audience)
-	return &Ok{Ok: true}, nil
+	switch withdrawal {
+	case timeline.NotGranted:
+		return room, errNotGranted
+	case timeline.LastKept:
+		return nil, refuse("A permanent room keeps its last grant")
+	case timeline.RoomDeleted:
+		if err := m.release(room.ID, before); err != nil {
+			return nil, err
+		}
+		m.gone(room.ID, before)
+		return nil, nil
+	}
+
+	if _, err := m.PostEvent(room.ID, event, before); err != nil {
+		return nil, err
+	}
+	updated, err := m.store.Room(room.ID)
+	if err != nil {
+		return nil, err
+	}
+	dropped := without(before, updated.Audience)
+	if err := m.release(room.ID, dropped); err != nil {
+		return nil, err
+	}
+	if updated, err = m.store.Room(room.ID); err != nil {
+		return nil, err
+	}
+	m.announceRoom(updated, before)
+	m.gone(room.ID, dropped)
+	return updated, nil
+}
+
+// release gives up each user's place in a room they can no longer reach.
+func (m *Messaging) release(roomID string, usernames []string) error {
+	for _, name := range usernames {
+		if _, err := m.store.Release(roomID, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// gone tells each user's clients to drop a room.
+func (m *Messaging) gone(roomID string, usernames []string) {
+	for _, name := range usernames {
+		m.deliver([]string{name}, roomGoneEvent{Type: RoomGonePush, Room: roomID})
+	}
+}
+
+// label names a principal in an event line: a group by its name.
+func (m *Messaging) label(principal timeline.Principal) string {
+	if principal.Kind == timeline.PrincipalGroup {
+		if group, err := m.store.Group(principal.ID); err == nil && group != nil {
+			return "group " + group.Name
+		}
+	}
+	return principal.ID
+}
+
+// without is every name in first that second lacks.
+func without(first, second []string) []string {
+	keeping := map[string]bool{}
+	for _, name := range second {
+		keeping[name] = true
+	}
+	var missing []string
+	for _, name := range first {
+		if !keeping[name] {
+			missing = append(missing, name)
+		}
+	}
+	return missing
 }
 
 // -- occupancy ---------------------------------------------------------------
@@ -693,6 +778,9 @@ func (m *Messaging) Enter(username, roomID string) (*EnterReply, error) {
 	}
 
 	occupancy, err := m.store.Enter(roomID, username)
+	if errors.Is(err, timeline.ErrNoRoom) {
+		return nil, refuse("No such room: %s", roomID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -736,8 +824,12 @@ func (m *Messaging) Sweep() ([]string, error) {
 		if room, err := m.store.Room(roomID); err == nil && room != nil {
 			audience = room.Audience
 		}
-		if err := m.store.DeleteRoom(roomID); err != nil {
+		deleted, err := m.store.DeleteExpired(roomID)
+		if err != nil {
 			return gone, err
+		}
+		if !deleted {
+			continue // entered since it was listed
 		}
 		m.deliver(audience, roomGoneEvent{Type: RoomGonePush, Room: roomID})
 		gone = append(gone, roomID)
@@ -795,6 +887,9 @@ func (m *Messaging) CreateGroup(isAdmin bool, name string, members []any) (*time
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, refuse("A group needs a name")
+	}
+	if err := checkName(name); err != nil {
+		return nil, err
 	}
 
 	// An unknown member is dropped rather than refused: the group is a set of
@@ -895,9 +990,19 @@ func (m *Messaging) UnassignGroup(isAdmin bool, groupID, username string) (*time
 	m.announceGroup(group)
 
 	for _, room := range before {
-		if !keeping[room.ID] {
-			m.deliver([]string{username}, roomGoneEvent{Type: RoomGonePush, Room: room.ID})
+		if keeping[room.ID] {
+			continue
 		}
+		released, err := m.store.Release(room.ID, username)
+		if err != nil {
+			return nil, err
+		}
+		if released > 0 {
+			if updated, err := m.store.Room(room.ID); err == nil {
+				m.announceRoom(updated, nil)
+			}
+		}
+		m.deliver([]string{username}, roomGoneEvent{Type: RoomGonePush, Room: room.ID})
 	}
 	return group, nil
 }
@@ -948,6 +1053,9 @@ func (m *Messaging) CreateChannel(
 	title = strings.TrimSpace(title)
 	if title == "" {
 		return nil, refuse("A channel needs a name")
+	}
+	if err := checkName(title); err != nil {
+		return nil, err
 	}
 
 	// A channel's name is institutional, referred to, and unique among channels
@@ -1270,6 +1378,9 @@ func (m *Messaging) Reject(username, submissionID, comment string) (*Ok, error) 
 		return nil, err
 	}
 	var note *string
+	if err := checkBody(comment); err != nil {
+		return nil, err
+	}
 	if comment = strings.TrimSpace(comment); comment != "" {
 		note = &comment
 	}
@@ -1359,7 +1470,7 @@ func content(subject, body string) (string, string, error) {
 	if subject == "" && body == "" {
 		return "", "", refuse("Empty message")
 	}
-	return subject, body, nil
+	return subject, body, checkBody(body)
 }
 
 // -- opening -----------------------------------------------------------------

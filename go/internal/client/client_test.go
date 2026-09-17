@@ -442,3 +442,52 @@ func TestAnArchivedPushDropsWhatItNames(t *testing.T) {
 		t.Fatalf("the cursor moved to %d", cursor)
 	}
 }
+
+// A connection the server hung up on comes back by itself: logged in again,
+// caught up on what was said meanwhile, and back in the room it was in.
+func TestADroppedConnectionReconnects(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	room := pair(t, demo)
+	occupancy, err := demo.Enter(room.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	demo.socket.mutex.Lock()
+	ws := demo.socket.ws
+	demo.socket.mutex.Unlock()
+	_ = ws.CloseNow()
+	waitFor(t, "the server to release demo's place", func() bool {
+		return len(server.Store.OccupantsOf(room.ID)) == 0
+	})
+	send(t, alice, room.ID, "while you were away")
+
+	waitFor(t, "demo to reconnect and catch up", func() bool {
+		return demo.Connected() && slices.Contains(bodies(demo.Log(room.ID)), "while you were away")
+	})
+	waitFor(t, "demo to be back in the room", func() bool {
+		return slices.Equal(server.Store.OccupantsOf(room.ID), []string{"demo"})
+	})
+	if !demo.Holds(occupancy) {
+		t.Fatal("the caller's occupancy handle was lost")
+	}
+	// Whether or not the re-entry's reply has landed yet, the old handle leaves.
+	if err := demo.Exit(occupancy); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "exit by the old handle to empty the room", func() bool {
+		return len(server.Store.OccupantsOf(room.ID)) == 0
+	})
+}
+
+// A refused read leaves the cursor where the server has it.
+func TestARefusedReadPutsTheCursorBack(t *testing.T) {
+	demo := connect(t, testserver.Start(t, config.HistoryLimit).Base, "demo")
+	if err := demo.MarkRead("absent", 5); err == nil {
+		t.Fatal("a read in a room that does not exist was accepted")
+	}
+	if got := demo.ReadCursor("absent"); got != 0 {
+		t.Fatalf("the cursor stayed at %d", got)
+	}
+}

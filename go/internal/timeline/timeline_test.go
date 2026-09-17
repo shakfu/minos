@@ -152,7 +152,7 @@ func TestArchivalTakesTheAgedRunFromTheOldestOnly(t *testing.T) {
 // open is Open with the arguments the server passes, which no test varies.
 func open(t *testing.T, path string) (*Timeline, error) {
 	t.Helper()
-	return Open(path, 200, time.Minute)
+	return Open(path, 200, time.Minute, time.Hour)
 }
 
 // raw is a connection that does not go through Open, for arranging a database

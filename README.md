@@ -151,11 +151,13 @@ Two things worth knowing:
 | `go/internal/tui` | The interface: sidebar, one conversation, composer, commands. |
 | `go/cmd/minos` | Flags, the login prompt, and handing the terminal to the interface. |
 
-Three things worth knowing:
+Four things worth knowing:
 
 - **The room you enter is the room you occupy, and the screen becomes that room.** A place is something you are *in*: the sidebar goes, Tab stays put, and `/exit` steps back out. The status line shows two counts, never mixed: open invitations, rooms you may enter and never have, marked `(invited)` in the sidebar; and unread messages in rooms you have visited. A channel's items are counted only inside the channel. An invitation that arrives while you are in a room is also named when you step out. You are in one room at a time on every device, so entering one leaves any other, and quitting leaves everything. Inside a room, a command that would take you out of it, such as `/open` or `/subscribe`, asks first. A room you only highlight is a preview: nothing in it is marked read. For a transient room that is not decoration: its life is measured from the moment its last occupant goes.
 
 - **Everything the desktop expressed by dragging is a command.** Membership used to be edited by dropping one window onto another, which no keyboard could reach and no script could call. `/invite` says what it does, can be refused with a reason, and reads the same in a log. `@name` names a group, which the old interface could not express at all.
+
+- **A dropped connection comes back.** The client logs in again with backoff, syncs, backfills from its cursors, and enters again the room it was in.
 
 - **The socket reader never blocks.** Repairing a gap means making a request, and a request waits on the reader -- doing it there would deadlock the client against itself. Pushes go to a queue that a separate goroutine drains.
 

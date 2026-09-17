@@ -1,8 +1,9 @@
 // Package vfs backs the /vfs/* API.
 //
 // Paths arrive from the client as "<mountpoint>:/<path>". Each mountpoint maps
-// to a real directory; every resolved path is checked against its mountpoint
-// root so a crafted path cannot escape it.
+// to a real directory. A path is checked against its mountpoint lexically, and
+// every file operation then runs through an os.Root on that directory, so a
+// symlink cannot lead outside it either.
 package vfs
 
 import (
@@ -13,6 +14,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -90,34 +92,59 @@ func (v *Vfs) mount(name, username string) (string, bool, bool) {
 	return "", false, false
 }
 
-// Resolve maps a virtual path to a real one, refusing escapes and read-only
-// writes. The method decides only whether a write is being attempted.
-func (v *Vfs) Resolve(virtual, username, method string) (string, error) {
+// place is a virtual path resolved to its mountpoint's directory and a name
+// inside it. The name is "." for the mountpoint itself.
+type place struct {
+	dir      string
+	name     string
+	writable bool
+}
+
+// real is the path on disk, for naming and typing a file rather than opening it.
+func (p place) real() string { return filepath.Join(p.dir, p.name) }
+
+// open is the mountpoint as a root. A writable one is created if it is missing.
+func (p place) open() (*os.Root, error) {
+	if p.writable {
+		if err := os.MkdirAll(p.dir, 0o755); err != nil {
+			return nil, err
+		}
+	}
+	return os.OpenRoot(p.dir)
+}
+
+// locate resolves a virtual path, refusing escapes and read-only writes. The
+// method decides only whether a write is being attempted.
+func (v *Vfs) locate(virtual, username, method string) (place, error) {
 	name, rest, found := strings.Cut(virtual, ":")
 	if !found {
-		return "", fail(http.StatusBadRequest, "Malformed VFS path: %q", virtual)
+		return place{}, fail(http.StatusBadRequest, "Malformed VFS path: %q", virtual)
 	}
 
-	root, writable, known := v.mount(name, username)
+	dir, writable, known := v.mount(name, username)
 	if !known {
-		return "", fail(http.StatusNotFound, "No such mountpoint: %s", name)
+		return place{}, fail(http.StatusNotFound, "No such mountpoint: %s", name)
 	}
 	if !writable && !readOnlyMethods[method] {
-		return "", fail(http.StatusForbidden, "Mountpoint %s is read-only", name)
+		return place{}, fail(http.StatusForbidden, "Mountpoint %s is read-only", name)
 	}
 
-	root, err := filepath.Abs(root)
+	dir, err := filepath.Abs(dir)
 	if err != nil {
-		return "", fail(http.StatusBadRequest, "Malformed VFS path: %q", virtual)
+		return place{}, fail(http.StatusBadRequest, "Malformed VFS path: %q", virtual)
 	}
-	target := filepath.Clean(filepath.Join(root, strings.TrimLeft(rest, "/")))
+	target := filepath.Clean(filepath.Join(dir, strings.TrimLeft(rest, "/")))
 
 	// Clean has already collapsed any "..", so a path that escaped is now
 	// simply outside the root and says so by its prefix.
-	if target != root && !strings.HasPrefix(target, root+string(os.PathSeparator)) {
-		return "", fail(http.StatusForbidden, "Path escapes its mountpoint")
+	if target != dir && !strings.HasPrefix(target, dir+string(os.PathSeparator)) {
+		return place{}, fail(http.StatusForbidden, "Path escapes its mountpoint")
 	}
-	return target, nil
+	relative, err := filepath.Rel(dir, target)
+	if err != nil {
+		return place{}, fail(http.StatusBadRequest, "Malformed VFS path: %q", virtual)
+	}
+	return place{dir: dir, name: filepath.ToSlash(relative), writable: writable}, nil
 }
 
 // EnsureHome creates a user's home directory and seeds it on first login.
@@ -238,44 +265,55 @@ func virtualParent(virtual string) string {
 }
 
 func (v *Vfs) Capabilities(username, path string) (any, error) {
-	if _, err := v.Resolve(path, username, "capabilities"); err != nil {
+	if _, err := v.locate(path, username, "capabilities"); err != nil {
 		return nil, err
 	}
 	return map[string]bool{"sort": false, "pagination": false}, nil
 }
 
 func (v *Vfs) Exists(username, path string) (any, error) {
-	target, err := v.Resolve(path, username, "exists")
+	target, err := v.locate(path, username, "exists")
 	if err != nil {
 		return nil, err
 	}
-	_, err = os.Stat(target)
+	root, err := target.open()
+	if err != nil {
+		return false, nil
+	}
+	defer root.Close()
+	_, err = root.Stat(target.name)
 	return err == nil, nil
 }
 
 func (v *Vfs) Stat(username, path string) (any, error) {
-	target, err := v.Resolve(path, username, "stat")
+	target, err := v.locate(path, username, "stat")
 	if err != nil {
 		return nil, err
 	}
-	info, err := os.Stat(target)
+	root, err := target.open()
 	if err != nil {
 		return nil, fail(http.StatusNotFound, "No such file: %s", path)
 	}
-	return describe(path, target, info), nil
+	defer root.Close()
+	info, err := root.Stat(target.name)
+	if err != nil {
+		return nil, fail(http.StatusNotFound, "No such file: %s", path)
+	}
+	return describe(path, target.real(), info), nil
 }
 
 func (v *Vfs) Readdir(username, path string) (any, error) {
-	target, err := v.Resolve(path, username, "readdir")
+	target, err := v.locate(path, username, "readdir")
 	if err != nil {
 		return nil, err
 	}
-	info, err := os.Stat(target)
-	if err != nil || !info.IsDir() {
+	root, err := target.open()
+	if err != nil {
 		return nil, fail(http.StatusNotFound, "Not a directory: %s", path)
 	}
+	defer root.Close()
 
-	children, err := os.ReadDir(target)
+	children, err := fs.ReadDir(root.FS(), target.name)
 	if err != nil {
 		return nil, fail(http.StatusNotFound, "Not a directory: %s", path)
 	}
@@ -290,34 +328,81 @@ func (v *Vfs) Readdir(username, path string) (any, error) {
 		if err != nil {
 			continue
 		}
-		entries = append(entries, describe(base+"/"+child.Name(), filepath.Join(target, child.Name()), childInfo))
+		entries = append(entries, describe(base+"/"+child.Name(), filepath.Join(target.real(), child.Name()), childInfo))
 	}
 	return entries, nil
 }
 
-// Readfile returns the real path to send, having checked it is one.
-func (v *Vfs) Readfile(username, path string) (string, error) {
-	target, err := v.Resolve(path, username, "readfile")
-	if err != nil {
-		return "", err
-	}
-	info, err := os.Stat(target)
-	if err != nil || !info.Mode().IsRegular() {
-		return "", fail(http.StatusNotFound, "No such file: %s", path)
-	}
-	return target, nil
-}
-
-func (v *Vfs) Writefile(username, path string, body io.Reader) (any, error) {
-	target, err := v.Resolve(path, username, "writefile")
+// Readfile opens a file to send, having checked it is a regular one. The caller
+// closes it.
+func (v *Vfs) Readfile(username, path string) (*os.File, error) {
+	target, err := v.locate(path, username, "readfile")
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	root, err := target.open()
+	if err != nil {
+		return nil, fail(http.StatusNotFound, "No such file: %s", path)
+	}
+	defer root.Close()
+
+	handle, err := root.Open(target.name)
+	if err != nil {
+		return nil, fail(http.StatusNotFound, "No such file: %s", path)
+	}
+	if info, err := handle.Stat(); err != nil || !info.Mode().IsRegular() {
+		handle.Close()
+		return nil, fail(http.StatusNotFound, "No such file: %s", path)
+	}
+	return handle, nil
+}
+
+// ReadFile is a whole file's contents, for the server's own use of a home.
+func (v *Vfs) ReadFile(username, path string) ([]byte, error) {
+	target, err := v.locate(path, username, "readfile")
+	if err != nil {
+		return nil, err
+	}
+	root, err := target.open()
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return root.ReadFile(target.name)
+}
+
+// WriteFile replaces a whole file, creating its parents.
+func (v *Vfs) WriteFile(username, path string, data []byte) error {
+	target, err := v.locate(path, username, "writefile")
+	if err != nil {
+		return err
+	}
+	root, err := target.open()
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if err := root.MkdirAll(filepath.Dir(target.name), 0o755); err != nil {
+		return err
+	}
+	return root.WriteFile(target.name, data, 0o644)
+}
+
+func (v *Vfs) Writefile(username, path string, body io.Reader) (any, error) {
+	target, err := v.locate(path, username, "writefile")
+	if err != nil {
+		return nil, err
+	}
+	root, err := target.open()
+	if err != nil {
+		return nil, fail(http.StatusBadRequest, "Cannot write: %s", path)
+	}
+	defer root.Close()
+	if err := root.MkdirAll(filepath.Dir(target.name), 0o755); err != nil {
 		return nil, fail(http.StatusBadRequest, "Cannot write: %s", path)
 	}
 
-	handle, err := os.Create(target)
+	handle, err := root.Create(target.name)
 	if err != nil {
 		return nil, fail(http.StatusBadRequest, "Cannot write: %s", path)
 	}
@@ -331,11 +416,16 @@ func (v *Vfs) Writefile(username, path string, body io.Reader) (any, error) {
 }
 
 func (v *Vfs) Mkdir(username, path string, ensure bool) (any, error) {
-	target, err := v.Resolve(path, username, "mkdir")
+	target, err := v.locate(path, username, "mkdir")
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Stat(target); err == nil {
+	root, err := target.open()
+	if err != nil {
+		return nil, fail(http.StatusBadRequest, "Cannot create: %s", path)
+	}
+	defer root.Close()
+	if _, err := root.Stat(target.name); err == nil {
 		if ensure {
 			return true, nil
 		}
@@ -343,9 +433,9 @@ func (v *Vfs) Mkdir(username, path string, ensure bool) (any, error) {
 	}
 
 	if ensure {
-		err = os.MkdirAll(target, 0o755)
+		err = root.MkdirAll(target.name, 0o755)
 	} else {
-		err = os.Mkdir(target, 0o755)
+		err = root.Mkdir(target.name, 0o755)
 	}
 	if err != nil {
 		return nil, fail(http.StatusBadRequest, "Cannot create: %s", path)
@@ -354,33 +444,47 @@ func (v *Vfs) Mkdir(username, path string, ensure bool) (any, error) {
 }
 
 func (v *Vfs) Unlink(username, path string) (any, error) {
-	target, err := v.Resolve(path, username, "unlink")
+	target, err := v.locate(path, username, "unlink")
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Stat(target); err != nil {
+	if target.name == "." {
+		return nil, fail(http.StatusForbidden, "A mountpoint cannot be deleted")
+	}
+	root, err := target.open()
+	if err != nil {
 		return nil, fail(http.StatusNotFound, "No such file: %s", path)
 	}
-	if err := os.RemoveAll(target); err != nil {
+	defer root.Close()
+	// Lstat, so a link whose target is gone can still be removed.
+	if _, err := root.Lstat(target.name); err != nil {
+		return nil, fail(http.StatusNotFound, "No such file: %s", path)
+	}
+	if err := root.RemoveAll(target.name); err != nil {
 		return nil, fail(http.StatusBadRequest, "Cannot delete: %s", path)
 	}
 	return true, nil
 }
 
 func (v *Vfs) Touch(username, path string) (any, error) {
-	target, err := v.Resolve(path, username, "touch")
+	target, err := v.locate(path, username, "touch")
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	root, err := target.open()
+	if err != nil {
+		return nil, fail(http.StatusBadRequest, "Cannot create: %s", path)
+	}
+	defer root.Close()
+	if err := root.MkdirAll(filepath.Dir(target.name), 0o755); err != nil {
 		return nil, fail(http.StatusBadRequest, "Cannot create: %s", path)
 	}
 
 	now := time.Now()
-	if err := os.Chtimes(target, now, now); err == nil {
+	if err := root.Chtimes(target.name, now, now); err == nil {
 		return true, nil
 	}
-	handle, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, 0o644)
+	handle, err := root.OpenFile(target.name, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, fail(http.StatusBadRequest, "Cannot create: %s", path)
 	}
@@ -389,23 +493,38 @@ func (v *Vfs) Touch(username, path string) (any, error) {
 }
 
 func (v *Vfs) Copy(username, from, to string) (any, error) {
-	source, err := v.Resolve(from, username, "readfile")
+	source, err := v.locate(from, username, "readfile")
 	if err != nil {
 		return nil, err
 	}
-	destination, err := v.Resolve(to, username, "writefile")
+	destination, err := v.locate(to, username, "writefile")
 	if err != nil {
 		return nil, err
 	}
 
-	info, err := os.Stat(source)
+	sourceRoot, err := source.open()
 	if err != nil {
 		return nil, fail(http.StatusNotFound, "No such file: %s", from)
 	}
+	defer sourceRoot.Close()
+	destinationRoot, err := destination.open()
+	if err != nil {
+		return nil, fail(http.StatusBadRequest, "Cannot copy: %s", from)
+	}
+	defer destinationRoot.Close()
+
+	info, err := sourceRoot.Stat(source.name)
+	if err != nil {
+		return nil, fail(http.StatusNotFound, "No such file: %s", from)
+	}
+	if err := refuseSelfCopy(info, destinationRoot, destination.name, to); err != nil {
+		return nil, err
+	}
+
 	if info.IsDir() {
-		err = copyTree(source, destination)
+		err = copyTree(sourceRoot, source.name, destinationRoot, destination.name)
 	} else {
-		err = copyFile(source, destination, info.Mode())
+		err = copyFile(sourceRoot, source.name, destinationRoot, destination.name, info.Mode())
 	}
 	if err != nil {
 		return nil, fail(http.StatusBadRequest, "Cannot copy: %s", from)
@@ -413,32 +532,66 @@ func (v *Vfs) Copy(username, from, to string) (any, error) {
 	return true, nil
 }
 
+// refuseSelfCopy compares files rather than names, so a link or a second path
+// to the same file is caught too. Copying a file onto itself truncates it before
+// reading it, and copying a directory under itself walks what it creates.
+func refuseSelfCopy(source fs.FileInfo, root *os.Root, name, virtual string) error {
+	if existing, err := root.Stat(name); err == nil && os.SameFile(source, existing) {
+		return fail(http.StatusBadRequest, "Cannot copy onto itself: %s", virtual)
+	}
+	if !source.IsDir() {
+		return nil
+	}
+	for parent := path.Dir(name); ; parent = path.Dir(parent) {
+		if ancestor, err := root.Stat(parent); err == nil && os.SameFile(source, ancestor) {
+			return fail(http.StatusBadRequest, "Cannot copy into itself: %s", virtual)
+		}
+		if parent == "." {
+			return nil
+		}
+	}
+}
+
 func (v *Vfs) Rename(username, from, to string) (any, error) {
-	source, err := v.Resolve(from, username, "unlink")
+	source, err := v.locate(from, username, "unlink")
 	if err != nil {
 		return nil, err
 	}
-	destination, err := v.Resolve(to, username, "writefile")
+	destination, err := v.locate(to, username, "writefile")
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Stat(source); err != nil {
+	if source.name == "." || destination.name == "." {
+		return nil, fail(http.StatusForbidden, "A mountpoint cannot be moved")
+	}
+	// Only home is writable, so both ends are in the same mountpoint.
+	root, err := source.open()
+	if err != nil {
 		return nil, fail(http.StatusNotFound, "No such file: %s", from)
 	}
-	if err := os.Rename(source, destination); err != nil {
+	defer root.Close()
+	if _, err := root.Lstat(source.name); err != nil {
+		return nil, fail(http.StatusNotFound, "No such file: %s", from)
+	}
+	if err := root.Rename(source.name, destination.name); err != nil {
 		return nil, fail(http.StatusBadRequest, "Cannot rename: %s", from)
 	}
 	return true, nil
 }
 
-func (v *Vfs) Search(username, root, pattern string) (any, error) {
-	target, err := v.Resolve(root, username, "search")
+func (v *Vfs) Search(username, virtual, pattern string) (any, error) {
+	target, err := v.locate(virtual, username, "search")
 	if err != nil {
 		return nil, err
 	}
-	info, err := os.Stat(target)
+	root, err := target.open()
+	if err != nil {
+		return nil, fail(http.StatusNotFound, "Not a directory: %s", virtual)
+	}
+	defer root.Close()
+	info, err := root.Stat(target.name)
 	if err != nil || !info.IsDir() {
-		return nil, fail(http.StatusNotFound, "Not a directory: %s", root)
+		return nil, fail(http.StatusNotFound, "Not a directory: %s", virtual)
 	}
 
 	// A pattern with no wildcard in it is a substring, which is what a person
@@ -452,32 +605,32 @@ func (v *Vfs) Search(username, root, pattern string) (any, error) {
 	// Match first, then sort, then stat: matching is a name comparison with no
 	// syscall behind it, and only the survivors are worth describing.
 	var matches []string
-	err = filepath.WalkDir(target, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || path == target {
+	err = fs.WalkDir(root.FS(), target.name, func(name string, entry fs.DirEntry, err error) error {
+		if err != nil || name == target.name {
 			return nil
 		}
 		if ok, _ := filepath.Match(glob, strings.ToLower(entry.Name())); ok {
-			matches = append(matches, path)
+			matches = append(matches, name)
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, fail(http.StatusNotFound, "Not a directory: %s", root)
+		return nil, fail(http.StatusNotFound, "Not a directory: %s", virtual)
 	}
 	sort.Strings(matches)
 
-	base := virtualParent(root)
+	base := virtualParent(virtual)
 	results := make([]Entry, 0, len(matches))
 	for _, match := range matches {
-		info, err := os.Stat(match)
+		info, err := root.Stat(match)
 		if err != nil {
 			continue
 		}
-		relative, err := filepath.Rel(target, match)
-		if err != nil {
-			continue
+		relative := match
+		if target.name != "." {
+			relative = strings.TrimPrefix(match, target.name+"/")
 		}
-		results = append(results, describe(base+"/"+filepath.ToSlash(relative), match, info))
+		results = append(results, describe(base+"/"+relative, filepath.Join(target.dir, match), info))
 		if len(results) >= config.SearchLimit {
 			break
 		}
@@ -485,14 +638,14 @@ func (v *Vfs) Search(username, root, pattern string) (any, error) {
 	return results, nil
 }
 
-func copyFile(source, destination string, mode fs.FileMode) error {
-	in, err := os.Open(source)
+func copyFile(from *os.Root, source string, to *os.Root, destination string, mode fs.FileMode) error {
+	in, err := from.Open(source)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
 
-	out, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	out, err := to.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode.Perm())
 	if err != nil {
 		return err
 	}
@@ -502,24 +655,25 @@ func copyFile(source, destination string, mode fs.FileMode) error {
 	return err
 }
 
-func copyTree(source, destination string) error {
-	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
+func copyTree(from *os.Root, source string, to *os.Root, destination string) error {
+	return fs.WalkDir(from.FS(), source, func(name string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		relative, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
+		target := destination
+		if source == "." && name != "." {
+			target = path.Join(destination, name)
+		} else if name != source {
+			target = path.Join(destination, strings.TrimPrefix(name, source+"/"))
 		}
-		target := filepath.Join(destination, relative)
 		if entry.IsDir() {
-			return os.MkdirAll(target, 0o755)
+			return to.MkdirAll(target, 0o755)
 		}
 		info, err := entry.Info()
 		if err != nil {
 			return err
 		}
-		return copyFile(path, target, info.Mode())
+		return copyFile(from, name, to, target, info.Mode())
 	})
 }
 

@@ -20,7 +20,7 @@ A sixth use is not a role: a person's own assistant (Claude Code, say) reading a
 
 ## 2. What already fits
 
-- **Writing needs access, not occupancy.** `Messaging.Send` checks `requireAccess` and nothing else (`go/internal/messaging/messaging.go:358`). Pushes go to a room's audience, not its occupants. An agent receives and answers in every room it was granted without ever entering one.
+- **Writing needs access, not occupancy.** `Messaging.Send` checks `requireAccess` and nothing else (`go/internal/messaging/messaging.go:379`). Pushes go to a room's audience, not its occupants. An agent receives and answers in every room it was granted without ever entering one.
 
 - **Every operation is a command with a readable refusal.** A refusal is `{"error": "<message>"}` (wire-contract 6), such as `Only an administrator may do that`. An LLM can read that string and change course without a lookup table.
 
@@ -76,7 +76,7 @@ Recommendation: agents do not enter. Presence (global) says whether they can ans
 
 The server has no rate limit. Two participant agents that each reply to every message loop without bound. Each reply is a stored row and a fan-out.
 
-The obvious guard is to answer only when addressed. The model has no addressing, and the terminal client already uses `@name` for a group (`go/internal/tui/app.go:627`). A mention syntax must not collide with it.
+The obvious guard is to answer only when addressed. The model has no addressing, and the terminal client already uses `@name` for a group (`go/internal/tui/app.go:630`). A mention syntax must not collide with it.
 
 Guards, cheapest first:
 
@@ -114,9 +114,7 @@ Recommendation: whole replies.
 
 ### 3.8 A long reply closes the agent's socket
 
-`go/internal/socket` never calls `SetReadLimit`, so the server accepts inbound frames up to `coder/websocket`'s default of 32768 bytes (`read.go:107` in v1.8.15). A larger frame fails the read and closes the connection. The client raises its own limit to 16 MiB (`go/internal/client/transport.go:32`); the server does not.
-
-LLM output over 32 KiB is plausible. The contract states no body limit. Either state one in wire-contract 6 and refuse above it with a readable error, or raise the server's read limit. A refusal is better for an agent than a closed socket: it can retry shorter.
+Resolved. The contract now states a body limit of 64 KiB, refused with a readable error, under a frame limit of 1 MiB (wire-contract 5 and 6).
 
 ### 3.9 A blocking agent is disconnected
 
@@ -142,13 +140,11 @@ A token per agent, revocable and scoped, is the right shape once the server is e
 
 1. `kind` on the user object. Unblocks 3.2 and guard 1 of 3.5.
 
-2. A stated body limit and a refusal above it. Fixes 3.8.
+2. Agents refused in transient rooms. Implements 3.1 option 1; depends on 1.
 
-3. Agents refused in transient rooms. Implements 3.1 option 1; depends on 1.
+3. `backend` on an agent's user object: free text naming where its context goes. Informational only.
 
-4. `backend` on an agent's user object: free text naming where its context goes. Informational only.
-
-5. A per-account send rate. Guard 3 of 3.5.
+4. A per-account send rate. Guard 3 of 3.5.
 
 Each is a conformance test first, as sections 9 to 11 were.
 

@@ -82,6 +82,44 @@ func TestRemovalIsAnnouncedToThePersonRemoved(t *testing.T) {
 	same(t, obj(event["room"])["audience"], []string{"alice"})
 }
 
+// The room push shows who is left; roomGone is what tells the removed to drop it.
+func TestRemovalTellsThePersonRemovedToDropTheRoom(t *testing.T) {
+	alice, bob := connect(t, "alice"), connect(t, "bob")
+	room := alice.Call("open", "invite", []string{"bob"}, "title", unique("Dropped"))
+	bob.Drain()
+	alice.Call("uninvite", "room", room["id"], "principal", "bob")
+	bob.ExpectPush(gone(room["id"]))
+}
+
+func TestLeavingIsAnnouncedAsTheRoomGoingAway(t *testing.T) {
+	alice, bob := connect(t, "alice"), connect(t, "bob")
+	room := alice.Call("open", "invite", []string{"bob"}, "title", unique("Left"))
+	bob.Drain()
+	bob.Call("leave", "room", room["id"])
+	bob.ExpectPush(gone(room["id"]))
+}
+
+// Or someone removed could keep a transient room alive by sitting in it.
+func TestRemovalReleasesThePlaceTheRemovedHeld(t *testing.T) {
+	alice, bob := connect(t, "alice"), connect(t, "bob")
+	room := alice.Call("open", "invite", []string{"bob"}, "title", unique("Evicted"), "retention", "transient")
+	bob.Call("enter", "room", room["id"])
+	reply := alice.Call("uninvite", "room", room["id"], "principal", "bob")
+	same(t, obj(reply["room"])["occupants"], []any{})
+	same(t, byID(alice.Call("sync")["rooms"])[str(room["id"])]["occupants"], []any{})
+}
+
+func TestLosingAGroupReleasesThePlaceItGave(t *testing.T) {
+	demo, bob := connect(t, admin), connect(t, "bob")
+	team := demo.Call("group.create", "name", unique("Team"), "members", []string{"bob"})
+	room := demo.Call("create", "title", unique("Seated"), "invite", []any{group(team["id"])})
+	bob.Call("enter", "room", room["id"])
+	demo.Call("group.unassign", "group", team["id"], "username", "bob")
+
+	bob.ExpectPush(gone(room["id"]))
+	same(t, byID(demo.Call("sync")["rooms"])[str(room["id"])]["occupants"], []any{})
+}
+
 func TestEnteringARoomIsAnnouncedToItsAudience(t *testing.T) {
 	alice, bob := connect(t, "alice"), connect(t, "bob")
 	room := alice.Call("open", "invite", []string{"bob"}, "title", unique("Arrived"))
@@ -96,11 +134,12 @@ func TestEnteringARoomIsAnnouncedToItsAudience(t *testing.T) {
 
 func TestUnsubscribingIsAnnouncedAsTheChannelGoingAway(t *testing.T) {
 	bob := connect(t, "bob")
+	channel := connect(t, admin).Call("channel.create", "title", unique("Leaving"), "groups", []string{})
+	bob.Call("subscribe", "channel", channel["id"])
 	bob.Drain()
-	bob.Call("unsubscribe", "channel", systemChannel)
+	bob.Call("unsubscribe", "channel", channel["id"])
 
-	same(t, bob.ExpectPush(PushOf("roomGone"))["room"], systemChannel)
-	bob.Call("subscribe", "channel", systemChannel)
+	same(t, bob.ExpectPush(PushOf("roomGone"))["room"], channel["id"])
 }
 
 func TestLosingAGroupTakesItsRoomsAway(t *testing.T) {
@@ -124,10 +163,13 @@ func TestAGroupChangeIsAnnouncedToEveryone(t *testing.T) {
 	same(t, obj(alice.ExpectPush(PushOf("group"))["group"])["name"], name)
 }
 
+// Presence depends on every connection a user has, so these tests take a server
+// of their own: another test's socket for bob, still closing, would hide his arrival.
 func TestArrivingAndLeavingAreAnnouncedAsPresence(t *testing.T) {
-	alice := connect(t, "alice")
+	server := freshServer(t, nil)
+	alice := attach(t, server, "alice")
 	alice.Drain()
-	socket := dial(t, shared.Base, session(t, "bob").CookieHeader())
+	socket := dial(t, server.Base, login(t, server, "bob").CookieHeader())
 	socket.Handshake()
 
 	arrival := alice.ExpectPush(func(e Obj) bool { return e["type"] == "presence" && e["username"] == "bob" })
@@ -143,8 +185,9 @@ func TestArrivingAndLeavingAreAnnouncedAsPresence(t *testing.T) {
 // It is a fact about a person, and this one already knows it. Proved by bob's
 // arrival, which must reach alice: a frame about alice would be queued ahead.
 func TestPresenceDoesNotComeBackToItsSubject(t *testing.T) {
-	alice := connect(t, "alice")
-	socket := dial(t, shared.Base, session(t, "bob").CookieHeader())
+	server := freshServer(t, nil)
+	alice := attach(t, server, "alice")
+	socket := dial(t, server.Base, login(t, server, "bob").CookieHeader())
 	socket.Handshake()
 	_, before := alice.CollectPush(func(e Obj) bool { return e["type"] == "presence" && e["username"] == "bob" })
 	socket.Close()
@@ -152,6 +195,36 @@ func TestPresenceDoesNotComeBackToItsSubject(t *testing.T) {
 	for _, event := range before {
 		truth(t, obj(event)["username"] != "alice", "alice was told about herself: %s", encode(event))
 	}
+}
+
+// Closing one of two connections leaves the person online. The laptop holds a
+// room, so its release proves the server has handled the close; demo's arrival
+// then marks the point by which a wrong departure would have reached alice.
+func TestPresenceIsAboutThePersonNotTheConnection(t *testing.T) {
+	server := freshServer(t, nil)
+	alice := attach(t, server, "alice")
+	laptop := attach(t, server, "bob")
+	phone := attach(t, server, "bob")
+	room := alice.Call("open", "invite", []string{"bob"}, "title", unique("Devices"))
+	laptop.Call("enter", "room", room["id"])
+	alice.ExpectPush(func(e Obj) bool {
+		return e["type"] == "room" && obj(e["room"])["id"] == room["id"] && len(list(obj(e["room"])["occupants"])) > 0
+	})
+
+	laptop.Close()
+	alice.ExpectPush(func(e Obj) bool {
+		return e["type"] == "room" && obj(e["room"])["id"] == room["id"] && len(list(obj(e["room"])["occupants"])) == 0
+	})
+	attach(t, server, admin)
+	_, before := alice.CollectPush(func(e Obj) bool { return e["type"] == "presence" && e["username"] == admin })
+	for _, event := range before {
+		truth(t, obj(event)["type"] != "presence", "presence changed while bob was still connected: %s", encode(event))
+	}
+
+	phone.Close()
+	alice.ExpectPush(func(e Obj) bool {
+		return e["type"] == "presence" && e["username"] == "bob" && e["online"] == false
+	})
 }
 
 // Or a transient room nobody is in would stay alive forever.

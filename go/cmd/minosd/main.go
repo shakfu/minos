@@ -40,6 +40,9 @@ func main() {
 
 func run() error {
 	settings := config.Load()
+	if os.Getenv("MINOS_SECRET") == "" {
+		log.Print("MINOS_SECRET is unset, so sessions are signed with a public development key.")
+	}
 
 	for _, directory := range []string{settings.VfsRoot, settings.RunDir} {
 		if err := os.MkdirAll(directory, 0o755); err != nil {
@@ -54,7 +57,7 @@ func run() error {
 		log.Printf("No client build in %s; serving the API only.", settings.Dist)
 	}
 
-	store, err := timeline.Open(settings.DatabasePath(), config.HistoryLimit, settings.Grace)
+	store, err := timeline.Open(settings.DatabasePath(), config.HistoryLimit, settings.Grace, settings.Unentered)
 	if err != nil {
 		return fmt.Errorf("cannot open the timeline: %w", err)
 	}

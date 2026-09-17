@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 var cspDirectives = []string{
@@ -63,14 +64,57 @@ func TestLogoutEndsTheSession(t *testing.T) {
 	same(t, h.Settings().Status, http.StatusForbidden)
 }
 
+// A copy of the cookie taken before logout must not outlive it.
+func TestLogoutRevokesTheSessionOnTheServer(t *testing.T) {
+	h := session(t, "alice")
+	copied := http.Header{"Cookie": {h.CookieHeader()}}
+	h.Logout()
+	same(t, anonymous(t).Call("GET", "/settings", nil, nil, nil, copied).Status, http.StatusForbidden)
+}
+
+func TestLogoutClosesTheSessionsSockets(t *testing.T) {
+	h := session(t, "alice")
+	socket := dial(t, shared.Base, h.CookieHeader())
+	socket.Handshake()
+	same(t, h.Logout().Status, http.StatusOK)
+	select {
+	case <-socket.Closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the socket outlived its session")
+	}
+}
+
 func TestEveryOtherRouteNeedsASession(t *testing.T) {
-	for _, route := range [][2]string{{"GET", "/settings"}, {"POST", "/settings"}, {"GET", "/vfs/readdir"}} {
+	for _, route := range [][2]string{
+		{"GET", "/settings"}, {"POST", "/settings"}, {"GET", "/vfs/readdir"}, {"POST", "/logout"},
+	} {
 		t.Run(route[0]+route[1], func(t *testing.T) {
 			response := anonymous(t).Call(route[0], route[1], nil, nil, nil, nil)
 			same(t, response.Status, http.StatusForbidden)
 			same(t, response.Refusal(), "Not authenticated")
 		})
 	}
+}
+
+// A page on another origin may POST text/plain without a preflight.
+func TestAPostThatIsNotJSONIsRefused(t *testing.T) {
+	h := session(t, "alice")
+	path := "home:/" + unique("plain")
+	body := []byte(`{"path": "` + path + `"}`)
+	plain := http.Header{"Content-Type": {"text/plain"}}
+
+	for _, route := range []string{"/vfs/mkdir", "/settings", "/login", "/logout"} {
+		t.Run(route, func(t *testing.T) {
+			same(t, h.Call("POST", route, nil, nil, body, plain).Status, http.StatusUnsupportedMediaType)
+		})
+	}
+	same(t, h.Vfs("exists", Obj{"path": path}).JSON(), false)
+}
+
+func TestARequestBodyOverAMebibyteIsTooLarge(t *testing.T) {
+	h := session(t, admin)
+	response := h.PutSettings(Obj{"big": strings.Repeat("x", 1<<20)})
+	same(t, response.Status, http.StatusRequestEntityTooLarge)
 }
 
 // -- headers ------------------------------------------------------------------
@@ -208,6 +252,33 @@ func TestCopyAndRename(t *testing.T) {
 	same(t, h.Vfs("rename", Obj{"from": "home:/" + stem + "-b.txt", "to": "home:/" + stem + "-c.txt"}).JSON(), true)
 	same(t, h.Vfs("exists", Obj{"path": "home:/" + stem + "-b.txt"}).JSON(), false)
 	same(t, readFile(h, url.Values{"path": {"home:/" + stem + "-c.txt"}}).Text(), "data")
+}
+
+// A copy that truncated its destination first would empty its own source.
+func TestCopyOntoItselfIsRefused(t *testing.T) {
+	h := session(t, "alice")
+	path := "home:/" + unique("self") + ".txt"
+	h.Upload(path, []byte("data"))
+
+	same(t, h.Vfs("copy", Obj{"from": path, "to": path}).Status, http.StatusBadRequest)
+	same(t, readFile(h, url.Values{"path": {path}}).Text(), "data")
+}
+
+// A copy that walked what it was creating would never finish.
+func TestCopyIntoItselfIsRefused(t *testing.T) {
+	h := session(t, "alice")
+	directory := "home:/" + unique("tree")
+	h.Upload(directory+"/one.txt", []byte("1"))
+
+	same(t, h.Vfs("copy", Obj{"from": directory, "to": directory + "/inner"}).Status, http.StatusBadRequest)
+	same(t, h.Vfs("exists", Obj{"path": directory + "/inner"}).JSON(), false)
+}
+
+func TestAMountpointCannotBeDeletedOrMoved(t *testing.T) {
+	h := session(t, "alice")
+	same(t, h.Vfs("unlink", Obj{"path": "home:/"}).Status, http.StatusForbidden)
+	same(t, h.Vfs("rename", Obj{"from": "home:/", "to": "home:/" + unique("moved")}).Status, http.StatusForbidden)
+	same(t, h.Vfs("exists", Obj{"path": "home:/"}).JSON(), true)
 }
 
 func TestSearchWrapsABarePatternInWildcards(t *testing.T) {

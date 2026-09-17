@@ -133,6 +133,8 @@ A transient room exists for the duration of a conversation and is then deleted, 
 
 **It ends when the last occupant leaves, after a grace period.** The grace period is not a detail — without it, a dropped connection, a page reload or a closed laptop lid destroys a live conversation. The sequence is: occupancy falls to zero, the room records the moment it emptied, and it is deleted once the grace expires. Anyone re-entering before then cancels the deletion.
 
+**A room nobody enters ends too, after 15 minutes.** It never empties, so the grace period never starts, and without a limit of its own it would last until the server restarts. The limit counts from when the room was raised, and is longer than the grace period because the people invited may not have arrived yet. Entering at any point before it runs out puts the room back on the grace period's terms.
+
 The duration is a genuine tension rather than a tuning exercise. Too short and an accidental disconnect loses the conversation. Too long and the room lingers after the participants believed it was gone — and deletion here is a promise made to the people who spoke in it, not merely a retention policy. Somewhere around two minutes is the right order of magnitude; it should be configurable, and it should be documented to users, because they are relying on it.
 
 Two mechanical consequences:

@@ -229,6 +229,50 @@ func TestLeavingARoomOneIsNotInIsRefused(t *testing.T) {
 	same(t, bob.Refuse("leave", "room", room["id"]), "Not invited to that room")
 }
 
+// Nobody could reach a room with no grants, so an ad-hoc one goes.
+func TestTheLastParticipantLeavingDeletesAnAdHocRoom(t *testing.T) {
+	alice := connect(t, "alice")
+	room := alice.Call("open", "invite", []string{}, "title", unique("Last"))
+	alice.Drain()
+	same(t, alice.Call("leave", "room", room["id"]), Obj{"ok": true})
+	alice.ExpectPush(gone(room["id"]))
+	same(t, alice.Refuse("history", "room", room["id"], "since", 0), fmt.Sprintf("No such room: %v", room["id"]))
+}
+
+// A permanent room's history is the organisation's, so its last grant stays.
+func TestAPermanentRoomKeepsItsLastGrant(t *testing.T) {
+	demo := connect(t, admin)
+	room := demo.Call("create", "title", unique("Kept"), "invite", []string{})
+	same(t, demo.Refuse("leave", "room", room["id"]), "A permanent room keeps its last grant")
+	same(t, demo.Refuse("uninvite", "room", room["id"], "principal", admin), "A permanent room keeps its last grant")
+}
+
+func TestUninvitingTheLastGrantAnswersANullRoom(t *testing.T) {
+	alice := connect(t, "alice")
+	room := alice.Call("open", "invite", []string{}, "title", unique("Gone"))
+	null(t, alice.Call("uninvite", "room", room["id"], "principal", "alice"), "room")
+}
+
+// A body is bounded below the frame limit, so an agent gets a refusal it can
+// read rather than a closed socket.
+func TestABodyOver64KiBIsRefused(t *testing.T) {
+	alice := connect(t, "alice")
+	room := alice.Call("open", "invite", []string{}, "title", unique("Long"))
+	long := strings.Repeat("x", 64<<10+1)
+	same(t, alice.Refuse("send", "room", room["id"], "body", long), "A message is at most 65536 bytes")
+	alice.Call("send", "room", room["id"], "body", long[1:])
+}
+
+func TestANameOver200CharactersIsRefused(t *testing.T) {
+	demo := connect(t, admin)
+	long := strings.Repeat("n", 201)
+	refusal := "A name is at most 200 characters"
+	same(t, demo.Refuse("open", "invite", []string{}, "title", long), refusal)
+	same(t, demo.Refuse("create", "title", long, "invite", []string{}), refusal)
+	same(t, demo.Refuse("channel.create", "title", long, "groups", []string{}), refusal)
+	same(t, demo.Refuse("group.create", "name", long, "members", []string{}), refusal)
+}
+
 // -- occupancy ----------------------------------------------------------------
 
 func TestEnteringTakesAPlaceThatShowsInTheRoom(t *testing.T) {
@@ -550,12 +594,23 @@ func TestAVisitOutlivesAccess(t *testing.T) {
 
 func TestASubscriptionCanBeDroppedAndRetaken(t *testing.T) {
 	bob := connect(t, "bob")
-	same(t, bob.Call("unsubscribe", "channel", systemChannel), Obj{"ok": true})
-	_, listed := byID(bob.Call("sync")["channels"])[systemChannel]
-	truth(t, !listed, "bob still lists %s", systemChannel)
+	founded := connect(t, admin).Call("channel.create", "title", unique("Optional"), "groups", []string{})
+	bob.Call("subscribe", "channel", founded["id"])
+	same(t, bob.Call("unsubscribe", "channel", founded["id"]), Obj{"ok": true})
+	_, listed := byID(bob.Call("sync")["channels"])[str(founded["id"])]
+	truth(t, !listed, "bob still lists %v", founded["id"])
 
-	channel := bob.Call("subscribe", "channel", systemChannel)
+	channel := bob.Call("subscribe", "channel", founded["id"])
 	truth(t, has(channel["audience"], "bob"), "bob is not in %v", channel["audience"])
+}
+
+// The server is system's only producer, and every account its audience.
+func TestSystemIsTheServers(t *testing.T) {
+	demo, bob := connect(t, admin), connect(t, "bob")
+	same(t, bob.Refuse("unsubscribe", "channel", systemChannel), "Every account receives system")
+	same(t, demo.Refuse("channel.publish", "channel", systemChannel, "body", "hi"), "Only the server writes to system")
+	same(t, demo.Refuse("channel.appoint", "channel", systemChannel, "username", "bob"), "Only the server writes to system")
+	same(t, bob.Refuse("channel.submit", "channel", systemChannel, "body", "hi"), "That channel accepts no submissions")
 }
 
 func TestARoomIsNotAChannelToSubscribeTo(t *testing.T) {
@@ -582,6 +637,18 @@ func TestAFilesystemChangeIsAnnouncedOnTheSystemChannel(t *testing.T) {
 
 	messages := alice.Call("history", "room", systemChannel, "since", before)["messages"]
 	want := "alice wrote home:/" + name + ".txt"
+	truth(t, has(pluck(messages, "body"), want), "no %q in %s", want, encode(messages))
+}
+
+// A path is the caller's text, and a newline in it would start a second line.
+func TestAControlCharacterInAnAnnouncedPathIsReplaced(t *testing.T) {
+	alice := connect(t, "alice")
+	name := unique("line")
+	before := alice.Call("history", "room", systemChannel, "since", 0)["lastSeq"]
+	session(t, "alice").Vfs("touch", Obj{"path": "home:/" + name + "\nbob deleted home:/all"})
+
+	messages := alice.Call("history", "room", systemChannel, "since", before)["messages"]
+	want := "alice touched home:/" + name + "?bob deleted home:/all"
 	truth(t, has(pluck(messages, "body"), want), "no %q in %s", want, encode(messages))
 }
 

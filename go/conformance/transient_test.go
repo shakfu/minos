@@ -87,13 +87,40 @@ func TestReturningDuringTheGracePeriodRescuesTheRoom(t *testing.T) {
 	truth(t, listed(alice, room["id"]), "the room was deleted")
 }
 
-// The countdown starts from emptying, and a room never filled never empties.
-func TestARoomNobodyEverEnteredDoesNotExpire(t *testing.T) {
+// The grace period counts from emptying, and a room never entered never emptied.
+func TestARoomNobodyEnteredOutlivesTheGrace(t *testing.T) {
 	alice := attach(t, freshServer(t, grace), "alice")
 
 	room := alice.Call("open", "invite", []string{}, "retention", "transient", "title", unique("Untouched"))
 
 	awaitASweep(alice)
+	truth(t, listed(alice, room["id"]), "the room was deleted")
+}
+
+// unentered is grace, with rooms nobody enters kept for two seconds.
+var unentered = map[string]string{"MINOS_ROOM_GRACE": "1", "MINOS_ROOM_SWEEP": "1", "MINOS_ROOM_UNENTERED": "2"}
+
+// Or a meeting nobody came to would be kept until the server restarts.
+func TestARoomNobodyEntersIsDeletedInTime(t *testing.T) {
+	server := freshServer(t, unentered)
+	alice, bob := attach(t, server, "alice"), attach(t, server, "bob")
+
+	room := alice.Call("open", "invite", []string{"bob"}, "retention", "transient", "title", unique("Unattended"))
+
+	bob.ExpectPushWithin(gone(room["id"]), deletionTimeout)
+	same(t, alice.Refuse("history", "room", room["id"], "since", 0), "No such room: "+str(room["id"]))
+}
+
+// Someone in it is not nobody, however long ago the room was raised.
+func TestAnOccupiedRoomOutlivesTheUnenteredPeriod(t *testing.T) {
+	server := freshServer(t, unentered)
+	alice, bob := attach(t, server, "alice"), attach(t, server, "bob")
+
+	room := alice.Call("open", "invite", []string{}, "retention", "transient", "title", unique("Attended"))
+	alice.Call("enter", "room", room["id"])
+
+	awaitASweep(bob)
+	awaitASweep(bob)
 	truth(t, listed(alice, room["id"]), "the room was deleted")
 }
 

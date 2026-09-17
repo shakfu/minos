@@ -50,7 +50,7 @@ A type with a key allows a second read: the latest item per key. This is log com
 
 Not a property of the type. Every item is delivered.
 
-A live connection never skips a frame. Its outbound queue is FIFO with one writer, and a full queue closes the connection rather than dropping a frame (`go/internal/socket/socket.go:117`). The queue holds 256 frames, so at 100 items a second a client that stalls for 2.6 seconds loses its connection. The client does not reconnect (`TODO.md`, *Open*).
+A live connection never skips a frame. Its outbound queue is FIFO with one writer, and a full queue closes the connection rather than dropping a frame (`go/internal/socket/socket.go:121`). The queue holds 256 frames, so at 100 items a second a client that stalls for 2.6 seconds loses its connection. The client reconnects and backfills what it missed through `history`.
 
 A **latest** policy, replacing a queued item with a newer one for the same key, was considered and rejected. It would be the first mechanism to skip a frame on a live connection. The client would see the gap, request `history`, and receive the items coalescing skipped, which is a repair request per coalesced item. Avoiding that means telling the client not to repair, which makes wire-contract 8 conditional.
 
@@ -117,7 +117,7 @@ Additive, in the style of wire-contract 9-11.
 
 - A channel's `types` may gain a version and may not lose one. A client holding `stock-quote@1` items must still find the type accepted after `@2` is added.
 
-- Frames are bounded. The server's inbound limit is 32768 bytes today (agents.md 3.8). A type states a maximum payload that fits under the limit the contract states.
+- Frames are bounded. A body is at most 64 KiB (wire-contract 6). A type states a maximum payload that fits under it.
 
 ### 4.3 Operations
 

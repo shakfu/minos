@@ -28,6 +28,7 @@ Read from the environment. A server that ignores these cannot be tested.
 | `MINOS_DIST` | `./dist` | the `osjs:` mountpoint, and the static build |
 | `MINOS_SECRET` | a development value | session cookie signing key |
 | `MINOS_ROOM_GRACE` | `120` | seconds a transient room outlives its last occupant |
+| `MINOS_ROOM_UNENTERED` | `900` | seconds a transient room lasts that nobody has entered |
 | `MINOS_ROOM_SWEEP` | `15` | seconds between sweeps for expired rooms and due archival |
 | `MINOS_WS_PING` | `30` | seconds of client silence before a keepalive frame |
 
@@ -36,7 +37,15 @@ alone; `/` then answers 404 while every other route works.
 
 ## 2. Sessions
 
-A cookie session, `SameSite=Lax`, lifetime 12 hours, refreshed on each request.
+A cookie session, `SameSite=Lax`, lifetime 12 hours, refreshed on each request,
+`/ping` included. However often it is refreshed, a session ends 7 days after
+login.
+
+`/logout` ends the session on the server: the same cookie is refused afterwards,
+and every websocket the session opened is closed. A websocket also closes when
+its session reaches the 7-day limit. A server may forget a logout when it
+restarts; the limit still applies.
+
 The profile it carries is the frozen shape:
 
 ```json
@@ -70,7 +79,14 @@ is a flat map of namespaces that clients merge into.
 
 One shape, always: `{"error": "<message>"}` with an HTTP status. 400 for a bad
 request, 403 for authentication and permission, 404 for a missing path or
-method, 409 for a collision.
+method, 409 for a collision, 413 for a body over its limit, 415 for a JSON POST
+whose `Content-Type` is not `application/json`.
+
+A `writefile` body is at most 100 MiB, and any other request body at most 1 MiB.
+
+The 415 refusal reads `Requests must be JSON` and comes after the session check.
+A page on another origin can send `text/plain` without a CORS preflight, but not
+`application/json`.
 
 ### Security headers
 
@@ -89,7 +105,8 @@ a `ws://` socket opened from an `http://` page.
 
 Paths are `<mountpoint>:/<path>`. Two mountpoints: `home:` per user, writable;
 `osjs:` the build directory, read-only for everyone. A resolved path outside
-its mountpoint root is 403, and a write to `osjs:` is 403.
+its mountpoint root is 403, and a write to `osjs:` is 403. A symlink that leads
+outside its mountpoint is not followed; the path reads as absent.
 
 `capabilities`, `exists`, `stat`, `readdir` and `readfile` are GETs with query
 parameters; `options` arrives as a JSON string and an unparseable one means
@@ -105,10 +122,10 @@ fields `path` and `upload`.
 | `readfile` | `path`, `options.download` | the bytes |
 | `writefile` | `path`, `upload` | bytes written, as a number |
 | `mkdir` | `path`, `options.ensure` | `true`; 409 if it exists and `ensure` is false |
-| `unlink` | `path` | `true`; 404 if absent; recursive for a directory |
+| `unlink` | `path` | `true`; 404 if absent; recursive for a directory; 403 for a mountpoint's root |
 | `touch` | `path` | `true`, creating parents |
-| `copy` | `from`, `to` | `true` |
-| `rename` | `from`, `to` | `true` |
+| `copy` | `from`, `to` | `true`; 400 if `to` is `from`, or lies inside it |
+| `rename` | `from`, `to` | `true`; 403 if either is a mountpoint's root |
 | `search` | `root`, `pattern`, | descriptors, at most 100 |
 
 A descriptor:
@@ -143,6 +160,10 @@ One websocket at `/`, sharing the path with the index route. The upgrade is
 gated on the session: without one the server accepts the upgrade and then
 closes with code **1008** and reason `Not authenticated`.
 
+An upgrade whose `Origin` names another host is refused with 403 before it
+completes. An upgrade with no `Origin`, as a client that is not a browser sends,
+is accepted.
+
 Every frame, both directions:
 
 ```json
@@ -166,7 +187,8 @@ Exactly one name is accepted: `osjs/application:socket:message`. Any other name
 beginning with `osjs` is refused as forged and logged -- without it a page could
 fabricate `osjs/core:logged-in` and drive handlers that trust it. Anything else
 is dropped as unhandled. A malformed frame, a non-string `name`, or a `params`
-that is not a list is dropped. **None of these close the socket.**
+that is not a list is dropped. **None of these close the socket.** The exception
+is a frame over 1 MiB, which closes it with code **1009**.
 
 ### The application envelope
 
@@ -287,6 +309,12 @@ from `read`.
 - `leave` removes a grant naming the user directly. Access inherited from a
   group is refused, because dropping it would be restored the moment grants
   were re-evaluated.
+- A room with no grants is reachable by nobody. So `leave` or `uninvite` of an
+  ad-hoc room's last grant deletes the room, and `uninvite` answers
+  `{ok: true, room: null}`. The last grant of a permanent room is refused with
+  `A permanent room keeps its last grant`.
+- Losing access to a room, by `leave`, `uninvite` or `group.unassign`, releases
+  every place the user held in it, and the user is sent a `roomGone`.
 - `send` to a channel is refused: a channel is read-only to its audience.
 - `channel.create` is administrators only. Its title is unique among channels,
   compared without case, for the reason a permanent room's is among rooms.
@@ -309,7 +337,11 @@ from `read`.
 - Revoking the last group leaves the channel open rather than closed to
   everybody: open is the absence of a rule, so there is no way to write "nobody"
   and no reason to.
-- An empty or whitespace-only body is refused.
+- An empty or whitespace-only body is refused. A body over 64 KiB, as UTF-8
+  bytes, is refused with `A message is at most 65536 bytes`; so is a
+  `submission.reject` comment.
+- A title given to `open`, `create` or `channel.create`, and a group's name, is at
+  most 200 characters, refused with `A name is at most 200 characters`.
 - `exit` may only release an occupancy the same connection took. Another
   connection's is refused with `Not in that room`.
 - A user occupies at most one room. `enter` first releases every occupancy the
@@ -326,13 +358,19 @@ from `read`.
 ### Lifecycle
 
 - A connection that closes releases every occupancy it held.
-- Presence is announced on connect and on disconnect.
-- A transient room with no occupants is deleted `MINOS_ROOM_GRACE` seconds
-  later, and its audience is told before it goes.
+- Presence is a user's, not a connection's. It is announced when a user's first
+  connection opens and when their last one closes, and not in between.
+- A transient room whose last occupant has left is deleted `MINOS_ROOM_GRACE`
+  seconds later, and its audience is told before it goes.
+- A transient room that nobody has entered is deleted `MINOS_ROOM_UNENTERED`
+  seconds after it was raised, and its audience is told the same way.
 - The `system` channel exists at start-up, titled `System`, with every account
-  subscribed. The server is its only producer.
+  subscribed. The server is its only producer. `channel.publish` and
+  `channel.appoint` on it are refused with `Only the server writes to system`,
+  and `unsubscribe` with `Every account receives system`.
 - A successful VFS mutation posts an event to `system`:
-  `<user> wrote|created|deleted|touched|renamed|copied <path>`. A failure to
+  `<user> wrote|created|deleted|touched|renamed|copied <path>`, with each control
+  character in the path replaced by `?`. A failure to
   post is swallowed; the mutation has already happened.
 
 ## 7. Pushes
@@ -357,9 +395,10 @@ travels on the `room` push instead, in `occupants`: presence says whether someon
 could reply, occupancy says who is in this room, and only the second decides when
 a transient room dies.
 
-`roomGone` covers three causes and does not distinguish them: a transient room
-expired, a user unsubscribed from a channel, or a group assignment was
-withdrawn and took the user's last access with it.
+`roomGone` covers four causes and does not distinguish them: a room was deleted,
+by expiry or with its last grant; a user unsubscribed from a channel; a grant was
+withdrawn by `leave` or `uninvite`; or a group assignment was withdrawn and took
+the user's last access with it. A user who keeps access another way is not sent one.
 
 ## 8. Delivery
 

@@ -27,10 +27,26 @@ func TestWrapFillsLinesAsTextwrapDoes(t *testing.T) {
 		{"a\tb\nc", 10, []string{"a b c"}},
 		{"", 10, nil},
 		{"   ", 10, nil},
+		// Two cells each: a line of five cells holds two.
+		{"日本語です", 5, []string{"日本", "語で", "す"}},
+		{"ab 日本語", 5, []string{"ab 日", "本語"}},
 	} {
 		if got := wrap(case_.text, case_.width); !slices.Equal(got, case_.want) {
 			t.Errorf("wrap(%q, %d) = %q, want %q", case_.text, case_.width, got, case_.want)
 		}
+	}
+}
+
+// A wide character takes two cells, so a field of five holds two of them and
+// nothing spills past it. A bidi override is shown, not obeyed.
+func TestPutMeasuresCellsAndShowsControls(t *testing.T) {
+	screen := simulated(t, 8, 1)
+	ui := &Ui{screen: screen}
+	ui.put(0, 0, "日本語", 5, plain, false)
+	ui.put(0, 5, "x\u202ey", 3, plain, false)
+	screen.Show()
+	if got := contents(screen); got != "日 本  x?y" {
+		t.Fatalf("drew %q", got)
 	}
 }
 

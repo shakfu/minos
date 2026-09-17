@@ -42,6 +42,19 @@ type ChatError struct{ Message string }
 
 func (e *ChatError) Error() string { return e.Message }
 
+// seat is one occupancy: its room, and the id the server currently holds it as.
+// A stale seat was lost with its connection and is not yet entered again.
+type seat struct {
+	room, current string
+	stale         bool
+}
+
+// How long a reconnect waits before its first attempt, and at most between them.
+const (
+	reconnectFirst = 250 * time.Millisecond
+	reconnectMost  = 30 * time.Second
+)
+
 // Principal is who a grant admits: a user, or a whole group.
 type Principal struct {
 	Kind string `json:"kind"`
@@ -162,9 +175,15 @@ type Client struct {
 	// until then, and nothing reopens it, so forgetting a room keeps its entry.
 	visited map[string]bool
 
-	// Occupancies this connection holds. The server may release one when the user
-	// enters a room on another connection, and says so with an exited push.
-	occupancies map[string]bool
+	// Occupancies this client holds, by the id Enter first returned, with the room
+	// and the id the server knows it by now. A reconnect enters the room again
+	// under a new id; the first stays the caller's handle. The server may release
+	// one when the user enters a room on another connection, with an exited push.
+	occupancies map[string]seat
+
+	// login signs in again before a reconnect, since the session may have ended.
+	login        func() error
+	reconnecting bool
 
 	pid     int64
 	pending map[int64]chan json.RawMessage
@@ -190,7 +209,7 @@ func NewClient(socket *Socket) *Client {
 		cursors:     map[string]int64{},
 		repairing:   map[string]chan struct{}{},
 		opened:      map[string]map[int64]bool{},
-		occupancies: map[string]bool{},
+		occupancies: map[string]seat{},
 		visited:     map[string]bool{},
 		pending:     map[int64]chan json.RawMessage{},
 		wake:        make(chan struct{}, 1),
@@ -198,7 +217,7 @@ func NewClient(socket *Socket) *Client {
 		onChange:    func() {},
 		onNotice:    func(string) {},
 	}
-	socket.OnFrame, socket.OnClose = c.onFrame, c.failPending
+	socket.OnFrame, socket.OnClose = c.onFrame, c.lost
 	go c.applyPushes()
 	return c
 }
@@ -342,6 +361,91 @@ func (c *Client) failPending() {
 	c.changed()
 }
 
+// lost handles a connection that closed without being asked to: pending
+// requests fail, and a reconnect starts unless one is already running.
+func (c *Client) lost() {
+	c.failPending()
+	c.mutex.Lock()
+	// The server released every place this connection held when it closed.
+	for handle, place := range c.occupancies {
+		place.stale = true
+		c.occupancies[handle] = place
+	}
+	start := !c.reconnecting
+	c.reconnecting = true
+	c.mutex.Unlock()
+	if start {
+		c.notice("Disconnected; reconnecting")
+		go c.reconnect()
+	}
+}
+
+// reconnect logs in, opens a socket and syncs, backing off between attempts.
+// The cursors survive, so the sync's backfill covers what was missed; the rooms
+// this client was in are entered again, since the server released them.
+func (c *Client) reconnect() {
+	wait := reconnectFirst
+	for {
+		select {
+		case <-c.stopping:
+			return
+		case <-time.After(wait):
+		}
+		wait = min(2*wait, reconnectMost)
+
+		if c.login != nil && c.login() != nil {
+			continue
+		}
+		if c.socket.Connect() != nil {
+			continue
+		}
+		select {
+		case <-c.stopping:
+			c.socket.Close()
+			return
+		default:
+		}
+		if _, err := c.Sync(); err != nil {
+			continue
+		}
+
+		c.mutex.Lock()
+		c.reconnecting = false
+		c.mutex.Unlock()
+		c.enterAgain()
+		c.notice("Reconnected")
+		c.changed()
+		return
+	}
+}
+
+// enterAgain takes back every place this client held before it was cut off.
+func (c *Client) enterAgain() {
+	c.mutex.Lock()
+	held := maps.Clone(c.occupancies)
+	c.mutex.Unlock()
+
+	for handle, place := range held {
+		var reply struct {
+			Occupancy string `json:"occupancy"`
+		}
+		err := c.call("enter", map[string]any{"room": place.room}, &reply)
+		c.mutex.Lock()
+		_, stillHeld := c.occupancies[handle]
+		switch {
+		case err != nil:
+			delete(c.occupancies, handle)
+		case stillHeld:
+			c.occupancies[handle] = seat{room: place.room, current: reply.Occupancy}
+		}
+		c.mutex.Unlock()
+		// Exited while this was being entered again: give the new place up too.
+		if err == nil && !stillHeld {
+			_ = c.call("exit", map[string]any{"occupancy": reply.Occupancy}, nil)
+		}
+	}
+}
+
 func (c *Client) applyPushes() {
 	for {
 		select {
@@ -450,7 +554,11 @@ func (c *Client) dispatch(raw json.RawMessage) {
 		}
 		if json.Unmarshal(raw, &event) == nil {
 			c.mutex.Lock()
-			delete(c.occupancies, event.Occupancy)
+			for handle, place := range c.occupancies {
+				if place.current == event.Occupancy {
+					delete(c.occupancies, handle)
+				}
+			}
 			c.mutex.Unlock()
 		}
 		c.changed()
@@ -688,7 +796,7 @@ func (c *Client) Enter(room string) (string, error) {
 		return "", err
 	}
 	c.mutex.Lock()
-	c.occupancies[reply.Occupancy] = true
+	c.occupancies[reply.Occupancy] = seat{room: room, current: reply.Occupancy}
 	c.visited[room] = true
 	c.mutex.Unlock()
 	return reply.Occupancy, nil
@@ -696,29 +804,67 @@ func (c *Client) Enter(room string) (string, error) {
 
 func (c *Client) Exit(occupancy string) error {
 	c.mutex.Lock()
+	place, held := c.occupancies[occupancy]
 	delete(c.occupancies, occupancy)
 	c.mutex.Unlock()
+	if held && place.stale {
+		return nil // released with the connection it was taken on
+	}
+	if held {
+		occupancy = place.current
+	}
 	return c.call("exit", map[string]any{"occupancy": occupancy}, nil)
 }
 
-// Holds is whether this connection is still in the room an occupancy was taken
-// for, rather than released by an entry elsewhere.
+// Holds is whether this client is still in the room an occupancy was taken for,
+// rather than released by an entry elsewhere.
 func (c *Client) Holds(occupancy string) bool {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	return c.occupancies[occupancy]
+	_, held := c.occupancies[occupancy]
+	return held
 }
 
 // MarkRead moves the read cursor, which is seen rather than received.
 func (c *Client) MarkRead(room string, seq int64) error {
-	c.mutex.Lock()
-	if seq <= c.read[room] {
-		c.mutex.Unlock()
+	previous, moved := c.advanceRead(room, seq)
+	if !moved {
 		return nil
 	}
+	return c.sendRead(room, seq, previous)
+}
+
+// MarkReadLater moves the read cursor here at once and tells the server without
+// waiting, for a caller that must not block, such as a screen being drawn.
+func (c *Client) MarkReadLater(room string, seq int64) {
+	if previous, moved := c.advanceRead(room, seq); moved {
+		go c.sendRead(room, seq, previous)
+	}
+}
+
+func (c *Client) advanceRead(room string, seq int64) (int64, bool) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	previous := c.read[room]
+	if seq <= previous {
+		return previous, false
+	}
 	c.read[room] = seq
-	c.mutex.Unlock()
-	return c.call("read", map[string]any{"room": room, "seq": seq}, nil)
+	return previous, true
+}
+
+// sendRead tells the server. If it refuses, the local cursor goes back, unless
+// something has moved it since, so the two do not disagree.
+func (c *Client) sendRead(room string, seq, previous int64) error {
+	err := c.call("read", map[string]any{"room": room, "seq": seq}, nil)
+	if err != nil {
+		c.mutex.Lock()
+		if c.read[room] == seq {
+			c.read[room] = previous
+		}
+		c.mutex.Unlock()
+	}
+	return err
 }
 
 func (c *Client) CreateGroup(name string, members []string) (Group, error) {
@@ -1201,6 +1347,10 @@ func Connect(base, username, password string) (*HTTP, *Client, Profile, error) {
 
 	socket := NewSocket(session)
 	client := NewClient(socket)
+	client.login = func() error {
+		_, err := session.Login(username, password)
+		return err
+	}
 	if err := socket.Connect(); err != nil {
 		client.Stop()
 		return nil, nil, profile, err

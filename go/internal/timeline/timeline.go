@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -357,6 +358,7 @@ type Timeline struct {
 	db           *sql.DB
 	historyLimit int
 	grace        time.Duration
+	unentered    time.Duration
 
 	// Presence and occupancy, both keyed by an opaque id the caller gives back.
 	live        sync.Mutex
@@ -371,7 +373,9 @@ type seat struct {
 
 func now() float64 { return float64(time.Now().UnixNano()) / float64(time.Second) }
 
-func Open(path string, historyLimit int, grace time.Duration) (*Timeline, error) {
+// Open opens the timeline. grace is how long a transient room outlives its last
+// occupant, and unentered how long one lasts that nobody has entered.
+func Open(path string, historyLimit int, grace, unentered time.Duration) (*Timeline, error) {
 	// One connection: a single writer cannot contend with itself, which removes
 	// every SQLITE_BUSY path the multi-process design had to survive.
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(wal)&_pragma=busy_timeout(10000)&_txlock=immediate")
@@ -393,6 +397,7 @@ func Open(path string, historyLimit int, grace time.Duration) (*Timeline, error)
 		db:           db,
 		historyLimit: historyLimit,
 		grace:        grace,
+		unentered:    unentered,
 		presence:     map[string]string{},
 		occupancies:  map[string]seat{},
 	}
@@ -835,12 +840,16 @@ func (t *Timeline) HasAccess(roomID, username string) (bool, error) {
 	return err == nil, err
 }
 
+// lastActive is when a room was last written to, or founded. It reads the newest
+// message by the (room_id, seq) key rather than scanning a room's messages.
+const lastActive = `COALESCE((SELECT at FROM messages WHERE room_id = r.id
+                               ORDER BY seq DESC LIMIT 1), r.created_at)`
+
 // RoomsFor is every room this user may enter, most recently active first.
 func (t *Timeline) RoomsFor(username string) ([]Room, error) {
 	ids, err := t.strings(`
         SELECT r.id
           FROM rooms r
-          LEFT JOIN messages msg ON msg.room_id = r.id
          WHERE r.kind = 'room' AND (
                EXISTS (SELECT 1 FROM grants
                         WHERE room_id = r.id AND principal_kind = 'user'
@@ -849,8 +858,7 @@ func (t *Timeline) RoomsFor(username string) ([]Room, error) {
                          JOIN group_members gm ON gm.group_id = g.principal_id
                         WHERE g.room_id = r.id AND g.principal_kind = 'group'
                           AND gm.username = ?))
-         GROUP BY r.id
-         ORDER BY COALESCE(MAX(msg.at), r.created_at) DESC`, username, username)
+         ORDER BY `+lastActive+` DESC`, username, username)
 	if err != nil {
 		return nil, err
 	}
@@ -862,14 +870,12 @@ func (t *Timeline) ChannelsFor(username string) ([]Room, error) {
         SELECT r.id
           FROM rooms r
           JOIN subscriptions s ON s.channel_id = r.id
-          LEFT JOIN messages msg ON msg.room_id = r.id
          WHERE r.kind = 'channel' AND s.username = ?
            AND (NOT EXISTS (SELECT 1 FROM channel_audience WHERE channel_id = r.id)
                 OR EXISTS (SELECT 1 FROM channel_audience ca
                              JOIN group_members gm ON gm.group_id = ca.group_id
                             WHERE ca.channel_id = r.id AND gm.username = ?))
-         GROUP BY r.id
-         ORDER BY COALESCE(MAX(msg.at), r.created_at) DESC`, username, username)
+         ORDER BY `+lastActive+` DESC`, username, username)
 	if err != nil {
 		return nil, err
 	}
@@ -890,14 +896,54 @@ func (t *Timeline) describeAll(ids []string) ([]Room, error) {
 	return rooms, nil
 }
 
-// DeleteRoom removes a room and everything that referred to it.
-func (t *Timeline) DeleteRoom(roomID string) error {
+// expired is the condition a transient room is deleted on, and its arguments.
+//
+// A room that emptied is kept for the grace period. A room with no empty_since
+// and nobody in it has never been entered, since every exit and every start-up
+// stamps one, so it is kept for the unentered period from its founding. The
+// callers check occupancy, which lives in memory rather than in the row.
+func (t *Timeline) expired() (string, []any) {
+	at := now()
+	return "retention = 'transient' AND (" +
+			"(empty_since IS NOT NULL AND ? - empty_since >= ?)" +
+			" OR (empty_since IS NULL AND ? - created_at >= ?))",
+		[]any{at, t.grace.Seconds(), at, t.unentered.Seconds()}
+}
+
+// DeleteExpired deletes a transient room whose time has run out, and reports
+// whether it did. Both conditions are checked again here, under the occupancy
+// lock: an entry since ExpiredTransientRooms listed the room keeps it.
+func (t *Timeline) DeleteExpired(roomID string) (bool, error) {
+	t.live.Lock()
+	defer t.live.Unlock()
+	if t.occupiedLocked(roomID) {
+		return false, nil
+	}
+
 	transaction, err := t.db.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer transaction.Rollback()
 
+	var found int
+	condition, args := t.expired()
+	err = transaction.QueryRow(
+		"SELECT 1 FROM rooms WHERE id = ? AND "+condition, append([]any{roomID}, args...)...).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := deleteRoomIn(transaction, roomID); err != nil {
+		return false, err
+	}
+	return true, transaction.Commit()
+}
+
+// deleteRoomIn removes a room and everything that referred to it.
+func deleteRoomIn(transaction *sql.Tx, roomID string) error {
 	for _, statement := range []string{
 		"DELETE FROM messages WHERE room_id = ?",
 		"DELETE FROM grants WHERE room_id = ?",
@@ -915,7 +961,7 @@ func (t *Timeline) DeleteRoom(roomID string) error {
 			return err
 		}
 	}
-	return transaction.Commit()
+	return nil
 }
 
 // -- grants and subscriptions ------------------------------------------------
@@ -928,10 +974,61 @@ func (t *Timeline) AddGrant(roomID, kind, id string) (bool, error) {
 		roomID, kind, id, now())
 }
 
-func (t *Timeline) RemoveGrant(roomID, kind, id string) (bool, error) {
-	return t.changed(
+// Withdrawal is what RemoveGrant did.
+type Withdrawal int
+
+const (
+	// NotGranted: there was no such grant.
+	NotGranted Withdrawal = iota
+	// Withdrawn: the grant is gone and others remain.
+	Withdrawn
+	// LastKept: it was a permanent room's last grant, and it stays.
+	LastKept
+	// RoomDeleted: it was an ad-hoc room's last grant, and the room went with it.
+	RoomDeleted
+)
+
+// RemoveGrant withdraws a grant. A room with no grants is reachable by nobody,
+// so the last one is either kept or takes the room with it, by authority: a
+// permanent room's history is the organisation's, an ad-hoc room's is not.
+func (t *Timeline) RemoveGrant(roomID, kind, id string) (Withdrawal, error) {
+	transaction, err := t.db.Begin()
+	if err != nil {
+		return NotGranted, err
+	}
+	defer transaction.Rollback()
+
+	var authority string
+	var grants, matching int
+	err = transaction.QueryRow(
+		"SELECT r.authority, count(g.room_id),"+
+			" coalesce(sum(g.principal_kind = ? AND g.principal_id = ?), 0)"+
+			" FROM rooms r LEFT JOIN grants g ON g.room_id = r.id WHERE r.id = ? GROUP BY r.id",
+		kind, id, roomID).Scan(&authority, &grants, &matching)
+	if errors.Is(err, sql.ErrNoRows) {
+		return NotGranted, nil
+	}
+	if err != nil {
+		return NotGranted, err
+	}
+
+	switch {
+	case matching == 0:
+		return NotGranted, nil
+	case grants == 1 && authority == Admin:
+		return LastKept, nil
+	case grants == 1:
+		if err := deleteRoomIn(transaction, roomID); err != nil {
+			return NotGranted, err
+		}
+		return RoomDeleted, transaction.Commit()
+	}
+	if _, err := transaction.Exec(
 		"DELETE FROM grants WHERE room_id = ? AND principal_kind = ? AND principal_id = ?",
-		roomID, kind, id)
+		roomID, kind, id); err != nil {
+		return NotGranted, err
+	}
+	return Withdrawn, transaction.Commit()
 }
 
 func (t *Timeline) Subscribe(channelID, username string) (bool, error) {
@@ -1235,19 +1332,33 @@ func (t *Timeline) Acknowledge(id string) (bool, error) {
 
 // -- presence and occupancy --------------------------------------------------
 
-// Arrive records a live connection and returns its presence id.
-func (t *Timeline) Arrive(username string) string {
+// Arrive records a live connection and returns its presence id, and whether it
+// is the user's first: presence is a fact about a user, not a connection.
+func (t *Timeline) Arrive(username string) (string, bool) {
 	id := uuid.NewString()
 	t.live.Lock()
 	defer t.live.Unlock()
+	first := !t.onlineLocked(username)
 	t.presence[id] = username
-	return id
+	return id, first
 }
 
-func (t *Timeline) Depart(presenceID string) {
+// Depart drops a connection and reports whether it was the user's last.
+func (t *Timeline) Depart(presenceID string) bool {
 	t.live.Lock()
 	defer t.live.Unlock()
+	username, ok := t.presence[presenceID]
 	delete(t.presence, presenceID)
+	return ok && !t.onlineLocked(username)
+}
+
+func (t *Timeline) onlineLocked(username string) bool {
+	for _, other := range t.presence {
+		if other == username {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *Timeline) Online() map[string]bool {
@@ -1264,19 +1375,24 @@ func (t *Timeline) Online() map[string]bool {
 //
 // Entering clears empty_since: a transient room with somebody in it is not
 // counting down, and a re-entry during the grace period is exactly the case that
-// must cancel the deletion.
+// must cancel the deletion. Both happen under the occupancy lock, which
+// DeleteExpired also holds, so a room cannot be entered as it is deleted.
 func (t *Timeline) Enter(roomID, username string) (string, error) {
-	id := uuid.NewString()
-
 	t.live.Lock()
+	cleared, err := t.changed("UPDATE rooms SET empty_since = NULL WHERE id = ?", roomID)
+	if err != nil || !cleared {
+		t.live.Unlock()
+		if err == nil {
+			err = fmt.Errorf("%w: %s", ErrNoRoom, roomID)
+		}
+		return "", err
+	}
+	id := uuid.NewString()
 	t.occupancies[id] = seat{room: roomID, user: username}
 	t.live.Unlock()
 
-	if _, err := t.db.Exec("UPDATE rooms SET empty_since = NULL WHERE id = ?", roomID); err != nil {
-		return id, err
-	}
 	// The first entry takes up the invitation.
-	_, err := t.db.Exec(
+	_, err = t.db.Exec(
 		"INSERT OR IGNORE INTO visits (room_id, username) VALUES (?, ?)", roomID, username)
 	return id, err
 }
@@ -1285,32 +1401,52 @@ func (t *Timeline) Enter(roomID, username string) (string, error) {
 //
 // When it was the last one, the room records the instant it emptied. A stored
 // fact rather than a timer, because it has to survive the process that observed
-// it.
+// it. The stamp is written under the occupancy lock, so an entry cannot slip in
+// between deciding the room is empty and saying so.
 func (t *Timeline) Exit(occupancyID string) (string, error) {
 	t.live.Lock()
+	defer t.live.Unlock()
 	held, ok := t.occupancies[occupancyID]
 	if !ok {
-		t.live.Unlock()
 		return "", nil
 	}
 	delete(t.occupancies, occupancyID)
-
-	occupied := false
-	for _, other := range t.occupancies {
-		if other.room == held.room {
-			occupied = true
-			break
-		}
-	}
-	t.live.Unlock()
-
-	if occupied {
+	if t.occupiedLocked(held.room) {
 		return held.room, nil
 	}
 	_, err := t.db.Exec(
 		"UPDATE rooms SET empty_since = ? WHERE id = ? AND empty_since IS NULL",
 		now(), held.room)
 	return held.room, err
+}
+
+// Release drops every occupancy a user holds in one room, as losing access to it
+// must, and returns how many it dropped.
+func (t *Timeline) Release(roomID, username string) (int, error) {
+	t.live.Lock()
+	var held []string
+	for id, seat := range t.occupancies {
+		if seat.room == roomID && seat.user == username {
+			held = append(held, id)
+		}
+	}
+	t.live.Unlock()
+
+	for _, id := range held {
+		if _, err := t.Exit(id); err != nil {
+			return 0, err
+		}
+	}
+	return len(held), nil
+}
+
+func (t *Timeline) occupiedLocked(roomID string) bool {
+	for _, seat := range t.occupancies {
+		if seat.room == roomID {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *Timeline) OccupantsOf(roomID string) []string {
@@ -1348,13 +1484,17 @@ func (t *Timeline) OccupanciesElsewhere(username, roomID string) []string {
 	return held
 }
 
-// ExpiredTransientRooms lists transient rooms whose grace period has run out.
+// ExpiredTransientRooms lists transient rooms whose time has run out and that
+// nobody is in.
 func (t *Timeline) ExpiredTransientRooms() ([]string, error) {
-	return t.strings(
-		"SELECT id FROM rooms"+
-			" WHERE kind = 'room' AND retention = 'transient'"+
-			"   AND empty_since IS NOT NULL AND ? - empty_since >= ?",
-		now(), t.grace.Seconds())
+	condition, args := t.expired()
+	ids, err := t.strings("SELECT id FROM rooms WHERE kind = 'room' AND "+condition, args...)
+	if err != nil {
+		return nil, err
+	}
+	t.live.Lock()
+	defer t.live.Unlock()
+	return slices.DeleteFunc(ids, t.occupiedLocked), nil
 }
 
 // -- opening and archival ----------------------------------------------------

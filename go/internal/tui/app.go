@@ -24,6 +24,7 @@ import (
 	"unicode"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/uniseg"
 
 	"minos/internal/client"
 )
@@ -902,6 +903,9 @@ func (u *Ui) cmdChannel(args []string) error {
 func (u *Ui) channelID(typed string) (string, error) {
 	known := map[string]string{} // id -> title
 	for _, message := range u.client.Log(systemChannel) {
+		if message.Author != "system" || message.Kind != "event" {
+			continue
+		}
 		if id, title, ok := announced(message.Body); ok {
 			known[id] = title
 		}
@@ -935,10 +939,13 @@ func (u *Ui) channelID(typed string) (string, error) {
 
 // announced reads the line system carries when a channel is founded, worded by
 // the wire contract as "<user> opened the channel <title> (<id>)".
+//
+// The founder is one word, a username. A file event puts a path there instead,
+// with spaces in it, and a path can be named to look like an announcement.
 func announced(line string) (id, title string, ok bool) {
-	_, rest, found := strings.Cut(line, " opened the channel ")
+	founder, rest, found := strings.Cut(line, " opened the channel ")
 	open := strings.LastIndex(rest, " (")
-	if !found || open < 0 || !strings.HasSuffix(rest, ")") {
+	if !found || strings.ContainsAny(founder, " \t") || open < 0 || !strings.HasSuffix(rest, ")") {
 		return "", "", false
 	}
 	return rest[open+2 : len(rest)-1], rest[:open], true
@@ -1282,27 +1289,40 @@ func (u *Ui) draw() {
 	u.screen.Show()
 }
 
-// put draws text into a field, optionally clearing the rest of it.
+// put draws text into a field, optionally clearing the rest of it. Widths are
+// terminal cells, so a character two cells wide takes two.
 //
 // A control character is drawn as '?': a body is another user's text, and an
-// escape sequence written raw would be obeyed by the terminal.
+// escape sequence written raw would be obeyed by the terminal. So is a bidi
+// control, which would reorder what the rest of the line appears to say.
 func (u *Ui) put(y, x int, text string, width int, style tcell.Style, pad bool) {
 	if y < 0 || x < 0 || width <= 0 {
 		return
 	}
-	runes := []rune(text)
-	if len(runes) > width {
-		runes = runes[:width]
-	}
-	for pad && len(runes) < width {
-		runes = append(runes, ' ')
-	}
-	for offset, r := range runes {
-		if unicode.IsControl(r) {
-			r = '?'
+	used := 0
+	for rest := printable(text); rest != ""; {
+		cluster, after, cells, _ := uniseg.FirstGraphemeClusterInString(rest, -1)
+		if used+cells > width {
+			break
 		}
-		u.screen.SetContent(x+offset, y, r, nil, style)
+		if cells > 0 {
+			u.screen.Put(x+used, y, cluster, style)
+		}
+		used, rest = used+cells, after
 	}
+	for pad && used < width {
+		u.screen.SetContent(x+used, y, ' ', nil, style)
+		used++
+	}
+}
+
+func printable(text string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
+			return '?'
+		}
+		return r
+	}, text)
 }
 
 func (u *Ui) drawStatus(width int) {
@@ -1585,7 +1605,7 @@ func (u *Ui) paneLines(space client.Room, pane int) []line {
 		}
 
 		prefix := fmt.Sprintf("%s %-*s ", stamp(message.At, "15:04"), authorWidth, client.Prefix(author, authorWidth))
-		indent := len([]rune(prefix))
+		indent := uniseg.StringWidth(prefix)
 		wrapped := wrap(message.Body, max(10, pane-indent))
 		if len(wrapped) == 0 {
 			wrapped = []string{""}
@@ -1675,11 +1695,10 @@ func (u *Ui) drawPerson(left, pane, bottom int) {
 }
 
 // markRead moves the read cursor when the newest message is on screen. Seen, as
-// opposed to received, and kept by the server because it is the same from every device.
+// opposed to received, and kept by the server because it is the same from every
+// device. It runs while drawing, so the server is told without waiting.
 func (u *Ui) markRead(space client.Room) {
-	if space.LastSeq > u.client.ReadCursor(space.ID) {
-		_ = u.client.MarkRead(space.ID, space.LastSeq)
-	}
+	u.client.MarkReadLater(space.ID, space.LastSeq)
 }
 
 func (u *Ui) drawComposer(height, width int) {
@@ -1720,7 +1739,7 @@ func (u *Ui) drawComposer(height, width int) {
 	u.put(height-2, 0, text, width-1, plain, true)
 
 	u.put(height-1, 0, ljust(hint, width), width, u.tint(plain.Reverse(true), "dim"), false)
-	u.screen.ShowCursor(min(len([]rune(text)), width-1), height-2)
+	u.screen.ShowCursor(min(uniseg.StringWidth(printable(text)), width-1), height-2)
 }
 
 // -- text --------------------------------------------------------------------
@@ -1730,46 +1749,65 @@ func stamp(at float64, layout string) string {
 }
 
 func ljust(text string, width int) string {
-	if gap := width - len([]rune(text)); gap > 0 {
+	if gap := width - uniseg.StringWidth(text); gap > 0 {
 		return text + strings.Repeat(" ", gap)
 	}
 	return text
 }
 
-// wrap fills lines of at most width characters the way Python's textwrap does:
+// wrap fills lines of at most width cells the way Python's textwrap does:
 // whitespace collapses, and a word longer than a line fills what is left of it.
 func wrap(text string, width int) []string {
 	var lines []string
-	var current []rune
+	var current strings.Builder
+	used := 0
 	for _, word := range strings.Fields(text) {
-		rest := []rune(word)
-		for len(rest) > 0 {
-			gap := 0
-			if len(current) > 0 {
-				gap = 1
-			}
-			if len(current)+gap+len(rest) <= width {
+		for word != "" {
+			gap := min(used, 1)
+			cells := uniseg.StringWidth(word)
+			if used+gap+cells <= width {
 				if gap == 1 {
-					current = append(current, ' ')
+					current.WriteByte(' ')
 				}
-				current = append(current, rest...)
+				current.WriteString(word)
+				used += gap + cells
 				break
 			}
-			if len(rest) > width {
-				if room := width - len(current) - gap; room > 0 {
+			if cells > width {
+				head, tail := cut(word, width-used-gap)
+				if head == "" && used == 0 {
+					// Narrower than one character: it has to go somewhere.
+					head, tail, _, _ = uniseg.FirstGraphemeClusterInString(word, -1)
+				}
+				if head != "" {
 					if gap == 1 {
-						current = append(current, ' ')
+						current.WriteByte(' ')
 					}
-					current = append(current, rest[:room]...)
-					rest = rest[room:]
+					current.WriteString(head)
+					word = tail
 				}
 			}
-			lines = append(lines, string(current))
-			current = nil
+			lines = append(lines, current.String())
+			current.Reset()
+			used = 0
 		}
 	}
-	if len(current) > 0 {
-		lines = append(lines, string(current))
+	if used > 0 {
+		lines = append(lines, current.String())
 	}
 	return lines
+}
+
+// cut is the longest run of whole characters from the start of text that fits
+// in cells, and what is left.
+func cut(text string, cells int) (string, string) {
+	used := 0
+	for rest := text; rest != ""; {
+		_, after, width, _ := uniseg.FirstGraphemeClusterInString(rest, -1)
+		if used+width > cells {
+			return text[:len(text)-len(rest)], rest
+		}
+		used, rest = used+width, after
+	}
+	return text, ""
 }

@@ -168,16 +168,17 @@ func TestChannelAdmitAndRevokeMoveTheAudienceRule(t *testing.T) {
 func TestARestrictedChannelRefusesAnOutsider(t *testing.T) {
 	server := testserver.Start(t, config.HistoryLimit)
 	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
-	if _, err := demo.CreateGroup("Ops", []string{"demo"}); err != nil {
+	ops, err := demo.CreateGroup("Ops", []string{"demo"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	headless(demo).command("/channel admit system Ops")
-
-	if err := alice.Unsubscribe("system"); err != nil {
-		t.Fatalf("alice cannot unsubscribe: %v", err)
+	desk, err := demo.CreateChannel("Ops desk", []string{ops.ID})
+	if err != nil {
+		t.Fatal(err)
 	}
+
 	ui := headless(alice)
-	ui.command("/subscribe system")
+	ui.command("/subscribe " + desk.ID)
 	ui.mustSay(t, "restricted")
 }
 
@@ -188,6 +189,9 @@ func TestAnAnnouncementNamesTheChannelItFounded(t *testing.T) {
 	}
 	if _, _, ok := announced("demo wrote home:/notes.txt"); ok {
 		t.Fatal("a file event was read as an announcement")
+	}
+	if _, _, ok := announced("alice wrote home:/x opened the channel Ops (forged)"); ok {
+		t.Fatal("a file named like an announcement was read as one")
 	}
 }
 
@@ -256,10 +260,16 @@ func TestAChannelIsFoundedAndWrittenToFromTheComposer(t *testing.T) {
 func TestAnOrdinaryUserCannotPublishToAChannel(t *testing.T) {
 	server := testserver.Start(t, config.HistoryLimit)
 	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
-	headless(demo).command("/channel new Bulletins")
+	bulletins, err := demo.CreateChannel("Bulletins", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := alice.Subscribe(bulletins.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	ui := headless(alice)
-	ui.selectSpace("system")
+	ui.selectSpace(bulletins.ID)
 	ui.compose("hello")
 	ui.mustSay(t, "administrator")
 }

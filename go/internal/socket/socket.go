@@ -41,6 +41,10 @@ const writeTimeout = 10 * time.Second
 // cursor, which is what the sequence number is for.
 const outboundDepth = 256
 
+// FrameLimit is the largest inbound frame. A larger one closes the connection
+// with 1009, because the library cannot skip a frame it has refused to read.
+const FrameLimit = 1 << 20
+
 // ErrGone is returned by a send to a connection that is closed or too far
 // behind. Callers drop it: the connection's own Serve loop does the cleanup.
 var ErrGone = errors.New("connection is gone")
@@ -250,6 +254,7 @@ func (r *Registry) Serve(
 	ctx context.Context, ws *websocket.Conn, profile Profile,
 	ping time.Duration, sessionMaxAge int64, released func(*Connection),
 ) {
+	ws.SetReadLimit(FrameLimit)
 	connection := newConnection(ctx, ws, profile)
 	go connection.writer()
 

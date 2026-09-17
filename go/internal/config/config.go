@@ -15,6 +15,9 @@ import (
 // during the websocket handshake and keeps it alive by pinging /ping.
 const SessionLifetime = 12 * time.Hour
 
+// SessionLimit is how long a session lasts from login, however often it is used.
+const SessionLimit = 7 * 24 * time.Hour
+
 // Messages returned for a room when the client has no cursor, and the ceiling
 // on any single backfill.
 const HistoryLimit = 200
@@ -42,9 +45,11 @@ type Config struct {
 	Secret []byte
 
 	// Grace is how long a transient room outlives its last occupant, and Sweep
-	// is how often that is checked -- so a room goes between the two.
-	Grace time.Duration
-	Sweep time.Duration
+	// is how often that is checked -- so a room goes between the two. Unentered
+	// is how long a transient room lasts that nobody has entered.
+	Grace     time.Duration
+	Unentered time.Duration
+	Sweep     time.Duration
 
 	// Ping is how long a client may be silent before a keepalive frame.
 	Ping time.Duration
@@ -66,17 +71,18 @@ func Load() Config {
 	runDir := path("MINOS_RUN", filepath.Join(root, ".run"))
 
 	return Config{
-		Host:    text("MINOS_HOST", "127.0.0.1"),
-		Port:    number("MINOS_PORT", 8000),
-		Dist:    path("MINOS_DIST", filepath.Join(root, "dist")),
-		VfsRoot: path("MINOS_VFS", filepath.Join(root, "vfs")),
-		RunDir:  runDir,
-		Secret:  []byte(text("MINOS_SECRET", "minos-development-secret")),
-		Grace:   seconds("MINOS_ROOM_GRACE", 120),
-		Sweep:   seconds("MINOS_ROOM_SWEEP", 15),
-		Ping:    seconds("MINOS_WS_PING", 30),
-		Users:   map[string]string{"demo": "demo", "alice": "alice", "bob": "bob"},
-		Admins:  map[string]bool{"demo": true},
+		Host:      text("MINOS_HOST", "127.0.0.1"),
+		Port:      number("MINOS_PORT", 8000),
+		Dist:      path("MINOS_DIST", filepath.Join(root, "dist")),
+		VfsRoot:   path("MINOS_VFS", filepath.Join(root, "vfs")),
+		RunDir:    runDir,
+		Secret:    []byte(text("MINOS_SECRET", "minos-development-secret")),
+		Grace:     seconds("MINOS_ROOM_GRACE", 120),
+		Unentered: seconds("MINOS_ROOM_UNENTERED", 900),
+		Sweep:     seconds("MINOS_ROOM_SWEEP", 15),
+		Ping:      seconds("MINOS_WS_PING", 30),
+		Users:     map[string]string{"demo": "demo", "alice": "alice", "bob": "bob"},
+		Admins:    map[string]bool{"demo": true},
 	}
 }
 

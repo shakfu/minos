@@ -37,7 +37,7 @@ Two environment variables, and nothing else:
 | `MINOS_CONFORMANCE_CMD` | argv to launch a server. Unset, the suite builds `cmd/minosd` |
 | `MINOS_CONFORMANCE_URL` | test a server already running; nothing is launched |
 
-The launcher passes the server its configuration through the environment (`MINOS_HOST`, `MINOS_PORT`, `MINOS_RUN`, `MINOS_VFS`, `MINOS_DIST`, `MINOS_ROOM_GRACE`, `MINOS_ROOM_SWEEP`, `MINOS_WS_PING`). That set is part of the contract: a server that ignores `MINOS_PORT` cannot be tested at all, and one that ignores `MINOS_ROOM_GRACE` cannot have its transient rooms tested in under two minutes.
+The launcher passes the server its configuration through the environment (`MINOS_HOST`, `MINOS_PORT`, `MINOS_RUN`, `MINOS_VFS`, `MINOS_DIST`, `MINOS_ROOM_GRACE`, `MINOS_ROOM_UNENTERED`, `MINOS_ROOM_SWEEP`, `MINOS_WS_PING`). That set is part of the contract: a server that ignores `MINOS_PORT` cannot be tested at all, and one that ignores `MINOS_ROOM_GRACE` cannot have its transient rooms tested in under two minutes.
 
 ## Isolation
 

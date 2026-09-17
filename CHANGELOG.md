@@ -106,6 +106,32 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 ### Fixed
 
+- `copy` onto the same file emptied it, because the destination was truncated before the source was read. `copy` of a directory into its own subtree nested about 2,000 levels before failing on path length. Both now answer 400. The check compares files rather than names, so a hard link to the source is refused too.
+
+- The VFS followed a symlink out of its mountpoint: the prefix check was lexical, and `os.Open` resolves links. Every operation now runs through an `os.Root`, over resolving paths with `EvalSymlinks` first, which would leave a gap between the check and the use. `unlink` and `rename` of a mountpoint's root are refused with 403; `unlink home:/` used to delete the home directory.
+
+- Closing one of a user's two connections announced them offline to everyone. Presence is now announced on the first connection and after the last.
+
+- `uninvite` left the room in the removed user's client and kept their place in it, so a removed user could hold a transient room open. Losing access by `leave`, `uninvite` or `group.unassign` now releases the user's places and sends `roomGone`.
+
+- A transient room that nobody entered was never deleted until the server restarted: the grace period counts from emptying, and such a room never empties. It is now deleted 15 minutes after it was raised, set by `MINOS_ROOM_UNENTERED`. A separate period rather than the grace period, because two minutes is too short for invitees to arrive.
+
+- A transient room could be deleted with someone in it. `Exit` decided the room was empty, released its lock, then stamped `empty_since`; an entry between the two left an occupied room counting down. The sweep had the same gap between listing expired rooms and deleting them. Both now happen under the occupancy lock, and the delete checks expiry again.
+
+- A session used at least every 12 hours never expired and never lost its admin role, and `/logout` only cleared the caller's cookie. A session now ends 7 days after login. Logout revokes it on the server and closes its sockets. Revocations are kept in memory, so a restart forgets them; the 7-day limit still applies.
+
+- The websocket skipped its `Origin` check, on the mistaken premise that an upgrade carries none. Browsers always send one, and `SameSite=Lax` does not separate ports on one host. An upgrade naming another origin is now refused with 403, and a JSON POST without `Content-Type: application/json` with 415.
+
+- The terminal client never reconnected, though the server hangs up on a client 256 frames behind on the understanding that it would. It now logs in again with backoff, syncs, and enters again the room it was in.
+
+- The terminal client marked messages read with a blocking request from inside `draw`, and kept its local cursor when the server refused. The request no longer blocks the screen, and a refused read puts the cursor back.
+
+- `system` accepted `channel.publish` and `channel.appoint` from an administrator, and an `unsubscribe` from it was undone at every start. All three are refused.
+
+- A file named `x opened the channel Ops (id)` made the terminal client resolve `Ops` to an id of the uploader's choosing. Only a `system` event with a one-word founder counts now, and a control character in an announced path is replaced by `?`.
+
+- The terminal client drew one cell per character, so CJK text and most emoji overlapped. It measures cells, and draws bidi controls as `?`.
+
 - Subscribing to a channel showed none of what it already held. The client fetches history only at sync or when an arriving message reveals a gap, and nothing is pushed to someone outside the audience, so a new subscriber saw the channel's past only after its next post. It now backfills on subscribing, and on any `room` push whose `lastSeq` is ahead. Found by driving the real client in a pseudo-terminal; every earlier test subscribed before publishing.
 
 - `/help` showed only its last six entries, the key hints, because it wrote a notice per entry and the notice area keeps six lines. It now fills the pane like archive results, and a test fails if a command is missing from it.
@@ -121,6 +147,14 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 - `tests/conformance/wire.py` provokes a reply when the handshake does not arrive promptly. `simple_websocket`'s client blocks on the socket before draining what its parser already holds, so a server fast enough to put the first frame in the same TCP segment as the 101 response leaves that frame stranded until unrelated traffic appears. The Go server is fast enough and Werkzeug usually is not, which is why this surfaced only after the port. The assertion is unchanged: `osjs/core:connected` must still be the first control frame on the connection.
 
 ### Changed
+
+- Size limits: a request body is at most 1 MiB and an upload 100 MiB, answered 413 above that. A socket frame is at most 1 MiB, closed with 1009. A message body or rejection comment is at most 64 KiB, and a title or group name 200 characters, each refused with a readable error. Before, only the library's 32 KiB frame limit applied, and it closed the socket.
+
+- A room whose last grant is withdrawn is deleted if ad-hoc. For a permanent room, withdrawing the last grant is refused. A room with no grants was reachable by nobody and was never deleted, and a permanent one still held its name.
+
+- Room lists read each room's latest message by key instead of scanning all of its messages on every `sync`.
+
+- `/logout` without a session answers 403, as the contract says of every route but `/`, `/ping` and `/login`. `/ping` refreshes a session it is given. The socket is served at `/` only. A missing room id is quoted as `null` rather than `None`. The server warns at start when `MINOS_SECRET` is unset.
 
 - `chat-concepts.md`, now at `docs/dev/`, specifies the channel feed and archival by age. Every channel message has a subject and a body, and each subscriber opens items individually. The admin sets an archival period per channel and per admin-created room, and whether its archive can be searched. `docs/wire-contract.md` sections 10 and 11 give the operations, fields and pushes.
 

@@ -137,7 +137,8 @@ func TestFoundingAndPublishingAreTheAdministrators(t *testing.T) {
 	alice := connect(t, "alice")
 	refusal := "Only an administrator may do that"
 	same(t, alice.Refuse("channel.create", "title", unique("Mine"), "groups", []string{}), refusal)
-	same(t, alice.Refuse("channel.publish", "channel", systemChannel, "body", "hi"), refusal)
+	channel := connect(t, admin).Call("channel.create", "title", unique("Theirs"), "groups", []string{})
+	same(t, alice.Refuse("channel.publish", "channel", channel["id"], "body", "hi"), refusal)
 }
 
 // send stays refused on a channel, whoever asks. Subscribed first, because

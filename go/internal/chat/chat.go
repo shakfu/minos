@@ -255,6 +255,11 @@ func (h *Handler) run(
 		return h.service.Subscribe(username, text(fields, "channel"))
 
 	case "unsubscribe":
+		// Every account receives the machine channel; the server subscribes them
+		// again at every start, so a choice to leave it could not be kept.
+		if text(fields, "channel") == config.SystemChannel {
+			return nil, &messaging.Refusal{Message: "Every account receives system"}
+		}
 		return h.service.Unsubscribe(username, text(fields, "channel"))
 
 	case "channel.create":
@@ -265,6 +270,9 @@ func (h *Handler) run(
 		return h.createChannel(username, isAdmin, text(fields, "title"), groups)
 
 	case "channel.publish":
+		if text(fields, "channel") == config.SystemChannel {
+			return nil, &messaging.Refusal{Message: "Only the server writes to system"}
+		}
 		return h.service.PublishMessage(
 			username, isAdmin, text(fields, "channel"), text(fields, "subject"), text(fields, "body"))
 
@@ -275,6 +283,10 @@ func (h *Handler) run(
 		return h.service.Revoke(isAdmin, text(fields, "channel"), text(fields, "group"))
 
 	case "channel.appoint":
+		// A moderator could publish, and would open system to submissions.
+		if text(fields, "channel") == config.SystemChannel {
+			return nil, &messaging.Refusal{Message: "Only the server writes to system"}
+		}
 		return h.service.Appoint(isAdmin, text(fields, "channel"), text(fields, "username"))
 
 	case "channel.dismiss":
@@ -379,12 +391,11 @@ func text(fields map[string]json.RawMessage, name string) string {
 }
 
 // roomID renders a room field the way an error message quotes it: a string as
-// itself, anything else as it arrived, and a missing one as None, the spelling
-// inherited from the retired Python server.
+// itself, anything else as it arrived, and a missing one as null.
 func roomID(fields map[string]json.RawMessage) string {
 	raw, ok := fields["room"]
 	if !ok || string(raw) == "null" {
-		return "None"
+		return "null"
 	}
 	var value string
 	if err := json.Unmarshal(raw, &value); err == nil {
