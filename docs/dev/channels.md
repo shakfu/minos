@@ -178,6 +178,6 @@ Build channel types first: `mail@1`, `alert@1`, `stock-quote@1`. Design a stream
 
 2. For a keyed, opened type, does opening the newest item for a key open the older ones?
 
-3. Should rooms be typed? This proposal leaves every room `text@1`, because a room is a conversation (chat-concepts 2.4, *Rooms keep the log*). An agent posting structured results to a room (agents.md) is the case that would reopen it.
+3. Should rooms be typed? This proposal leaves every room `text@1`, because a room is a conversation (chat-concepts 2.4, *Rooms keep the log*). An agent posting structured results to a room ([design.md](design.md) 8.5) is the case that would reopen it, and that design needs exactly this: a payload the server passes through unread.
 
 4. Does a moderator see a submission through the type's view, or as raw `data`? Moderating a rendered chart hides what the payload actually contains.
