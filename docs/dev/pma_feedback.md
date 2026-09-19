@@ -8,7 +8,7 @@ The trust reasoning is the strongest part and it holds. Section 3's rule, its tr
 
 Three problems:
 
-1. The design builds a principal -- `pma-agent` -- that `pma` has not asked for, and most of the new wire surface exists to contain it.
+1. `pma-agent` reading every task room makes it a channel between workers, which is what D10 forbids and section 3 rules out. The document does not acknowledge it.
 
 2. A room per task is 1031 rooms today, against a model with no deletion. Section 11 states the hole; the room grain is what creates it.
 
@@ -28,31 +28,33 @@ Three problems:
 | channels.md open question 3 anticipates a pass-through payload | verified, channels 181 |
 | `go/conformance/wire.go` is 581 lines; `go/internal/client` is not importable | verified |
 
-## 1. `pma-agent` is a requirement pma has not made
+## 1. `pma-agent` is the hub, and 8.2 reinstates what D10 forbids
 
-`pma`'s note states the opposite requirement: "Agent-to-agent messaging is not a requirement. Dispatch is fan-out into isolated worktrees and review is fan-in; two agents never need to converse." It also fixes where policy lives: "The escalation policy stays in `pma`, which already holds the inputs: `route.rs` (`Policy`, `Subject`), `class.rs`, `complexity.rs`, tiers and `agent_budget`. minos transports and records decisions; it does not make them."
+D10 keeps two workers out of one room, and gives the reason: "two workers in one room means each is bounded by the other repository's content". Section 3 makes that transitive.
 
-design.md inserts a model between the worker and the developer, and then spends most of its new surface containing it:
+8.2 then gives `pma-agent` read on every task room and send on every task room. That is a channel between any two workers, with a model in the middle. Repository content from `cynn` enters `pma-agent`'s context and leaves in an instruction to the worker holding `py`. The hop is slower and lossier than a shared room; it is not narrower. By section 3's own rule every worker is bounded by all 96 repositories, which is the state D10 exists to prevent, and the document does not say so anywhere.
 
-- Section 3's transitive rule bites only because a model reads worker output and then dispatches.
+This is the design's central question and it turns on one fact the document leaves unstated: **is `pma-agent` one context across the fleet, or one instance per task?**
 
-- D12 makes a server-enforced rate limit mandatory, explicitly because "an agent answering an agent is the design".
+| | one fleet context | one instance per task |
+|-|-|-|
+| Grant | "a grant over every task room", as section 2 and 8.2 have it | one task room plus `control`, the same shape as a worker |
+| Cross-repository contamination | by construction | none; D10's property holds end to end |
+| Fleet-wide view | yes, and it is the reason to want this shape | none. Ranking across projects goes back to `pma`, which already does it: `rank.rs`, `route.rs`, `class.rs`, `complexity.rs` |
+| Cost | one long context, growing | one context per dispatched task |
+| What `control` is for | reaching the fleet the agent already sees | the only fleet-wide surface, gated by a submission |
 
-- 8.2's capability table exists to give `pma-agent` every task room while giving a worker one.
+Per task is the smaller claim and it costs little, because the cross-project judgement `pma-agent` would otherwise supply is the part `pma` already computes from stored scores rather than from prose. Recommendation: per task, and 8.2's room scope for `pma-agent` becomes one room, not every room.
 
-Nowhere does the document say what `pma-agent` decides that `route.rs` cannot. That is the missing justification. D2 argues the tool and the model must be separate principals, which is right, but it does not argue that the model principal should exist.
+If the fleet context is wanted anyway, say what it decides that `rank.rs` cannot, and state the consequence plainly in section 3: the rule is accepted as violated across projects, with `pma`'s execution monopoly (D2, D3) as the only barrier. That is a defensible position. It is not the position the document currently claims to hold.
 
-**Alternative framing.** `pma-agent` is read-only: read on every task room, no `send`, no `submit`. It summarises and ranks; `pma` dispatches and the developer answers. Consequences, all subtractive:
+Two smaller consequences either way:
 
-- The transitive rule stops reaching any authority. The chain ends at a summary a person reads.
+- `pma-agent` submits to `control` (5, 8.2). Under a fleet context, repository text from one project can shape a fleet-wide instruction, and the developer approving it is the only filter. Section 10 already secures the part that matters -- a moderator may not edit, so the text is approved under its author's name unchanged.
 
-- D12's rate limit goes back to optional. No agent answers an agent.
+- The rate limit (D12) is correctly mandatory under either shape. An agent answering an agent is the design, so the two cheaper agent-side guards do not apply. No change asked.
 
-- 8.2 collapses to one row plus a room list, which is also the answer to section 13 question 2.
-
-If `pma-agent` must write, say what it decides and what the developer stops doing as a result. Until runs exist, the honest answer may be that nothing does.
-
-**Measurement blocks on the same thing.** Section 5 says the intervention rate "decides whether the design works". `pma`'s `runs` table holds 0 rows today, against 96 projects and 1031 open tasks. There is no dispatch history to reason from. Build the uncontained pipeline, get a hundred runs, then decide what a model in the middle would have saved.
+**One caveat on measurement.** Section 5 makes the intervention rate the test of whether the design works. `pma`'s `runs` table holds 0 rows today, against 96 projects and 1031 open tasks. Nothing yet measures it. That is expected -- the pipeline is not built -- but it means the fleet-context question above cannot be settled by evidence yet, and the reversible choice is the per-task one.
 
 ## 2. Numbers: 1031 rooms, none deletable
 
@@ -136,7 +138,7 @@ Seven new operations against a frozen contract with a 581-line conformance refer
 
 1. **Operator's service.** `pma` should not own `minosd`'s lifetime. `sanduk`'s `runs.py` sweep does not own it either, so a `pma`-started `minosd` is an orphan nobody collects. With the mailbox fallback, absence is degradation rather than failure.
 
-2. **Single role plus a room list**, not a general capability set -- if `pma-agent` becomes read-only per section 1. The general set is a hedge against a second special case that section 1 argues should not exist.
+2. **Single role plus a room list**, not a general capability set. Under a per-task `pma-agent` (section 1) the two principals differ only in a room list and a submit target, so the general set is a hedge against a second special case that has not appeared.
 
 3. **Do not build space-wide search.** It is the pressure that breaks D7, by this document's own reading, and under a room per project the want ("search every task room in `cynn`") is one room.
 
@@ -148,7 +150,7 @@ Seven new operations against a frozen contract with a 581-line conformance refer
 
 ## 8. Questions back
 
-1. What does `pma-agent` decide? Name one decision and the authority it needs. If the answer is "summarise and rank", make it read-only and delete half of section 8.
+1. Is `pma-agent` one context across the fleet, or one per task? 8.2's room scope and D10's property both depend on the answer.
 
 2. What is N in section 4? Bytes per grant, per run.
 
