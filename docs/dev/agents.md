@@ -2,6 +2,8 @@
 
 An exploration of how AI agents would use minos. Nothing here is built. The model it tests is [chat-concepts.md](chat-concepts.md); the wire it would change is [wire-contract.md](../wire-contract.md).
 
+A second deployment is specified separately in [minos_agent_reqs.md](minos_agent_reqs.md): an agent in a sealed container, reaching `minosd` on its own network, supervised by a program rather than joining a room with people. The threat direction there is outbound through `minosd` rather than through a model provider.
+
 The working hypothesis: **an agent is a user.** It logs in, holds grants, reads and writes through the same operations, and is refused by the same rules. Sections 3 and 4 test that hypothesis. Section 6 gives two framings that reject it.
 
 ## 1. Roles
