@@ -10,7 +10,7 @@ What a room, a group and a channel actually are is settled in [chat-concepts.md]
 
 ## Run
 
-```
+```text
 make serve # the server on http://127.0.0.1:8000
 make tui   # the terminal client, in another shell
 ```
@@ -23,13 +23,13 @@ The server does not need a browser build. It warns and serves the API alone if `
 
 Inside the client, `/help` lists every command. The [cheatsheet](#cheatsheet) below groups them, with the keys.
 
-```
+```text
 make demo # the audience rule, narrated, against a server of its own
 ```
 
 It launches a server on a database of its own and drives three real websockets, so it neither needs nor disturbs anything you have running.
 
-```
+```text
 make test         # go test ./..., the wire contract included
 make conformance  # the wire contract alone
 ```
@@ -38,7 +38,7 @@ make conformance  # the wire contract alone
 
 ## Cheatsheet
 
-```
+```text
 make serve                                # the server
 make go                                   # build go/minosd and go/minos
 ./go/minos -user alice -password alice    # a client, logged in; make tui prompts instead
@@ -224,7 +224,7 @@ Two distinctions do real work and are easy to lose:
 
 ### How a message travels
 
-```
+```text
 send --> timeline.Append ........ assigns the room's next sequence (SQLite)
      |
      +-> deliver(audience, event) --> Registry.Push --> per-connection queue --> writer goroutine --> websocket
@@ -252,7 +252,7 @@ The delivery cursor is not the read cursor. The first answers *what have I recei
 
 A backfill is capped at the tail (`HistoryLimit`, 200 messages) and that cap is not a window to page through -- asking again from the same cursor returns the same slice. So a client further behind than the limit gets the newest slice and nothing before it, and the reply starts more than one past its cursor. That is a gap which will never be filled, and closing it silently would defeat the whole mechanism, so the client marks it in the log instead:
 
-```
+```text
 896 earlier message(s) not shown
 ```
 

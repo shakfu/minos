@@ -26,11 +26,11 @@ Two distinctions run through everything below and are easy to lose:
 
 - **Invitation is not subscription.** Rooms are closed: you are in one because someone with the authority to invite you did. Channels are open: you subscribe because you are interested. Different acts, by different people, revoked for different reasons.
 
-# The core
+## The core
 
-## 2. The model
+### 2. The model
 
-### 2.1 Users and roles
+#### 2.1 Users and roles
 
 A **user** is an account that can author, read, and be assigned to groups. Referenced by a stable id rather than a display name, so authorship survives a rename and no username can impersonate the machine. The roster of who exists is the host's business; `go/internal/messaging` already takes it as an injected roster and should continue to.
 
@@ -50,7 +50,7 @@ The important line is between **chat admin** and **ordinary user**, and it runs 
 
 Permanent rooms are institutional: they represent an ongoing concern that outlives any individual's interest, so who is in one is an administrative fact and a participant cannot change it. Ad-hoc rooms are personal: any user raises one by addressing people, and any participant may bring in another. That permissiveness is not a concession — restricting invitation to the creator would buy nothing, since a participant who wanted to add someone could simply raise a new room with everyone in it. Groups are administrative for the same reason permanent rooms are: both state how the organisation is arranged, rather than what someone felt like doing this afternoon.
 
-### 2.2 Group
+#### 2.2 Group
 
 **A lasting set of users.** A user may be assigned to more than one group.
 
@@ -64,11 +64,11 @@ A group is **a principal, not a conversation.** It exists to be named where acce
 
 The structural consequence: **groups have no message log.** If a group had its own conversation it would be a room whose access rule is itself, and the two concepts would collapse. A group that wants to talk gets a room.
 
-### 2.3 Room
+#### 2.3 Room
 
 **A place where a chat or a meeting happens.** Identity is the room itself, not the people in it. Adding or removing a participant leaves the same room; two rooms may have identical participants; a room everyone leaves is empty rather than gone — except where its retention says otherwise.
 
-#### Two properties, not three types
+##### Two properties, not three types
 
 A room is described by two independent facts, and the familiar names are just the combinations in use:
 
@@ -83,7 +83,7 @@ A room is described by two independent facts, and the familiar names are just th
 
 Retention is chosen when the room is raised and never again; the reasons are under *Transience* below. Nothing else about a room varies, which is why this is two flags rather than a taxonomy.
 
-##### Names and descriptions
+###### Names and descriptions
 
 Authority decides something else that is easy to miss: whether a room's title is a **name** or a **description**.
 
@@ -93,7 +93,7 @@ A user-created room is described. Its title renders who is in it, and **it need 
 
 The rule follows the authority axis rather than adding an axis of its own, because uniqueness is only worth enforcing where a name is actually used to refer: an institutional room is referred to across the organisation, a personal one is not.
 
-#### Admission
+##### Admission
 
 **All rooms are by invitation.** There is no self-join, no directory to browse, no discoverable room. A user is a participant because someone invited them.
 
@@ -113,7 +113,7 @@ A participant who never enters is still a participant. An occupant who leaves is
 
 Access inherited from a group cannot be given up. The grant names the group, and re-evaluating it would restore the access at once, so the alternative is to store the departure as a second fact that overrides the group. The model does not have that fact and should not acquire it: admission would then be decided by two rules that can disagree, and every question about who is in a room would have to ask both. Leaving such a room is refused instead, and the honest remedy is to be unassigned from the group.
 
-##### Presence and occupancy
+###### Presence and occupancy
 
 Two facts about where a user is, deliberately not one:
 
@@ -125,7 +125,7 @@ Two facts about where a user is, deliberately not one:
 
 Making presence per-room would produce occupancy under a second name; making occupancy global would leave nothing able to say which room to delete. A third fact between them has no question to answer -- a room already carries its occupants, and the roster already carries who is online.
 
-#### Transience
+##### Transience
 
 A transient room exists for the duration of a conversation and is then deleted, history included. This is the meeting-room analogue in the strict sense — the room is released when the meeting is over and nothing is kept.
 
@@ -145,7 +145,7 @@ Two mechanical consequences:
 
 **"Not persisted" does not mean "never stored."** Sequence numbers are assigned where a message is stored (`go/internal/timeline`), and the client's gap repair reads back from that store. An in-memory room would need a second sequencer and a second backfill path. A transient room is therefore stored like any other and **deleted** when it ends. Transience is a retention rule, not a storage strategy — and the rule must be enforced by something that runs even when nobody is watching, which is the sweep above.
 
-### 2.4 Channel
+#### 2.4 Channel
 
 **A read-only information stream.** A channel is not a conversation. Its distinguishing property is that the right to publish and the right to read are held by different people.
 
@@ -168,7 +168,7 @@ Eligibility is not an invitation, and nobody is ever admitted to a channel indiv
 
 In the core, a channel has one producer and no path for a subscriber to contribute. The existing `system` stream is precisely this: a machine producer, every user subscribed, nothing submitted. Letting users submit for approval is section 5.
 
-#### A channel is read one item at a time
+##### A channel is read one item at a time
 
 **Every channel message has a subject and a body.** A publisher may give the subject. When none is given, the server takes the first line of the body, so every stored message has one and no client needs the rule. A subscriber sees the subjects and expands a body on demand.
 
@@ -180,7 +180,7 @@ In the core, a channel has one producer and no path for a subscriber to contribu
 
 **`system` has no pending stack.** It carries one event per file change, to everyone. As pending items those would pile up for every user, and nobody asked for them. Each event line becomes its subject by the first-line rule, and nothing is opened.
 
-### 2.5 Messages, sequence and read state
+#### 2.5 Messages, sequence and read state
 
 A message belongs to exactly one room or channel and carries a **sequence number** that is monotonic and contiguous within it. That number is the delivery contract: the bus is fire-and-forget, so a client that sees a gap between its cursor and what arrived asks for the difference. Nothing else detects a dropped, duplicated or out-of-order frame.
 
@@ -200,7 +200,7 @@ A transient room needs no read state, since nothing survives to be unread.
 
 - **Messages are keyed by `(room_id, seq)`**, as they already are, so moving or re-moving a row is idempotent.
 
-### 2.6 The core in one table
+#### 2.6 The core in one table
 
 | | **Group** | **Room, admin-created** | **Room, user-created** | **Channel** |
 |-|-|-|-|-|
@@ -218,7 +218,7 @@ A transient room needs no read state, since nothing survives to be unread.
 | New participant sees | — | all history held | all history held | all history held |
 | Survives being empty | yes | yes | persisted: yes; transient: **no** | yes |
 
-## 3. Open questions in the core
+### 3. Open questions in the core
 
 1. **Who may delete a room, and can one be handed over?** Nothing yet says whether an admin may delete a user's persisted room, whether a creator may delete one others are actively using, or whether the role transfers when its creator leaves the organisation. Until this is answered, **creator confers no authority** and is only a recorded fact.
 
@@ -228,7 +228,7 @@ A transient room needs no read state, since nothing survives to be unread.
 
 3. **Should uniqueness extend beyond admin-created rooms?** Settled for now as admin-only: a permanent room's name is unique, an ad-hoc room's title is not, including when a user types one explicitly. The case for widening it is that a chosen name is a chosen name whoever typed it. The case against is that two people might each reasonably keep a "Planning" room, and colliding those across the whole server would surprise them. Worth revisiting once there are enough user-named rooms to see which way it bites.
 
-### Settled since
+#### Settled since
 
 Four questions that stood here have been answered by building the core, and their answers are in the model above rather than in this list.
 
@@ -240,11 +240,11 @@ Four questions that stood here have been answered by building the core, and thei
 
 - **Terminology: "system room".** Reserved: `system` is the id of the machine channel (`config.SystemChannel`), and an admin-created room is called *permanent* throughout. The two never share a word.
 
-# Later
+## Later
 
 Neither section below is needed for a working system. Both are specified because the core must not foreclose them, and the two habits in 2.5 are what ensure it does not.
 
-## 4. Retention and archival
+### 4. Retention and archival
 
 **An admin may set an archival period on a room they create, and on a channel.** A message older than the period, counted from its publication, is archived and leaves the live room. It is archived whether or not anyone opened or read it. Keeping it until opened would let one absent subscriber hold a channel's history live indefinitely. A room or channel with no period keeps everything, which is what every one does in the core.
 
@@ -266,7 +266,7 @@ That makes archival the opposite kind of promise from a transient room, and the 
 
 A transient room's contents are gone in the sense people mean when they ask. Archived history is not gone and not private; unless search is enabled, it is merely out of *their* reach. Saying "deleted" for the second would be false, and false in the direction that matters, so the interface has to be careful here whatever it looks like. If users are told anything at all about archival, the honest sentence includes the admin.
 
-### Sequence numbers must survive it
+#### Sequence numbers must survive it
 
 Archival is the first thing in the system that removes messages while the room lives on, and the sequence contract in 2.5 is what it must not break.
 
@@ -274,7 +274,7 @@ If archival reset the count, a client holding cursor 500 would receive a new mes
 
 The gap archival leaves is one the client already describes. A participant returning with a cursor below what the room still holds is precisely the case the client's gap repair was built for: the backfill starts above the cursor, the shortfall is detected against `lastSeq`, and the log says `N earlier message(s) not shown` rather than pretending. Archival is a second producer of a condition the client can already report, so it needs no new protocol — provided the high-water mark is honest.
 
-### Where it lives
+#### Where it lives
 
 **The same database, in its own table.** Archived rows move from `messages` to an `archived_messages` table beside it, keyed by `(room_id, seq)` as the live table is. A row is archived unchanged — author, kind, subject, body, timestamp and above all its sequence number — so the archive is the room's history rather than a rendering of it. Subscribers' opened marks for the row are deleted in the same move. They describe live items only.
 
@@ -286,13 +286,13 @@ Splitting the archive into its own file stays available, and the two habits in 2
 
 **Not in the VFS, either way.** A file is the obvious home for an export, but the VFS is user-visible by construction and this material is defined by not being reachable by users. It belongs beside the timeline, where no mountpoint resolves.
 
-### How the archive is read
+#### How the archive is read
 
 Two operations. The admin walks an archive in order. The audience, where the switch is on, searches one by subject and body. Each has its own authority check.
 
 Neither is `history()`. The live read is deliberately capped at the tail and deliberately not pageable — "asking again from the same cursor returns the same slice" — because its job is to repair a client's gap, and a client further behind than the cap is told so rather than walked backwards through the room. An admin reading an archive wants the opposite: a bounded, ordered, pageable walk over material that is large by definition and not latency sensitive. It is a separate operation with a separate authority check, and reusing the live one would compromise both.
 
-### Open questions
+#### Open questions
 
 1. **Does the archive itself ever expire?** Nothing removes it, so the store holds every message ever sent, forever. That may be intended. If not, the limit belongs in the model rather than arriving later as an operational surprise — and it is the one place where "deleted" would finally be accurate.
 
@@ -300,7 +300,7 @@ Neither is `history()`. The live read is deliberately capped at the tail and del
 
 3. **Do user-created persisted rooms get retention?** Only admin-created rooms and channels carry a period, so a user's persisted room keeps everything live forever and no one is accountable for it. That may be right — it is the user's own room — but it is the asymmetry most likely to be regretted, because it is where the volume accumulates.
 
-## 5. Submissions and moderation
+### 5. Submissions and moderation
 
 This is what turns a channel from a broadcast into a curated one.
 
@@ -310,7 +310,7 @@ The mechanism this requires is not the message log, and the reason is precise. P
 
 So a submission is a distinct object with its own lifecycle — submitted, then approved or rejected — and the channel's log contains only what was published.
 
-### Settled
+#### Settled
 
 **A rejection is reported; its reason is optional.** The author is told that moderators rejected the submission, and pointed at the content submission guidelines for the reasons one might be. A moderator may attach a comment and nothing obliges them to. The author therefore always learns the outcome rather than inferring it from silence, and the moderators are not required to justify each decision individually.
 
@@ -330,15 +330,15 @@ Read-only is not what decides this. Every channel is read-only to its audience, 
 
 **Dismissing the last moderator rejects the queue.** The channel then accepts no submissions, and whatever was queued has nobody left who may decide it. Each author is told, with that reason, rather than left waiting on a queue nobody can see.
 
-## 6. Deliberately excluded
+### 6. Deliberately excluded
 
 Named so their absence is a decision rather than an oversight: threading and replies; editing and deletion of published messages; reactions; typing indicators; attachments as first-class objects rather than VFS paths mentioned in text; federation across servers; calls or huddles layered on a room; and any conversion of a transient room into a persisted one.
 
-## 7. Where the code stands
+### 7. Where the code stands
 
 For orientation, not as a work plan.
 
-### The core is built
+#### The core is built
 
 Everything in section 2 is implemented: groups as a stored principal, the chat admin role, the two room axes, grants naming a user or a group and resolved at the moment access is checked, occupancy separate from access, the stored empty-since moment and the sweep that acts on it, channel subscriptions and the audience rule that gates them, per-user read cursors, and a stored per-room high-water mark. An administrator founds a channel and publishes to it, which is the core's producer: section 5 widens that set to moderators rather than defining it.
 
@@ -346,14 +346,14 @@ The retired model went with it. `merge` folded one room's membership into anothe
 
 What the core *is* on the wire, as opposed to what it means, is written down in [docs/wire-contract.md](../wire-contract.md) and checked by `go/conformance/`. That suite answers "is this implemented correctly", over HTTP and a websocket alone. This document answers "is this the right thing to implement", and the two should not be merged.
 
-### The channel feed and archival are in the server
+#### The channel feed and archival are in the server
 
 Subjects, the opened set and the pending stack (2.4, 2.5), and archival by age with its search (section 4), are in `go/` and checked by `go/conformance/`. The terminal client reads a channel item by item, and sets, reads and searches the archive by command.
 
-### Section 5 is built
+#### Section 5 is built
 
 Moderators, and submissions held outside the channel's sequence: submitted, then approved into the log, or rejected and kept until the author acknowledges it.
 
-### Untouched
+#### Untouched
 
 The delivery machinery is orthogonal to all of it: per-room sequence numbers, the client's gap repair, and the sweep that expires transient rooms. The later sections reuse two of them rather than disturb them: the sweep, and the sequencing the submission queue is built to avoid perturbing.

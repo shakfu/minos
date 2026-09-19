@@ -84,7 +84,9 @@ Request and reply is about 80 percent built. Submissions are the right primitive
 Required: `pma` mints a credential per task, carrying one room, no admin group, and no capability it was not given. Three properties:
 
 - **Non-refreshable by the holder.** A worker cannot extend its own reach. This is the property that matters.
+
 - **Re-mintable by `pma`.** A rework issues a new grant over the same room. Continuation is always decided outside the container.
+
 - **Revocable.** Revocation closes every websocket on the grant, as `/logout` already does for a session.
 
 Expiry tracks the task with an outer bound, not the run. A multi-run task keeps one room and one history; each run gets a fresh grant over it.
@@ -247,6 +249,7 @@ Layers 3 and 4 are `pma` the tool. They need no model, no `minosd`, and no coope
 Two workers conversing is not ruled out. It is a grant policy.
 
 - One worker per room is a star: `pma-agent` at the hub, workers at the leaves.
+
 - Two workers in one room is one edge of a mesh.
 
 Same mechanism, one grant apart. What the grant decides is trust rather than routing. agents.md 3.6 is transitive across a shared room, so two workers in one room means each is bounded by the other repository's content. Stated per room that is legible and reversible; stated as a protocol property it would be neither.
@@ -272,11 +275,17 @@ Build rooms and grants, scope them to one worker, and leave the scope configurab
 `go/conformance/` talks HTTP and a websocket and imports no server code, enforced by `isolation_test.go`. Every item above is testable there, and the denials are the tests that matter:
 
 - a grant gets 403 at `/vfs` and 403 at `/settings`
+
 - a grant is refused on `submission.approve`
+
 - a grant's `sync` returns its own rooms and no roster
+
 - a worker's grant is refused on a room it was not given
+
 - a worker is refused publishing to `control`
+
 - a grant past the send rate is refused, not buffered
+
 - a grant is refused everything after its expiry, and after revocation
 
 Sections 9 to 11 of the contract were each a conformance test first. This should be section 13, written the same way.

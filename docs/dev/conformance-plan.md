@@ -8,7 +8,7 @@ Status: built, first in Python under `tests/conformance/`, then ported to Go as 
 
 A black-box suite. It launches a server as a subprocess, talks HTTP and WebSocket to it, and asserts on frames. It imports no package under `minos/internal` or `minos/cmd` -- enforced by `isolation_test.go`, which parses the suite's own source.
 
-```
+```text
 go/conformance/
   wire.go                     the client: HTTP session, socket, push queue
   harness.go                  launching a server under test, and finding a free port

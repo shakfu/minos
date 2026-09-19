@@ -49,6 +49,7 @@ Archival removes messages from a live room and keeps them admin-readable (chat-c
 Deleting the rooms needs one of two things, and both are larger than this proposal:
 
 - An answer to chat-concepts open question 1, which asks who may delete a persisted room and leaves it unanswered.
+
 - A room lifetime on the space: a room with no message for N is deleted. New mechanism, and it inherits the transient room's whole problem -- a promise of deletion that must be enforced by a sweep running when nobody is watching (chat-concepts 2.3).
 
 What a space does give is the unit such a policy is stated on. Section 7 is why that matters to `pma`.
