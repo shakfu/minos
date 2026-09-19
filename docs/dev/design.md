@@ -21,11 +21,22 @@ The target: `pma` ranks outstanding tasks, dispatches each to an agent, using `s
 | Principal | Where | Trust | Holds |
 |-|-|-|-|
 | `pma`, the tool | host | trusted; it is code | an admin session, container control, git and `gh` |
-| `pma-agent` | a model pair, currently claude/opus | untrusted; reads worker reports | a grant over every task room |
-| worker | container | untrusted; reads repository content | a grant over one task room |
+| `pma-agent` | a model pair, currently claude/opus | untrusted; reads worker output and repository text | a grant over the workflow rooms it supervises |
+| worker | container | untrusted; reads repository content | a grant over one workflow room, windowed |
 | developer | host | decides what `pma-agent` will not | their own account |
 
 `pma` the tool assigns the `pma-agent` role to a model. That model is not the tool. Most of what follows depends on the separation.
+
+**What `pma-agent` decides.** Not triage and not routing. `rank.rs` places tasks in the Eisenhower matrix and `route.rs` maps a task to an agent, a model, an approval mode and an escalation, both deterministically and both built. `route.rs` states the commitment: "the policy is an artifact, not a judgment per task. One decision per revision, applied deterministically to every dispatch." `pma-agent` sits above that policy rather than inside it.
+
+| Decision | Scope | Authority needed |
+|-|-|-|
+| which workflow a situation gets | per trigger | a submission to `pma` |
+| inputs the deterministic rules cannot read -- priority implied by prose, an undeclared dependency | per triage pass | a submission to `pma` |
+| supervision: redirect, rework, escalate | per stage that declares it | `send` in that workflow's room |
+| a revision of the routing policy itself | per revision | a submission to `pma` |
+
+A workflow that declares no supervision runs without `pma-agent` entirely: `pma` triggers it, `route.rs` matches each stage, and the developer reads the result. That path carries no model in the dispatch decision at all.
 
 ## 3. The rule
 
@@ -35,7 +46,7 @@ Its consequences here:
 
 - No agent account is in `config.Admins`. Admin is binary today (`go/internal/config`), so there is no partial grant to fall back on. Section 7 replaces it with a capability set.
 
-- `pma-agent` is subject to the rule. Its input is worker reports, which carry repository content. The path runs: repository, worker, report, `pma-agent`, then dispatch, approve or ship. Every authority in the system sits at the end of that path.
+- `pma-agent` is subject to the rule. Its input is worker output and repository text, both attacker-influenced. The path runs: repository, worker, report, `pma-agent`, then dispatch, approve or ship. Every authority in the system sits at the end of that path.
 
 - `pma-agent` proposes; `pma` the tool executes. A proposal is a submission, which needs no new mechanism.
 
@@ -53,13 +64,29 @@ The deployment has two, and they are answered separately.
 
 **`control`**, a channel restricted to group `workers`. `pma` and the developer publish; workers and `pma-agent` subscribe. A channel is read-only to its audience (chat-concepts 5), so no worker can broadcast to the fleet. `pma-agent` may submit to it, which puts a fleet-wide instruction in front of the developer before it reaches anyone.
 
-**`task/<id>`**, a room per task, founded by `pma` the tool. Members: that task's worker, `pma-agent`, the developer, and colleagues they admit. A task outlives its runs, and `pma review --rework` runs the agent again in the same worktree, so the room is scoped to the task. The second run reads what the first was told.
+**`workflow/<id>`**, a room per workflow instance, founded by `pma` the tool. Members: the stages' workers, `pma-agent` where the workflow declares supervision, the developer, and colleagues they admit. The room's scope is the workflow's scope -- a project, a task, a document -- so room grain is policy `pma` sets per workflow, not a constant this design fixes. D5.
 
-**A space per project**, holding that project's task rooms. A space carries an archival period its rooms inherit and decides no admission. Section 6.
+**A space per project**, holding that project's workflow rooms. A space carries an archival period its rooms inherit and decides no admission. Section 6.
 
-**A group per project**, invited to each task room. Assigning a colleague to `proj-cynn` admits them to every room that named it, including rooms founded later, because a grant tracks the group (chat-concepts 2.3).
+**A group per project**, invited to each workflow room. Assigning a colleague to `proj-cynn` admits them to every room that named it, including rooms founded later, because a grant tracks the group (chat-concepts 2.3).
 
-No room holds two workers. That is a grant policy, not a protocol limit: see D10.
+No room holds two concurrent workers. That is a grant policy, not a protocol limit: see D10.
+
+### Workflows
+
+A workflow is a sequence of stages. Each stage is an agent and model pair with an approval mode, consuming artifacts and producing them. It is `pma` policy: minos does not know what a workflow is and carries only its id. `route.rs` already holds the per-stage half in `Route {agent, model, approval, escalate}`; a workflow is a sequence of those with artifact edges, which `pma` does not have yet.
+
+`REVIEW-FIX-TOP-FINDINGS`, project scope, as a worked example:
+
+| Stage | Reads | Writes |
+|-|-|-|
+| review | the repository | `REVIEW.md` |
+| validate | `REVIEW.md`, and the review's handoff message | `TODO.md`, ordered by priority |
+| fix | `TODO.md`, critical and high only | a patch |
+
+Three stages, one room, three grants, three containers. Each stage's grant is revoked before the next is minted, so no two stages hold a channel at once, and a stage cannot keep writing past its own handoff.
+
+The validator exists to check the reviewer, so it must not be steerable by it. What it inherits is D19; that it never reads the reviewer's reasoning is D15 and D20 together.
 
 ### The three conversations
 
@@ -71,7 +98,7 @@ No room holds two workers. That is a grant policy, not a protocol limit: see D10
 
 The third is why a worker is a principal on the bus rather than something `pma` relays for. A path that exists for `pma-agent` failing cannot run through `pma-agent`.
 
-Its two cases differ in what `pma-agent` must learn. When `pma-agent` is down it cannot know of the intervention until it returns. When it is up and wrong about one worker it must see the correction at once. Both are answered by putting the developer's message in the task room: `pma-agent` is a member, so a live one reads it immediately and a returning one replays it from its cursor.
+Its two cases differ in what `pma-agent` must learn. When `pma-agent` is down it cannot know of the intervention until it returns. When it is up and wrong about one worker it must see the correction at once. Both are answered by putting the developer's message in the workflow room: `pma-agent` is a member, so a live one reads it immediately and a returning one replays it from its cursor.
 
 A developer intervening on most runs means `pma-agent` is not doing its job. Record interventions per run beside the rest of the run row. That rate decides whether the design works.
 
@@ -83,14 +110,14 @@ The review surface. Each states what was chosen, and what was rejected where a r
 
 | What moves | Via minos | How |
 |-|-|-|
-| `pma-agent` instructs a worker | yes | the task's room |
-| developer instructs `pma-agent` | yes | the task's room |
-| developer instructs a worker | yes | the task's room |
+| `pma-agent` instructs a worker | yes | the workflow's room |
+| developer instructs `pma-agent` | yes | the workflow's room |
+| developer instructs a worker | yes | the workflow's room |
 | one instruction to every worker | yes | the `control` channel |
 | a worker's report or a file it produced | no | the bind mount `sanduk` already provides |
 | killing a run | no | `pma` tells the container engine |
 
-Everyone in a task's room reads everything written in it. That is what makes a correction visible to `pma-agent` without a second delivery path, and what lets the developer reach a worker while `pma-agent` is down.
+Everyone in a workflow's room reads everything written in it, subject to their grant's window (D19). That is what makes a correction visible to `pma-agent` without a second delivery path, and what lets the developer reach a worker while `pma-agent` is down.
 
 The two `no` rows are deliberate. A file channel through minos would be `/vfs`, which section 8.3 refuses outright. A stop that needs minos to be up cannot stop anything when minos is what failed (section 9).
 
@@ -98,9 +125,9 @@ The two `no` rows are deliberate. A file channel through minos would be `/vfs`, 
 
 **D3. `pma-agent` holds a grant, not an admin session.** It does not found rooms, approve submissions or mint grants. Those are the tool's.
 
-**D4. A worker holds a grant over one task room and `control`.**
+**D4. A worker holds a grant over one workflow room and `control`.** The room grant is windowed by `since` (D19), so the room it may write to is not necessarily the room it may read whole.
 
-**D5. The room is per task, not per run.** A rework reuses the worktree, and the second run reading what the first was told is the value.
+**D5. A room is per workflow instance, and the workflow declares its scope.** Rejected: a fixed grain. A project-scoped workflow gets one room per project, a task-scoped one a room per task, and a workflow with no conversation gets no room. Both grains were argued as the single answer in review; neither is. A rework reuses the worktree, and the second run reading what the first was told is why the room is not per run. Room count tracks workflows dispatched, not the backlog, and a completed workflow is the deletion trigger section 11 lacks.
 
 **D6. `control` is a channel, not a room.** Rejected: a room holding every worker. A room is writable by its participants, so any worker could broadcast to the fleet, and a compromised one could stop it.
 
@@ -108,9 +135,9 @@ The two `no` rows are deliberate. A file channel through minos would be `/vfs`, 
 
 **D8. Access is a group per project, invited per room.** This is the existing mechanism and it composes with D7 without touching it. The cost is one `invite` at room creation, which `pma` does anyway.
 
-**D9. Task rooms are admin-founded.** Only an administrator may invite to an admin-founded room (wire-contract 7), which is what stops a worker inviting a second worker into its own room. Rejected: ad-hoc rooms, where any participant may invite. The cost of D9 is that nothing deletes the room, because chat-concepts open question 1 has not decided who may. Section 11.
+**D9. Workflow rooms are admin-founded.** Only an administrator may invite to an admin-founded room (wire-contract 7), which is what stops a worker inviting a second worker into its own room. Rejected: ad-hoc rooms, where any participant may invite. The cost of D9 is that nothing deletes the room, because chat-concepts open question 1 has not decided who may. Section 11.
 
-**D10. No room holds two workers.** Worker-to-worker conversation is not ruled out; it is one grant away. What the grant decides is trust rather than routing, because the rule in section 3 is transitive: two workers in one room means each is bounded by the other repository's content. Stated per room that is reversible.
+**D10. No room holds two concurrent workers.** Sequential stages of one workflow share a room; what each inherits is D19. Concurrency is the thing refused, because the rule in section 3 is transitive and bites hardest when it is a loop: two live workers in one room means each is bounded by the other's inputs and can adapt to the other's replies. A stopped predecessor cannot adapt. Worker-to-worker conversation is not otherwise ruled out; it is one grant away. Stated per room, that is reversible.
 
 **D11. Three author kinds.** `user`, `agent`, and `system` for the server. `pma` the tool speaks as `system`, because its output is server-side fact: a run started, a grant was minted, verify failed. Two readers need this. A person must not take an agent's text for a decision, and a worker must be able to tell the developer's instruction from `pma-agent`'s when they disagree.
 
@@ -127,6 +154,14 @@ The two `no` rows are deliberate. A file channel through minos would be `/vfs`, 
 **D17. Grants are non-refreshable by their holder, re-mintable by `pma`, and revocable.** A worker cannot extend its own reach; continuation is always decided outside the container.
 
 **D18. A structured payload passes through the server unread.** The schema is `pma` policy, not a wire shape.
+
+**D19. What a stage inherits from its predecessor is a workflow property, with three settings.** One grant field, `since`, expresses all three: the stage's own start, so artifacts alone; the predecessor's handoff message, so artifacts and one deliberate framing message; or null, the whole room. Default to the first. Which fits depends on the agent and model pair and on the kind of task, which is why it is policy rather than a rule. Rejected: one isolation rule for every workflow.
+
+The framing setting is the interesting one, and it is weaker than a shared room by more than one message. A handoff is open loop: the predecessor is stopped and its grant revoked before the successor starts, so it cannot adapt to what the successor says. It can still lie once, in 64 KiB, under its own name, in a message the developer reads.
+
+**D20. Artifacts are transport; the room is the record.** Stage output moves on the bind mount, which D1 already requires of files. The room carries what the developer watches and intervenes in. The room's audience and a grant's window are therefore different things: one log, one window per stage. That is what lets a stage read nothing of its predecessor's conversation while the developer reads all of it, without splitting the workflow across rooms.
+
+**D21. `user` and `system` messages cross every stage boundary. `since` filters `agent` authors alone.** A workflow that drops the developer's standing instruction at a stage boundary is a bug, not an isolation policy. Two costs: `since` is two rules rather than one, and a grant must be able to resolve an author to a kind, which 8.3 denies today. See 8.5.
 
 ## 7. Model changes
 
@@ -168,7 +203,9 @@ Against wire-contract. Every one is a socket operation or an additive field. HTT
 
 `POST /login` yields a 12-hour cookie refreshed to a 7-day ceiling. That is wrong for a caller inside a box it controls: the credential is reusable and outlives the run by orders of magnitude.
 
-`pma` mints a credential per task from its admin session, carrying its rooms, no admin group, and no capability it was not given. Expiry tracks the task with an outer bound, not the run; a multi-run task keeps one room and one history, and each run gets a fresh grant over it. Revocation closes every websocket on the grant, as `/logout` already does for a session.
+`pma` mints a credential per stage from its admin session, carrying its room, its `since`, no admin group, and no capability it was not given.
+
+Scope and expiry are separate axes, and an earlier draft conflated them. The room tracks the workflow; the expiry tracks the run. A grant expires with its stage's run timeout, bounded above by the workflow's own outer bound. A three-stage workflow mints three grants over one room and revokes each before minting the next (section 5), so a task open for weeks never implies a credential valid for weeks. Revocation closes every websocket on the grant, as `/logout` already does for a session.
 
 The agent presents it as an `Authorization` header on the upgrade and on HTTP. A header is not a route. A bearer token also drops what a cookie carries for nobody's benefit here: `SameSite`, the CSP `connect-src` dance, and a cookie jar on disk inside the container.
 
@@ -180,13 +217,13 @@ A grant carries an explicit capability set and anything absent is refused with t
 
 | | worker | `pma-agent` |
 |-|-|-|
-| read | one task room, `control` | every task room, `control` |
-| send | that room | every task room |
+| read | its workflow room from its `since`; `control` | the workflow rooms it supervises, whole; `control` |
+| send | that room | those rooms |
 | submit | that room | that room and `control` |
 | acknowledge a decision | yes | yes |
 | everything else | refused | refused |
 
-`pma-agent` differs from a worker in room scope alone. It is not a separate class.
+`pma-agent` differs from a worker in room scope and window alone. It is not a separate class.
 
 ### 8.3 Denials
 
@@ -226,7 +263,11 @@ Three are not capabilities but blanket refusals, because the surface behind each
 
 - A structured payload alongside `body`, passed through unread (D18). A worker's request has fields: what permission, the projected cost, the path, the command. An instruction to a worker has a verb: continue, interrupt, stop, abandon. Without it a harness must interrupt on every message, which makes a status note destructive, or on none, which makes correction impossible. This is the case chat-concepts open question 3 in [channels.md](channels.md) anticipates.
 
-- A task id and a run id on every object. Two keys joining four records: `pma`'s task and run rows, `sanduk`'s report and relay log, and the minos archive. Without them, reconstructing what an agent did means matching timestamps across three clocks.
+- A task id, a run id, a workflow id and a stage on every object. Keys joining four records: `pma`'s task and run rows, `sanduk`'s report and relay log, and the minos archive. Without them, reconstructing what an agent did means matching timestamps across three clocks. minos reads none of them (D20's corollary: it does not know what a workflow is).
+
+- `since` on a grant: a seq, or null. `history` and `sync` refuse `agent`-authored messages before it (D19, D21). One field, four uses: stage isolation, D14's persisted-room case, the `group.assign` disclosure in section 11, and a newly invited agent that must not receive five years of room history.
+
+- Author `kind` readable by a grant holder, either on the message or as the kinds of authors in the grant's own rooms on its `sync`. 7.1 puts `kind` on the user object while 8.3 gives a grant no roster, so the reader D11 exists to serve cannot resolve a name to a kind. D21 needs it as well.
 
 ### 8.6 Separable listeners
 
@@ -291,7 +332,9 @@ Request and reply is about 80 percent built. Submissions are the right primitive
 
 Stated, not solved.
 
-**Nothing deletes a task room.** D9 founds rooms as an administrator, and chat-concepts open question 1 leaves unanswered who may delete a persisted room. A space bounds what its rooms hold and not how many there are. The count grows with every dispatched task across 95 repositories. Two ways out, both larger than this design: answer chat-concepts open question 1, or give a space a room lifetime, which inherits the transient room's whole problem of a deletion promise enforced by a sweep running when nobody is watching.
+**Nothing deletes a workflow room.** D9 founds rooms as an administrator, and chat-concepts open question 1 leaves unanswered who may delete a persisted room. A space bounds what its rooms hold and not how many there are.
+
+D5 reduces the pressure without closing the hole. Room count tracks workflows dispatched, not the open backlog, and dispatch is a triaged batch the developer sizes against cost, so the count starts at zero and grows at a rate they choose. A completed workflow is also an unambiguous deletion trigger, which an open-ended task is not. What is still missing is anyone entitled to act on it: answer chat-concepts open question 1, or give a space a room lifetime, which inherits the transient room's problem of a deletion promise enforced by a sweep running when nobody is watching.
 
 **Group assignment admits an agent everywhere at once.** A grant tracks the group (chat-concepts 2.3), so assigning an agent to `engineering` admits it to every room that group was invited to and discloses all of their history, in one `group.assign`, with nobody in those rooms asked. D8 uses a group per project, which makes this the mechanism the design relies on. Forbidding agents as group members is one check in `group.assign` and would break D8. Unresolved.
 
@@ -321,9 +364,9 @@ Stated, not solved.
 
 2. Is the capability set (8.2) general, or a single `agent` role with a room list? General costs more now and avoids a second special case later.
 
-3. Does `archive.search` span a space? "Search every task room in `cynn`" is the obvious want, and it is the pressure that breaks D7: a space-wide search must resolve to the union of rooms the caller may reach, and a careless version resolves to the space's audience, which a space does not have. Answer before building search, not after.
+3. Does `archive.search` span a space? "Search every workflow room in `cynn`" is the obvious want, and it is the pressure that breaks D7: a space-wide search must resolve to the union of rooms the caller may reach, and a careless version resolves to the space's audience, which a space does not have. Answer before building search, not after.
 
-4. Can `pma` recover a task room its own database lost? If `pma` founds rooms and its state is the only index, a `pma` failure leaves the developer unable to find the room in exactly the case the room exists for.
+4. Can `pma` recover a workflow room its own database lost? If `pma` founds rooms and its state is the only index, a `pma` failure leaves the developer unable to find the room in exactly the case the room exists for.
 
 5. Does a timed-out submission count against the worker's failures, or against the person who did not answer?
 
