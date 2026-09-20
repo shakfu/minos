@@ -115,6 +115,7 @@ A `<channel>` is one word: its name with `_` for each space, its id, or the star
 |-|-|
 | `docs/dev/chat-concepts.md` | The model: what a room, group and channel are. Front-end independent. |
 | `docs/` | The wire contract, and development notes under `docs/dev/`. |
+| `docs/media/` | Diagrams, and the d2 sources `make diagrams` builds them from. |
 | `go/` | The server, the terminal client, the conformance suite and the demo. One module. |
 | `dist/` | What the `osjs:` mountpoint serves. Optional, and nothing in the tree builds it. |
 | `vfs/` | User home directories. Generated. |

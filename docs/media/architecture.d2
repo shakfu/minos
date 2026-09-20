@@ -1,0 +1,174 @@
+# Agents in containers: who talks to whom.
+# Source for architecture.svg. Regenerate with `make diagrams`, which runs
+# d2 --layout=tala over this file. Needs d2; nothing else in the tree does.
+# See docs/dev/agent-container-net.md
+
+direction: down
+
+title: "Agents in containers -- architecture" {
+  shape: text
+  near: top-center
+  style: {
+    font-size: 28
+    bold: true
+  }
+}
+
+host: "Host" {
+  style: {
+    fill: "#f8f8f7"
+    stroke: "#666666"
+  }
+
+  dev: "Developer" {
+    shape: person
+    style.fill: "#ffffff"
+  }
+
+  tui: "minos TUI\ngo/cmd/minos" {
+    style.fill: "#ffffff"
+  }
+
+  pma: "pma -- the tool\ntrusted: it is code\nadmin session" {
+    style: {
+      fill: "#eef2f6"
+      stroke-width: 3
+    }
+  }
+
+  supervisor: "pma-agent\nuntrusted model\nholds a grant" {
+    style: {
+      fill: "#ffffff"
+      stroke-dash: 2
+    }
+  }
+
+  sanduk: "sanduk\nowns the container\nand a per-agent adapter" {
+    style.fill: "#ffffff"
+  }
+
+  minosd: "minosd" {
+    style: {
+      fill: "#ffffff"
+      stroke-width: 3
+    }
+
+    core: "socket + chat + timeline" {
+      style.fill: "#eef2f6"
+    }
+    control: "control\nchannel, restricted to group workers\nread-only to its audience" {
+      style.fill: "#ffffff"
+    }
+    room: "workflow/<id>\nroom, admin-founded\none per workflow instance" {
+      style.fill: "#ffffff"
+    }
+
+    core -> control
+    core -> room
+  }
+}
+
+box: "Sealed container -- one per run" {
+  style: {
+    fill: "#fbf9f5"
+    stroke: "#666666"
+    stroke-dash: 4
+  }
+
+  client: "agent client -- owns the agent process" {
+    style.fill: "#ffffff"
+
+    wire: "wire side\n7 ops, one queue, one cursor" {
+      style.fill: "#eef2f6"
+    }
+    mcp: "MCP server, stdio\nthe agent calls in" {
+      style.fill: "#eef2f6"
+    }
+    pipes: "process side\nspawns the agent,\nstream-json in and out" {
+      style.fill: "#eef2f6"
+    }
+
+    wire -> mcp: "drains the queue on demand" {
+      style.stroke: "#0f766e"
+    }
+    wire -> pipes: "pushes what will not wait" {
+      style.stroke: "#0f766e"
+    }
+  }
+
+  agent: "agent process\nclaude, or another CLI" {
+    style: {
+      fill: "#ffffff"
+      stroke-dash: 2
+    }
+  }
+
+  agent <-> client.mcp: "the agent asks:\nmessages, say, submit,\nawait, progress -- and the replies" {
+    style.stroke: "#0f766e"
+  }
+  client.pipes -> agent: "stdin: a pushed message,\nqueued for the turn's end;\nan interrupt, which is not" {
+    style.stroke: "#0f766e"
+  }
+  agent -> client.pipes: "stdout: the turn,\nits trace, its cost" {
+    style.stroke: "#0f766e"
+  }
+}
+
+mounts: "bind mounts\n/work, artifacts, session store" {
+  shape: cylinder
+  style.fill: "#ffffff"
+}
+
+host.dev -> host.tui
+host.tui -> host.minosd.core: "chat"
+host.supervisor -> host.minosd.core: "chat, within its grant"
+host.pma -> host.minosd.core: "admin: found rooms, invite,\nmint and revoke grants" {
+  style: {
+    stroke: "#0b3d63"
+    stroke-width: 4
+  }
+}
+host.pma -> host.sanduk: "dispatch a stage" {
+  style: {
+    stroke: "#0b3d63"
+    stroke-width: 4
+  }
+}
+box.client.wire -> host.minosd.core: "unix socket\nno network address" {
+  style: {
+    stroke: "#0b3d63"
+    stroke-width: 4
+  }
+}
+
+host.sanduk -> box: "builds, starts, kills the container.\nSIGINT and the kill need no\ncooperation from the agent" {
+  style: {
+    stroke: "#7a7a7a"
+    stroke-dash: 4
+  }
+}
+host.pma -> box: "dispatch, then revoke" {
+  style: {
+    stroke: "#7a7a7a"
+    stroke-dash: 4
+  }
+}
+
+box.agent -> mounts: "writes artifacts" {
+  style: {
+    stroke: "#9a9a9a"
+    stroke-dash: 2
+  }
+}
+host.pma -> mounts: "reads artifacts" {
+  style: {
+    stroke: "#9a9a9a"
+    stroke-dash: 2
+  }
+}
+
+legend: "blue: conversation, through minos\nnavy, heavy: authority -- grants, dispatch, and the one wire in\nteal: inside the container -- the agent asks, the client pushes and reads\ngrey dashed: container control, never through minos\ngrey dotted: files, on the bind mount, never through minos" {
+  shape: text
+  near: bottom-center
+  style.font-size: 18
+}

@@ -1,0 +1,166 @@
+# Agents in containers: what can reach what.
+# Source for network.svg. Regenerate with `make diagrams`, which runs
+# d2 --layout=elk over this file. Needs d2; nothing else in the tree does.
+# See docs/dev/agent-container-net.md section 2.
+
+direction: right
+
+title: "Agents in containers -- reach" {
+  shape: text
+  near: top-center
+  style: {
+    font-size: 28
+    bold: true
+  }
+}
+
+host: "Host" {
+  label.near: top-left
+  style: {
+    fill: "#f8f8f7"
+    stroke: "#666666"
+  }
+
+  loopback: "loopback -- 127.0.0.1" {
+    style: {
+      fill: "#ffffff"
+      stroke: "#999999"
+    }
+
+    tui: "minos TUI\ngo/cmd/minos" {
+      style.fill: "#ffffff"
+    }
+    pma: "pma -- the tool\nadmin session" {
+      style.fill: "#eef2f6"
+    }
+  }
+
+  minosd: "minosd" {
+    label.near: top-left
+    style: {
+      fill: "#ffffff"
+      stroke-width: 3
+    }
+
+    tcp: "listener A\ntcp 127.0.0.1:8000\nMINOS_HOST default" {
+      style.fill: "#eef2f6"
+    }
+    unix: "listener B\nunix /run/minos/agent.sock\nnet.Listen(\"unix\")" {
+      style.fill: "#eef2f6"
+    }
+    note: "no address on the\ncontainer network" {
+      shape: text
+      style.font-size: 16
+    }
+  }
+
+  sock: "/run/minos/agent.sock\nsocket file, mode 0660\nbind-mounted per container" {
+    shape: page
+    style.fill: "#ffffff"
+  }
+
+  relay: "sanduk relay\nHTTP/1.1, no upgrade handling\nexact-path allowlist, 3 paths\nper-run bearer token, budget" {
+    style: {
+      fill: "#ffffff"
+      stroke-width: 3
+    }
+  }
+
+  sealed: "container network -- docker --internal\nno route off the host" {
+    style: {
+      fill: "#fbf9f5"
+      stroke: "#666666"
+      stroke-dash: 4
+    }
+
+    c1: "container 1" {
+      style.fill: "#ffffff"
+
+      client: "agent client\nholds the room's one cursor" {
+        style.fill: "#eef2f6"
+      }
+      agent: "agent process\nno address of its own" {
+        style: {
+          fill: "#ffffff"
+          stroke-dash: 2
+        }
+      }
+
+      client -> agent: "stdin: a message,\nor an interrupt" {
+        style.stroke: "#0f766e"
+      }
+      agent -> client: "stdout: the turn,\ntrace, cost" {
+        style.stroke: "#0f766e"
+      }
+
+      note: "both pipes stay inside.\nNothing outside addresses the agent." {
+        shape: text
+        style.font-size: 16
+      }
+    }
+    c2: "container 2\nagent client + agent" {
+      style.fill: "#ffffff"
+    }
+  }
+}
+
+provider: "model provider API\nhttps" {
+  shape: cloud
+  style.fill: "#ffffff"
+}
+
+host.loopback.tui -> host.minosd.tcp: "websocket + HTTP"
+host.loopback.pma -> host.minosd.tcp: "admin ops:\nmint, revoke, found"
+
+host.sealed.c1.client -> host.sock: "opens the mounted file" {
+  style: {
+    stroke: "#0b3d63"
+    stroke-width: 4
+  }
+}
+host.sealed.c2 -> host.sock: "opens the mounted file" {
+  style: {
+    stroke: "#0b3d63"
+    stroke-width: 4
+  }
+}
+host.sock -> host.minosd.unix: "the same socket,\nhost side" {
+  style: {
+    stroke: "#0b3d63"
+    stroke-width: 4
+  }
+}
+
+host.sealed.c1.agent -> host.relay: "completions only" {
+  style: {
+    stroke: "#7a7a7a"
+    stroke-dash: 2
+    stroke-width: 3
+  }
+}
+host.relay -> provider: "the only egress\nfrom a sealed container" {
+  style: {
+    stroke: "#7a7a7a"
+    stroke-dash: 2
+    stroke-width: 3
+  }
+}
+
+host.sealed.c1 -> host.minosd.tcp: "no route:\nminosd has no address here" {
+  style: {
+    stroke: "#aa3333"
+    stroke-dash: 4
+  }
+}
+host.sealed.c1 -> host.sealed.c2: "reachable -- which is why\nminosd stays off this network" {
+  style: {
+    stroke: "#aa3333"
+    stroke-dash: 4
+  }
+}
+
+legend: "navy, heavy: the one path a container has to minos\nteal: inside the container -- pipes that cross no boundary\ngrey dotted: model traffic, through the relay\nred dashed: no route, or a route minos declines to take\nThe socket removes reach. The grant removes authority. Build both." {
+  shape: text
+  near: bottom-center
+  style.font-size: 18
+}

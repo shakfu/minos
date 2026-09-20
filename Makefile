@@ -1,4 +1,6 @@
-.PHONY: go serve tui user-demo user-alice demo test conformance clean
+MEDIA := docs/media
+
+.PHONY: go serve tui user-demo user-alice demo test conformance diagrams clean-diagrams clean
 
 GO_SOURCES := $(shell find go -name '*.go' 2>/dev/null) go/go.mod go/go.sum
 
@@ -39,6 +41,28 @@ test: go/minosd
 ## already running. See docs/dev/conformance-plan.md.
 conformance: go/minosd
 	@cd go && MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd go test -count=1 ./conformance
+
+## The diagrams in $(MEDIA), from their d2 sources. The only target that
+## needs a toolchain other than Go, and nothing else depends on it: the SVGs
+## are committed, so a tree without d2 builds, tests and reads the docs.
+diagrams: $(MEDIA)/architecture.svg $(MEDIA)/network.svg $(MEDIA)/architecture.pdf $(MEDIA)/network.pdf
+
+clean-diagrams:
+	@rm -f $(MEDIA)/architecture.svg $(MEDIA)/architecture.pdf
+	@rm -f $(MEDIA)/network.svg $(MEDIA)/network.pdf
+
+$(MEDIA)/architecture.svg: $(MEDIA)/architecture.d2
+	@d2 --layout=tala $< $@
+
+$(MEDIA)/network.svg: $(MEDIA)/network.d2
+	@d2 --layout=tala $< $@
+
+$(MEDIA)/architecture.pdf: $(MEDIA)/architecture.d2
+	@d2 --layout=tala $< $@
+
+$(MEDIA)/network.pdf: $(MEDIA)/network.d2
+	@d2 --layout=tala $< $@
+
 
 clean:
 	@rm -rf .run go/minosd go/minos
