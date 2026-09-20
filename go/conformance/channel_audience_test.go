@@ -125,12 +125,21 @@ func TestAChannelIsFoundedRestrictedWhenItNamesGroups(t *testing.T) {
 	same(t, bob.Refuse("subscribe", "channel", channel["id"]), "That channel is restricted")
 }
 
-func TestAChannelNameIsUniqueAmongChannels(t *testing.T) {
+func TestAChannelNameIsUniqueWithinItsProject(t *testing.T) {
 	demo := connect(t, admin)
 	title := unique("Twice")
 	demo.Call("channel.create", "title", title, "groups", []string{})
 	same(t, demo.Refuse("channel.create", "title", title, "groups", []string{}),
-		fmt.Sprintf("A channel called '%s' already exists", title))
+		fmt.Sprintf("A channel called '%s' already exists under no project", title))
+
+	// A channel is founded in a project the same way a room is.
+	project := obj(demo.Call("project.create", "name", unique("cynn"), "tags", []any{})["project"])
+	channel := demo.Call("channel.create", "title", title, "groups", []string{},
+		"project", project["id"])
+	same(t, channel["project"], project["id"])
+	same(t, demo.Refuse("channel.create", "title", title, "groups", []string{},
+		"project", project["id"]),
+		fmt.Sprintf("A channel called '%s' already exists in %s", title, project["name"]))
 }
 
 func TestFoundingAndPublishingAreTheAdministrators(t *testing.T) {

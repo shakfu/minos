@@ -4,6 +4,7 @@ package tui
 // are where a keystroke reaches the server, and drawing is not.
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -42,6 +43,24 @@ func waitFor(t *testing.T, what string, predicate func() bool) {
 // headless is the interface without a terminal under it.
 func headless(c *client.Client) *Ui {
 	return newUi(nil, c, client.Profile{Username: c.Me()})
+}
+
+// show opens one space, as Enter on its row in the rooms list does.
+func (u *Ui) show(id string) {
+	space, ok := u.client.Space(id)
+	if !ok {
+		panic("no such space: " + id)
+	}
+	u.openSpace(space)
+}
+
+// showTabRooms opens the rooms list with the cursor on one space, which is
+// highlighting it rather than going in.
+func (u *Ui) showTabRooms(id string) {
+	u.showTab(tabRooms)
+	rows := u.roomRows()
+	u.cursor = max(0, slices.IndexFunc(rows, func(r client.Room) bool { return r.ID == id }))
+	u.followCursor()
 }
 
 // said is the first notice containing fragment, and whether there was one.
@@ -172,7 +191,7 @@ func TestARestrictedChannelRefusesAnOutsider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	desk, err := demo.CreateChannel("Ops desk", []string{ops.ID})
+	desk, err := demo.CreateChannel("Ops desk", []string{ops.ID}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +219,7 @@ func TestAnAnnouncementNamesTheChannelItFounded(t *testing.T) {
 func TestAChannelIsNamedByTitleOrIdPrefix(t *testing.T) {
 	server := testserver.Start(t, config.HistoryLimit)
 	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
-	founded, err := demo.CreateChannel("Ops notices", nil)
+	founded, err := demo.CreateChannel("Ops notices", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +267,7 @@ func TestAChannelIsFoundedAndWrittenToFromTheComposer(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ui.selectSpace(channel)
+	ui.show(channel)
 	ui.compose("the first")
 
 	waitFor(t, "the publication", func() bool { return len(alice.Log(channel)) > 0 })
@@ -260,7 +279,7 @@ func TestAChannelIsFoundedAndWrittenToFromTheComposer(t *testing.T) {
 func TestAnOrdinaryUserCannotPublishToAChannel(t *testing.T) {
 	server := testserver.Start(t, config.HistoryLimit)
 	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
-	bulletins, err := demo.CreateChannel("Bulletins", nil)
+	bulletins, err := demo.CreateChannel("Bulletins", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +288,7 @@ func TestAnOrdinaryUserCannotPublishToAChannel(t *testing.T) {
 	}
 
 	ui := headless(alice)
-	ui.selectSpace(bulletins.ID)
+	ui.show(bulletins.ID)
 	ui.compose("hello")
 	ui.mustSay(t, "administrator")
 }
@@ -292,23 +311,77 @@ func (c *collector) has(fragment string) bool {
 	return slices.ContainsFunc(c.lines, func(line string) bool { return strings.Contains(line, fragment) })
 }
 
-// Tab walks past the spaces to the people, then wraps back to the spaces.
-func TestTabReachesPeopleAfterTheSpaces(t *testing.T) {
+// Tab walks the tab bar and wraps. A tab is the top level, so each one lands on
+// its own list with the cursor at the top.
+func TestTabWalksTheTabBarAndWraps(t *testing.T) {
 	demo := connect(t, testserver.Start(t, config.HistoryLimit).Base, "demo")
 	ui := headless(demo)
 	ui.ensureSelection()
 
-	walk := []string{ui.selected + "|" + ui.person}
-	for range 3 {
+	walk := []tab{ui.tab}
+	for range 4 {
 		ui.cycle(1)
-		walk = append(walk, ui.selected+"|"+ui.person)
+		walk = append(walk, ui.tab)
 	}
-	if want := []string{"system|", "|alice", "|bob", "system|"}; !slices.Equal(walk, want) {
-		t.Fatalf("Tab walked %q, want %q", walk, want)
+	want := []tab{tabOverview, tabProjects, tabRooms, tabPeople, tabOverview}
+	if !slices.Equal(walk, want) {
+		t.Fatalf("Tab walked %v, want %v", walk, want)
 	}
+
+	// PEOPLE lands on the first person, so Enter raises a room without a command.
 	ui.cycle(-1)
-	if ui.person != "bob" || ui.selected != "" {
-		t.Fatalf("S-Tab reached %q|%q", ui.selected, ui.person)
+	if ui.tab != tabPeople || ui.person != "alice" || ui.selected != "" {
+		t.Fatalf("S-Tab reached %v with %q|%q", ui.tab, ui.selected, ui.person)
+	}
+	// ROOMS lands on a space, which is highlighting it and not going in.
+	ui.cycle(-1)
+	if ui.tab != tabRooms || ui.selected != systemChannel || ui.occupancy != "" {
+		t.Fatalf("S-Tab reached %v with %q, occupancy %q", ui.tab, ui.selected, ui.occupancy)
+	}
+}
+
+// Enter on a project lists its rooms; Esc comes back to it.
+func TestEnterOnAProjectListsItsRoomsAndEscComesBack(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo := connect(t, server.Base, "demo")
+	room, err := demo.CreateRoom("Standup", nil, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := headless(demo)
+	if err := ui.cmdProject([]string{"new", "cynn"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ui.cmdProject([]string{"file", "Standup", "cynn"}); err != nil {
+		t.Fatal(err)
+	}
+
+	ui.showTab(tabProjects)
+	rows := ui.projectRows()
+	if len(rows) != 2 || rows[0].name != "cynn" || rows[0].rooms != 1 || rows[1].id != unfiled {
+		t.Fatalf("the projects list is %+v", rows)
+	}
+
+	// In: the page is that project's, and lists its places alone.
+	ui.compose("")
+	if ui.view != viewProject || !ui.scoped || ui.scope != rows[0].id {
+		t.Fatalf("Enter reached view %d, scope %q", ui.view, ui.scope)
+	}
+	inside := ui.roomRows()
+	if len(inside) != 1 || inside[0].ID != room.ID {
+		t.Fatalf("the project holds %+v", inside)
+	}
+
+	// Out: back on the projects, with the cursor on the one just left.
+	ui.back()
+	if ui.view != viewProjects || ui.scoped || ui.cursor != 0 {
+		t.Fatalf("Esc reached view %d, scoped %v, cursor %d", ui.view, ui.scoped, ui.cursor)
+	}
+
+	// The system channel is filed under nothing, so it is in the (none) row.
+	ui.openProject(unfiled)
+	if rows := ui.roomRows(); len(rows) != 1 || rows[0].ID != systemChannel {
+		t.Fatalf("under no project: %+v", rows)
 	}
 }
 
@@ -354,7 +427,7 @@ func TestEnterGoesIntoARoomAndExitStepsOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	ui := headless(demo)
-	ui.ensureSelection()
+	ui.showTabRooms(room.ID)
 	if ui.selected != room.ID || ui.occupancy != "" || len(server.Store.OccupantsOf(room.ID)) != 0 {
 		t.Fatalf("highlighting entered the room: selected %q, occupancy %q", ui.selected, ui.occupancy)
 	}
@@ -479,7 +552,7 @@ func seqs(messages []client.Message) []int64 {
 func TestEnterOpensTheSelectedItemAndItLeavesThePendingStack(t *testing.T) {
 	server := testserver.Start(t, config.HistoryLimit)
 	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
-	founded, err := demo.CreateChannel("News", nil)
+	founded, err := demo.CreateChannel("News", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +566,7 @@ func TestEnterOpensTheSelectedItemAndItLeavesThePendingStack(t *testing.T) {
 	}
 	waitFor(t, "both items", func() bool { return len(alice.Log(founded.ID)) == 2 })
 	ui := headless(alice)
-	ui.selectSpace(founded.ID)
+	ui.show(founded.ID)
 	space, _ := alice.Space(founded.ID)
 
 	// Newest first, so the cursor starts on the second.
@@ -521,7 +594,7 @@ func TestEnterOpensTheSelectedItemAndItLeavesThePendingStack(t *testing.T) {
 
 func TestTheComposerTakesASubjectBeforeABar(t *testing.T) {
 	demo := connect(t, testserver.Start(t, config.HistoryLimit).Base, "demo")
-	founded, err := demo.CreateChannel("Bulletin", nil)
+	founded, err := demo.CreateChannel("Bulletin", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +602,7 @@ func TestTheComposerTakesASubjectBeforeABar(t *testing.T) {
 		t.Fatal(err)
 	}
 	ui := headless(demo)
-	ui.selectSpace(founded.ID)
+	ui.show(founded.ID)
 	ui.compose("Deploy | at four | sharp")
 	ui.compose("Just a line")
 
@@ -548,7 +621,7 @@ func TestTheComposerTakesASubjectBeforeABar(t *testing.T) {
 func TestSystemIsReadAsALog(t *testing.T) {
 	demo := connect(t, testserver.Start(t, config.HistoryLimit).Base, "demo")
 	ui := headless(demo)
-	ui.selectSpace(systemChannel)
+	ui.show(systemChannel)
 	ui.compose("")
 	if notices := ui.recentNotices(noticeKeep); len(notices) > 1 {
 		t.Fatalf("Enter in system said %q", notices)
@@ -581,7 +654,7 @@ func TestAPeriodIsANumberWithAUnit(t *testing.T) {
 func TestArchiveShowsAndSetsTheSpacesSetting(t *testing.T) {
 	server := testserver.Start(t, config.HistoryLimit)
 	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
-	founded, err := demo.CreateChannel("Notices", nil)
+	founded, err := demo.CreateChannel("Notices", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -591,7 +664,7 @@ func TestArchiveShowsAndSetsTheSpacesSetting(t *testing.T) {
 		}
 	}
 	ui := headless(demo)
-	ui.selectSpace(founded.ID)
+	ui.show(founded.ID)
 
 	ui.command("/archive")
 	ui.mustSay(t, "keeps everything")
@@ -610,7 +683,7 @@ func TestArchiveShowsAndSetsTheSpacesSetting(t *testing.T) {
 	ui.mustSay(t, "a period like 30d")
 
 	other := headless(alice)
-	other.selectSpace(founded.ID)
+	other.show(founded.ID)
 	other.command("/archive 1d")
 	other.mustSay(t, "administrator")
 }
@@ -620,7 +693,7 @@ func TestArchivedAndSearchShowTheArchive(t *testing.T) {
 	t.Setenv("MINOS_ROOM_SWEEP", "0.1")
 	server := testserver.Start(t, config.HistoryLimit)
 	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
-	founded, err := demo.CreateChannel("Minutes", nil)
+	founded, err := demo.CreateChannel("Minutes", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -637,7 +710,7 @@ func TestArchivedAndSearchShowTheArchive(t *testing.T) {
 	waitFor(t, "both items", func() bool { return len(alice.Log(founded.ID)) == 2 })
 
 	ui := headless(demo)
-	ui.selectSpace(founded.ID)
+	ui.show(founded.ID)
 	ui.command("/archive 0.2s")
 	// The archived push is what empties alice's copy.
 	waitFor(t, "the archival", func() bool { return len(alice.Log(founded.ID)) == 0 })
@@ -649,7 +722,7 @@ func TestArchivedAndSearchShowTheArchive(t *testing.T) {
 	}
 
 	reader := headless(alice)
-	reader.selectSpace(founded.ID)
+	reader.show(founded.ID)
 	reader.command("/search hiring")
 	reader.mustSay(t, "not searchable")
 	ui.command("/archive searchable")
@@ -663,13 +736,256 @@ func TestArchivedAndSearchShowTheArchive(t *testing.T) {
 func TestANewUserIsToldHowToStartARoom(t *testing.T) {
 	server := testserver.Start(t, config.HistoryLimit)
 	demo := connect(t, server.Base, "demo")
-	headless(demo).mustSay(t, "Tab to a person")
+	headless(demo).mustSay(t, "Tab to PEOPLE")
 
 	if _, err := demo.OpenRoom([]client.Principal{{Kind: "user", ID: "alice"}}, "", "persisted"); err != nil {
 		t.Fatal(err)
 	}
 	alice := connect(t, server.Base, "alice")
-	if notice, said := headless(alice).said("Tab to a person"); said {
+	if notice, said := headless(alice).said("Tab to PEOPLE"); said {
 		t.Fatalf("alice has a room and was still told %q", notice)
+	}
+}
+
+// The projects table's unread column totals to what the status line says, so a
+// room the user founded and never entered is counted by neither.
+func TestTheProjectsUnreadColumnAgreesWithTheStatusLine(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	mine, err := demo.CreateRoom("Mine", []client.Principal{{Kind: "user", ID: "alice"}}, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "alice to be invited", func() bool { _, ok := alice.Space(mine.ID); return ok })
+	if err := alice.Send(mine.ID, "hello?"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the message", func() bool { return len(demo.Log(mine.ID)) == 1 })
+
+	ui := headless(demo)
+	if err := ui.cmdProject([]string{"new", "cynn"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ui.cmdProject([]string{"file", "Mine", "cynn"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Founded and never entered: unread nowhere, and not an invitation either,
+	// because demo founded it.
+	total := func() int64 {
+		var sum int64
+		for _, row := range ui.projectRows() {
+			sum += row.unread
+		}
+		return sum
+	}
+	if total() != 0 || demo.UnreadMessages() != 0 || demo.OpenInvitations() != 0 {
+		t.Fatalf("before entering: column %d, status %d, invitations %d",
+			total(), demo.UnreadMessages(), demo.OpenInvitations())
+	}
+
+	// Entered, left, then something new: both count it, and they agree.
+	ui.show(mine.ID)
+	ui.command("/exit")
+	if err := alice.Send(mine.ID, "still there?"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the second message", func() bool { return len(demo.Log(mine.ID)) == 2 })
+	if total() != demo.UnreadMessages() || total() == 0 {
+		t.Fatalf("after the visit: column %d, status %d", total(), demo.UnreadMessages())
+	}
+}
+
+// The overview ranks projects by what was said in their open places lately,
+// and a project with nothing said is left out: the tab answers where the work
+// is, and silence is the answer for those.
+func TestTheOverviewRanksProjectsByWhatWasSaidLately(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+
+	rooms := map[string]string{}
+	for _, title := range []string{"busy", "quiet", "done", "idle"} {
+		room, err := demo.CreateRoom(title, []client.Principal{{Kind: "user", ID: "alice"}}, "", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rooms[title] = room.ID
+	}
+	for title, count := range map[string]int{"busy": 3, "quiet": 1, "done": 5} {
+		for range count {
+			if err := alice.Send(rooms[title], "progress"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	waitFor(t, "the messages", func() bool { return len(demo.Log(rooms["done"])) == 5 })
+
+	ui := headless(demo)
+	for _, args := range [][]string{
+		{"new", "one"}, {"new", "two"}, {"new", "three"},
+		{"file", "busy", "one"}, {"file", "quiet", "two"},
+		{"file", "done", "three"}, {"file", "idle", "three"},
+	} {
+		if err := ui.cmdProject(args); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A closed place is not where work is happening, so what was said in it
+	// stops counting. "three" had the most and drops out entirely.
+	if err := ui.cmdClose([]string{"done"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var ranked []string
+	for _, row := range ui.overviewRows() {
+		ranked = append(ranked, fmt.Sprintf("%s:%d", row.name, row.said))
+	}
+	if want := []string{"one:3", "two:1"}; !slices.Equal(ranked, want) {
+		t.Fatalf("the overview ranked %v, want %v", ranked, want)
+	}
+
+	// Older than the window is not lately.
+	ui.now = func() time.Time { return time.Now().Add(activeWindow + time.Hour) }
+	if rows := ui.overviewRows(); len(rows) != 0 {
+		t.Fatalf("stale messages still rank: %+v", rows)
+	}
+}
+
+// Closing hides a place from the lists without taking it away: `a` brings it
+// back, and its project still counts it among what it holds.
+func TestClosingHidesAPlaceAndAShowsItAgain(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo := connect(t, server.Base, "demo")
+	room, err := demo.CreateRoom("task/12", nil, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := headless(demo)
+	for _, args := range [][]string{{"new", "cynn"}, {"file", "task/12", "cynn", "12"}} {
+		if err := ui.cmdProject(args); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ui.openProject(ui.projectRows()[0].id)
+	if rows := ui.roomRows(); len(rows) != 1 || rows[0].Scope != "task" || rows[0].Task != "12" {
+		t.Fatalf("the project holds %+v", rows)
+	}
+
+	if err := ui.cmdClose(nil); err != nil {
+		t.Fatal(err)
+	}
+	if rows := ui.roomRows(); len(rows) != 0 || ui.closedCount() != 1 {
+		t.Fatalf("closed: %d shown, %d closed", len(rows), ui.closedCount())
+	}
+	// Still held, and still readable: closing is not deleting.
+	held := ui.projectRows()[0]
+	if held.rooms != 1 || held.active != 0 || held.closed != 1 {
+		t.Fatalf("the project counts %+v", held)
+	}
+
+	ui.key(tcell.NewEventKey(tcell.KeyRune, 'a', tcell.ModNone))
+	if rows := ui.roomRows(); len(rows) != 1 {
+		t.Fatalf("a showed %d places", len(rows))
+	}
+	// A letter typed into the composer is text, not the toggle.
+	ui.input = []rune("s")
+	ui.key(tcell.NewEventKey(tcell.KeyRune, 'a', tcell.ModNone))
+	if string(ui.input) != "sa" {
+		t.Fatalf("the composer holds %q", string(ui.input))
+	}
+
+	if err := ui.cmdReopen([]string{"task/12"}); err != nil {
+		t.Fatal(err)
+	}
+	if space, _ := demo.Space(room.ID); !space.Open() {
+		t.Fatalf("reopening left it %q", space.State)
+	}
+}
+
+// Tags classify a project and are folded, so #Go and #go are one tag.
+func TestTagsAreFoldedAndShownOnTheProject(t *testing.T) {
+	demo := connect(t, testserver.Start(t, config.HistoryLimit).Base, "demo")
+	ui := headless(demo)
+	if err := ui.cmdProject([]string{"new", "cynn", "#Go", "#infra"}); err != nil {
+		t.Fatal(err)
+	}
+	row := ui.projectRows()[0]
+	if row.name != "cynn" || !slices.Equal(row.tags, []string{"go", "infra"}) {
+		t.Fatalf("the project is %+v", row)
+	}
+
+	if err := ui.cmdProject([]string{"untag", "cynn", "GO"}); err != nil {
+		t.Fatal(err)
+	}
+	if tags := ui.projectRows()[0].tags; !slices.Equal(tags, []string{"infra"}) {
+		t.Fatalf("after untagging: %v", tags)
+	}
+	if err := ui.cmdProject([]string{"tag", "cynn", "#rust"}); err != nil {
+		t.Fatal(err)
+	}
+	if tags := ui.projectRows()[0].tags; !slices.Equal(tags, []string{"infra", "rust"}) {
+		t.Fatalf("after tagging: %v", tags)
+	}
+}
+
+// A place is named `project/title` from outside its project, and by its title
+// alone from inside. The same title in two projects is two places.
+func TestAPlaceIsNamedByItsProjectFromOutside(t *testing.T) {
+	demo := connect(t, testserver.Start(t, config.HistoryLimit).Base, "demo")
+	ui := headless(demo)
+	for _, args := range [][]string{{"new", "cynn"}, {"new", "sanduk"}} {
+		if err := ui.cmdProject(args); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Founded in a project, so the title is free in each.
+	for _, name := range []string{"cynn/design", "sanduk/design"} {
+		if err := ui.cmdCreate([]string{name}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	ui.exited()
+
+	named := map[string]string{}
+	for _, space := range ui.spaces() {
+		if space.Title == "design" {
+			named[ui.qualify(space)] = space.ID
+		}
+	}
+	if len(named) != 2 {
+		t.Fatalf("the two rooms qualify to %v", named)
+	}
+
+	// From outside, the qualified name picks one and the bare one is ambiguous.
+	for qualified, want := range named {
+		got, err := ui.spaceID(qualified)
+		if err != nil || got != want {
+			t.Fatalf("%s resolved to %q, %v", qualified, got, err)
+		}
+	}
+	if _, err := ui.spaceID("design"); err == nil ||
+		!strings.Contains(err.Error(), "names more than one place") {
+		t.Fatalf("a bare ambiguous name gave %v", err)
+	}
+
+	// From inside a project, the title alone is the name.
+	cynn := ui.projectRows()[0]
+	ui.openProject(cynn.id)
+	got, err := ui.spaceID("design")
+	if err != nil || got != named[cynn.name+"/design"] {
+		t.Fatalf("inside %s, design resolved to %q, %v", cynn.name, got, err)
+	}
+	// And the other project's place is still reachable by its full name.
+	if got, err := ui.spaceID("sanduk/design"); err != nil || got != named["sanduk/design"] {
+		t.Fatalf("sanduk/design resolved to %q, %v", got, err)
+	}
+
+	// A second `design` in cynn is one room too many.
+	ui.openProject(cynn.id)
+	if err := ui.cmdCreate([]string{"design"}); err == nil ||
+		!strings.Contains(err.Error(), "already exists in "+cynn.name) {
+		t.Fatalf("a duplicate in the same project gave %v", err)
 	}
 }

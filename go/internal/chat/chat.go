@@ -99,9 +99,9 @@ func (h *Handler) PublishSystemEvent(text string) {
 // A new channel has no subscribers, so the only way anyone learns it exists is
 // the machine channel every account is already in.
 func (h *Handler) createChannel(
-	username string, isAdmin bool, title string, groups []any,
+	username string, isAdmin bool, title string, groups []any, project string,
 ) (any, error) {
-	channel, err := h.service.CreateChannel(username, isAdmin, title, groups)
+	channel, err := h.service.CreateChannel(username, isAdmin, title, groups, project)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +210,8 @@ func (h *Handler) run(
 		if err != nil {
 			return nil, err
 		}
-		return h.service.CreateRoom(username, isAdmin, text(fields, "title"), invite)
+		return h.service.CreateRoom(username, isAdmin, text(fields, "title"), invite,
+			text(fields, "project"), text(fields, "scope"), text(fields, "task"))
 
 	case "invite":
 		principal, err := value(fields, "principal")
@@ -251,6 +252,32 @@ func (h *Handler) run(
 	case "group.unassign":
 		return h.service.UnassignGroup(isAdmin, text(fields, "group"), text(fields, "username"))
 
+	case "project.create":
+		tags, err := list(fields, "tags")
+		if err != nil {
+			return nil, err
+		}
+		return h.service.CreateProject(isAdmin, text(fields, "name"), tags)
+
+	case "project.tag":
+		return h.service.Tag(isAdmin, text(fields, "project"), text(fields, "tag"), false)
+
+	case "project.untag":
+		return h.service.Tag(isAdmin, text(fields, "project"), text(fields, "tag"), true)
+
+	case "project.file":
+		return h.service.FileRoom(isAdmin, roomID(fields), text(fields, "project"),
+			text(fields, "scope"), text(fields, "task"))
+
+	case "project.dissolve":
+		return h.service.DissolveProject(isAdmin, text(fields, "project"))
+
+	case "room.close":
+		return h.service.SetState(username, isAdmin, roomID(fields), "closed")
+
+	case "room.reopen":
+		return h.service.SetState(username, isAdmin, roomID(fields), "open")
+
 	case "subscribe":
 		return h.service.Subscribe(username, text(fields, "channel"))
 
@@ -267,7 +294,8 @@ func (h *Handler) run(
 		if err != nil {
 			return nil, err
 		}
-		return h.createChannel(username, isAdmin, text(fields, "title"), groups)
+		return h.createChannel(username, isAdmin, text(fields, "title"), groups,
+			text(fields, "project"))
 
 	case "channel.publish":
 		if text(fields, "channel") == config.SystemChannel {

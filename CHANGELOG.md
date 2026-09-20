@@ -26,7 +26,27 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 - `tests/test_theme_package.py` (guards on the MonoBlueTheme package contract) and `tests/test_watcher.py`.
 
+### Fixed
+
+- An `opened` push for a channel item that had already been archived left a mark behind for a message no longer in the log, and nothing cleared it: `dropThrough` only removes marks at or below what it drops, and this one was already below. Opening an item is answered with a push to the opener as well as a reply, so the two can arrive in either order. The client now records the highest sequence archived out of each space and ignores a mark at or below it.
+
 ### Added
+
+- Tags on a project, a scope on a room, and open or closed on both. `project.create` takes `tags` and `project.tag`/`project.untag` change them; a tag is folded to lower case and is one word, because a tag exists to be filtered on and `Go` and `go` filtering apart would divide the projects rather than classify them. `project.file` takes `scope` and `task`: a room filed under a project is about the project as a whole or about one task, and the task label is opaque -- the server stores and returns it and never parses it, because which task it names is `pma`'s business. `room.close` and `room.reopen` say whether the work in a place is done; a closed place is kept, readable and writable, and is simply no longer one of the places work is happening in. Schema version 7; wire contract sections 12 and 13; 9 more conformance tests.
+
+  Closed rather than deleted or archived because the three answer different questions: archival is about how long messages live, deletion is about a room ceasing to exist, and this is about whether anybody should still be looking. A transient room is refused both, since its grace period already decides when it ends and closing would name a second, contradictory end.
+
+- An `OVERVIEW` tab, first in the header bar and where a session opens. It ranks the five projects whose open places had the most said in them in the last seven days, and under the table says what there is and what is waiting on you. Two facts, not one: the `ACTIVE` count is places somebody left open, and the `SAID` rank is what was said lately. A recency-only reading would make a task room go quiet and read as finished while its worker agent is mid-run; an open/closed-only reading would rank a long finished thread above live work.
+
+  `PROJECTS` now opens a project's own page -- its tags, what it holds, then its places -- rather than a bare list of rooms. A place's row carries its scope, its task and what was said in it. `a` shows the closed places. The header bar carries the name, as `gwiki`'s does, so the status line no longer repeats it.
+
+- Projects: a container of rooms and channels, the object design.md section 7.2 calls a space. It holds no messages and decides no access, so it has no audience and every caller sees every project; a room names the one it is filed under, or none. `project.create`, `project.file` and `project.dissolve` are administrator-only, and `sync` carries `projects`. Names are unique without case, as a permanent room's title is, because a project is named where a room is filed. A transient room is refused: it is discarded when everyone leaves, so filing it would record a place about to stop existing. Dissolving keeps the rooms, filed under none. Schema version 6; wire contract section 12; 8 conformance tests.
+
+  Named `project` rather than `space`, because `space` is already the terminal client's word for a room-or-channel in 124 places, and design.md's own example -- `projects > cynn > task/31` -- reads the container as a project. Archival inheritance, which section 7.2 also proposes, is not built: a room still carries its own period.
+
+- The terminal client is a tab bar over three tables, after `gwiki`'s. `PROJECTS` lists the containers with what each holds; Enter on one lists its places, and Enter on a place goes in. `ROOMS` is the same table unscoped, for a place with no project or whose project the user does not know. `PEOPLE` is the roster. Tab moves between tabs, Up and Down move the cursor, Enter goes one level in and Esc one level out. `/project new|file|rm` and `/projects` reach the same from the composer.
+
+  The sidebar is gone, and with it the 24 columns it held and the Tab cycle over every space and then every person. That cycle could not express two levels, and a flat list of every room was what a project exists to break up. A room is still only ever entered by Enter on its row, so "highlighting is a preview" survives the change.
 
 - A room's first entry is recorded as a visit, on the server, so an invitation is open until then and is the same fact on every device. `sync` carries `visited`, and the schema is version 5. Upgrading fills visits from read cursors, because a user who has read a room has been in it; a room entered and never read is missed, and counts as an open invitation until the next entry. Nothing reopens an invitation, including being removed and invited again. The terminal client counts open invitations apart from unread messages, which it counts only in visited rooms, and marks a room not yet entered `(invited)`.
 

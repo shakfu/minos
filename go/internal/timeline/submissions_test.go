@@ -15,7 +15,7 @@ func channel(t *testing.T) (*Timeline, string) {
 	}
 	t.Cleanup(func() { store.Close() })
 
-	room, err := store.CreateRoom("News", "demo", ChannelKind, Admin, Persisted, "", nil)
+	room, err := store.CreateRoom("News", "demo", ChannelKind, Admin, Persisted, "", nil, Filing{})
 	if err != nil {
 		t.Fatalf("cannot arrange a channel: %v", err)
 	}

@@ -132,7 +132,7 @@ One process. A goroutine per connection, an in-process fan-out, and SQLite for t
 | `go/internal/socket` | The frame format, the connection registry, and the fan-out. |
 | `go/internal/chat` | The layer: operation names to messaging calls, occupancy per connection. |
 | `go/internal/messaging` | The operations. Knows nothing about how a caller is connected. |
-| `go/internal/timeline` | The store: rooms, grants, messages, and the per-room sequence. |
+| `go/internal/timeline` | The store: projects, tags, rooms, grants, messages, and the per-room sequence. |
 | `go/internal/vfs` | Mountpoints, path resolution, and file operations. |
 
 Two things worth knowing:
@@ -148,12 +148,16 @@ Two things worth knowing:
 | Path | Contents |
 |-|-|
 | `go/internal/client` | The HTTP session that holds the cookie, the socket that carries frames, and the protocol client: requests, pushes, cursors and gap repair. |
-| `go/internal/tui` | The interface: sidebar, one conversation, composer, commands. |
+| `go/internal/tui` | The interface: header bar, list screens, one conversation, composer, commands. |
 | `go/cmd/minos` | Flags, the login prompt, and handing the terminal to the interface. |
 
-Four things worth knowing:
+Five things worth knowing:
 
-- **The room you enter is the room you occupy, and the screen becomes that room.** A place is something you are *in*: the sidebar goes, Tab stays put, and `/exit` steps back out. The status line shows two counts, never mixed: open invitations, rooms you may enter and never have, marked `(invited)` in the sidebar; and unread messages in rooms you have visited. A channel's items are counted only inside the channel. An invitation that arrives while you are in a room is also named when you step out. You are in one room at a time on every device, so entering one leaves any other, and quitting leaves everything. Inside a room, a command that would take you out of it, such as `/open` or `/subscribe`, asks first. A room you only highlight is a preview: nothing in it is marked read. For a transient room that is not decoration: its life is measured from the moment its last occupant goes.
+- **The interface is a header bar over four tables, and Enter goes one level in.** `OVERVIEW` is where the work is: the five projects whose open places have the most said in them lately, and under that what is waiting on you. `PROJECTS` lists every project; Enter on one opens its page, which is what it holds and then its places. `ROOMS` is the same table of places over everything, for one whose project you do not know or that has none. `PEOPLE` is the roster, where Enter raises a room. Tab and Shift-Tab move between tabs, Up and Down move the cursor, Enter goes one level in and Esc one level out.
+
+- **A place is active until somebody closes it, and busy is a separate fact.** `/close` says the work in a room is done; it is not deleting and not archiving, so the room stays and its audience still reads it. That is what the `ACTIVE` column counts. How busy a place is now is what was said in it in the last seven days, which is what the overview ranks by, and a closed place stops counting. A closed place drops out of the lists until `a` brings it back. A room filed under a project has a scope: the project as a whole, or one task, whose label `pma` sets and minos never reads.
+
+- **The room you enter is the room you occupy, and the screen becomes that room.** A place is something you are *in*: the tab bar goes, Tab stays put, and `/exit` steps back out. The status line shows two counts, never mixed: open invitations, rooms you may enter and never have, marked `invited` in the rooms table; and unread messages in rooms you have visited. A channel's items are counted only inside the channel. An invitation that arrives while you are in a room is also named when you step out. You are in one room at a time on every device, so entering one leaves any other, and quitting leaves everything. Inside a room, a command that would take you out of it, such as `/open` or `/subscribe`, asks first. A room you only highlight is a preview: nothing in it is marked read. For a transient room that is not decoration: its life is measured from the moment its last occupant goes.
 
 - **Everything the desktop expressed by dragging is a command.** Membership used to be edited by dropping one window onto another, which no keyboard could reach and no script could call. `/invite` says what it does, can be refused with a reason, and reads the same in a log. `@name` names a group, which the old interface could not express at all.
 

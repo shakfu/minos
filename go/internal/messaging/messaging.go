@@ -20,6 +20,7 @@ package messaging
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -28,11 +29,13 @@ import (
 
 // Push types, as seen by a subscriber.
 const (
-	MessagePush  = "message"
-	RoomPush     = "room"
-	RoomGonePush = "roomGone"
-	PresencePush = "presence"
-	GroupPush    = "group"
+	MessagePush     = "message"
+	RoomPush        = "room"
+	RoomGonePush    = "roomGone"
+	PresencePush    = "presence"
+	GroupPush       = "group"
+	ProjectPush     = "project"
+	ProjectGonePush = "projectGone"
 
 	SubmissionPush = "submission"
 	OpenedPush     = "opened"
@@ -48,6 +51,14 @@ const ArchiveSearchLimit = 100
 const (
 	BodyLimit = 64 << 10
 	NameLimit = 200
+)
+
+// TagLimit is the most characters a project tag may have, and TaskLimit the
+// most a room's task label may have. Both are labels shown in a column, not
+// prose.
+const (
+	TagLimit  = 32
+	TaskLimit = 64
 )
 
 func checkBody(body string) error {
@@ -114,6 +125,16 @@ type presenceEvent struct {
 	Online   bool   `json:"online"`
 }
 
+type projectEvent struct {
+	Type    string            `json:"type"`
+	Project *timeline.Project `json:"project"`
+}
+
+type projectGoneEvent struct {
+	Type    string `json:"type"`
+	Project string `json:"project"`
+}
+
 type groupEvent struct {
 	Type  string          `json:"type"`
 	Group *timeline.Group `json:"group"`
@@ -152,13 +173,16 @@ type UserState struct {
 
 // SyncReply is everything a freshly connected client needs.
 type SyncReply struct {
-	Me       string           `json:"me"`
-	IsAdmin  bool             `json:"isAdmin"`
-	Users    []UserState      `json:"users"`
-	Groups   []timeline.Group `json:"groups"`
-	Rooms    []timeline.Room  `json:"rooms"`
-	Channels []timeline.Room  `json:"channels"`
-	Read     map[string]int64 `json:"read"`
+	Me      string           `json:"me"`
+	IsAdmin bool             `json:"isAdmin"`
+	Users   []UserState      `json:"users"`
+	Groups  []timeline.Group `json:"groups"`
+	// Every project, whoever is asking: a project decides no access, so there
+	// is nothing to filter. A room names the one it is filed under.
+	Projects []timeline.Project `json:"projects"`
+	Rooms    []timeline.Room    `json:"rooms"`
+	Channels []timeline.Room    `json:"channels"`
+	Read     map[string]int64   `json:"read"`
 	// Rooms the caller has ever entered. An invitation is open until then.
 	Visited []string `json:"visited"`
 	// The caller's own submissions, pending or rejected and not acknowledged.
@@ -186,6 +210,11 @@ type Ok struct {
 type SendReply struct {
 	Ok  bool  `json:"ok"`
 	Seq int64 `json:"seq"`
+}
+
+type ProjectReply struct {
+	Ok      bool              `json:"ok"`
+	Project *timeline.Project `json:"project"`
 }
 
 type RoomReply struct {
@@ -320,6 +349,10 @@ func (m *Messaging) Sync(username string, isAdmin bool) (*SyncReply, error) {
 	if err != nil {
 		return nil, err
 	}
+	projects, err := m.store.Projects()
+	if err != nil {
+		return nil, err
+	}
 	cursors, err := m.store.ReadCursors(username)
 	if err != nil {
 		return nil, err
@@ -344,7 +377,7 @@ func (m *Messaging) Sync(username string, isAdmin bool) (*SyncReply, error) {
 
 	return &SyncReply{
 		Me: username, IsAdmin: isAdmin, Users: users,
-		Groups: groups, Rooms: rooms, Channels: channels, Read: cursors,
+		Groups: groups, Projects: projects, Rooms: rooms, Channels: channels, Read: cursors,
 		Visited: visited, Submissions: submissions,
 	}, nil
 }
@@ -432,7 +465,7 @@ func (m *Messaging) OpenRoom(username string, invitees []any, title, retention s
 	}
 
 	room, err := m.store.CreateRoom(
-		title, username, timeline.RoomKind, timeline.User, retention, "", grants)
+		title, username, timeline.RoomKind, timeline.User, retention, "", grants, timeline.Filing{})
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +474,9 @@ func (m *Messaging) OpenRoom(username string, invitees []any, title, retention s
 }
 
 // CreateRoom founds a permanent room. Admins only, and always persisted.
-func (m *Messaging) CreateRoom(username string, isAdmin bool, title string, invitees []any) (*timeline.Room, error) {
+func (m *Messaging) CreateRoom(
+	username string, isAdmin bool, title string, invitees []any, project, scope, task string,
+) (*timeline.Room, error) {
 	if err := requireAdmin(isAdmin); err != nil {
 		return nil, err
 	}
@@ -453,17 +488,12 @@ func (m *Messaging) CreateRoom(username string, isAdmin bool, title string, invi
 		return nil, err
 	}
 
-	// A permanent room's title is a name: institutional, chosen, and meant to be
-	// referred to. "Post it in Engineering" only works if that resolves to one
-	// room, so the name is unique among permanent rooms -- and the duplicate
-	// this refuses is nearly always an accident. Ad-hoc rooms are exempt: their
-	// title describes who is in them rather than naming them.
-	existing, err := m.store.RoomNamed(title, timeline.Admin, timeline.RoomKind)
+	filed, err := m.filing(project, scope, task)
 	if err != nil {
 		return nil, err
 	}
-	if existing != nil {
-		return nil, refuse("A permanent room called '%s' already exists", title)
+	if err := m.nameIsFree(title, timeline.RoomKind, filed.Project); err != nil {
+		return nil, err
 	}
 
 	grants, err := m.grantsFor(username, invitees)
@@ -472,7 +502,7 @@ func (m *Messaging) CreateRoom(username string, isAdmin bool, title string, invi
 	}
 
 	room, err := m.store.CreateRoom(
-		title, username, timeline.RoomKind, timeline.Admin, timeline.Persisted, "", grants)
+		title, username, timeline.RoomKind, timeline.Admin, timeline.Persisted, "", grants, filed)
 	if err != nil {
 		return nil, err
 	}
@@ -1020,12 +1050,333 @@ func (m *Messaging) spacesFor(username string) ([]timeline.Room, error) {
 	return append(rooms, channels...), nil
 }
 
+// -- projects ----------------------------------------------------------------
+
+// CreateProject founds a project. Names are compared without case and must be
+// unique, because a project is named where a room is filed and two that differ
+// only in capitalisation would not help anybody tell them apart.
+func (m *Messaging) CreateProject(isAdmin bool, name string, tags []any) (*ProjectReply, error) {
+	if err := requireAdmin(isAdmin); err != nil {
+		return nil, err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, refuse("A project needs a name")
+	}
+	if err := checkName(name); err != nil {
+		return nil, err
+	}
+	// A place is referred to from outside its project as `<project>/<title>`,
+	// split at the first slash. A project whose name held one would make that
+	// ambiguous; a room title may still hold one, because everything after the
+	// first slash is the title.
+	if strings.Contains(name, "/") {
+		return nil, refuse("A project name has no '/' in it")
+	}
+	existing, err := m.store.ProjectNamed(name)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return nil, refuse("There is already a project called %s", existing.Name)
+	}
+
+	wanted, err := checkTags(tags)
+	if err != nil {
+		return nil, err
+	}
+
+	project, err := m.store.CreateProject(name, "", wanted)
+	if err != nil {
+		return nil, err
+	}
+	m.announceProject(project)
+	return &ProjectReply{Ok: true, Project: project}, nil
+}
+
+// checkTags normalises a list of tags: trimmed, folded to lower case, and
+// without repeats. Folded because a tag exists to be filtered on, and `Go` and
+// `go` filtering apart would divide the projects rather than classify them.
+func checkTags(tags []any) ([]string, error) {
+	wanted := []string{}
+	for _, value := range tags {
+		text, ok := value.(string)
+		if !ok {
+			return nil, refuse("A tag is text")
+		}
+		tag, err := checkTag(text)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.Contains(wanted, tag) {
+			wanted = append(wanted, tag)
+		}
+	}
+	sort.Strings(wanted)
+	return wanted, nil
+}
+
+func checkTag(text string) (string, error) {
+	tag := strings.ToLower(strings.TrimSpace(text))
+	if tag == "" {
+		return "", refuse("A tag needs text")
+	}
+	if len([]rune(tag)) > TagLimit {
+		return "", refuse("A tag is at most %d characters", TagLimit)
+	}
+	if strings.ContainsAny(tag, " \t\n") {
+		return "", refuse("A tag is one word")
+	}
+	return tag, nil
+}
+
+// Tag and Untag classify a project. Tagging one that already carries the tag,
+// and untagging one that does not, both answer ok: the caller asked for a
+// state, not for a change.
+func (m *Messaging) Tag(isAdmin bool, projectID, text string, remove bool) (*ProjectReply, error) {
+	if err := requireAdmin(isAdmin); err != nil {
+		return nil, err
+	}
+	project, err := m.requireProject(projectID)
+	if err != nil {
+		return nil, err
+	}
+	tag, err := checkTag(text)
+	if err != nil {
+		return nil, err
+	}
+
+	if remove {
+		_, err = m.store.Untag(project.ID, tag)
+	} else {
+		_, err = m.store.Tag(project.ID, tag)
+	}
+	if err != nil {
+		return nil, err
+	}
+	updated, err := m.store.Project(project.ID)
+	if err != nil {
+		return nil, err
+	}
+	m.announceProject(updated)
+	return &ProjectReply{Ok: true, Project: updated}, nil
+}
+
+func (m *Messaging) requireProject(projectID string) (*timeline.Project, error) {
+	project, err := m.store.Project(projectID)
+	if err != nil {
+		return nil, err
+	}
+	if project == nil {
+		return nil, refuse("No such project: %s", projectID)
+	}
+	return project, nil
+}
+
+// FileRoom files a room or a channel under a project, or under none when
+// projectID is empty. A room belongs to at most one project, and its scope is
+// its position within that project: filing under none clears both.
+func (m *Messaging) FileRoom(
+	isAdmin bool, roomID, projectID, scope, task string,
+) (*RoomReply, error) {
+	if err := requireAdmin(isAdmin); err != nil {
+		return nil, err
+	}
+	room, err := m.requireRoom(roomID, "")
+	if err != nil {
+		return nil, err
+	}
+	// A transient room is discarded when everyone leaves, so filing it under a
+	// project records a place that is about to stop existing.
+	if room.Retention == timeline.Transient {
+		return nil, refuse("A transient room is not filed under a project")
+	}
+	if projectID != "" {
+		if _, err := m.requireProject(projectID); err != nil {
+			return nil, err
+		}
+	}
+	scope, task, err = checkScope(projectID, scope, task)
+	if err != nil {
+		return nil, err
+	}
+	// Moving it somewhere its name is taken would make two rooms answer to one
+	// qualified name.
+	if room.Authority == timeline.Admin && projectID != room.Project {
+		if err := m.nameIsFree(room.Title, room.Kind, projectID); err != nil {
+			return nil, err
+		}
+	}
+
+	if _, err := m.store.FileRoom(roomID, projectID, scope, task); err != nil {
+		return nil, err
+	}
+	updated, err := m.store.Room(roomID)
+	if err != nil {
+		return nil, err
+	}
+	m.announceRoom(updated, nil)
+	return &RoomReply{Ok: true, Room: updated}, nil
+}
+
+// checkScope decides what a room's scope and task may be. A scope is a
+// position within a project, so a room under none has neither; a task names
+// one, so only a task room carries it. The label itself is opaque: which task
+// it names is pma's business and not the server's.
+func checkScope(projectID, scope, task string) (string, string, error) {
+	scope, task = strings.TrimSpace(scope), strings.TrimSpace(task)
+	if projectID == "" {
+		if scope != "" || task != "" {
+			return "", "", refuse("A room under no project has no scope")
+		}
+		return "", "", nil
+	}
+	switch scope {
+	case "":
+		if task != "" {
+			return "", "", refuse("Only a task room names a task")
+		}
+		// Filed without saying what it is about: the project as a whole.
+		return timeline.ProjectScope, "", nil
+	case timeline.ProjectScope:
+		if task != "" {
+			return "", "", refuse("Only a task room names a task")
+		}
+	case timeline.TaskScope:
+		if task == "" {
+			return "", "", refuse("A task room names its task")
+		}
+		if len([]rune(task)) > TaskLimit {
+			return "", "", refuse("A task is at most %d characters", TaskLimit)
+		}
+	default:
+		return "", "", refuse("A scope is %q or %q", timeline.ProjectScope, timeline.TaskScope)
+	}
+	return scope, task, nil
+}
+
+// filing validates where a new place is to sit: its project must exist, and
+// its scope must suit it.
+func (m *Messaging) filing(project, scope, task string) (timeline.Filing, error) {
+	if project != "" {
+		if _, err := m.requireProject(project); err != nil {
+			return timeline.Filing{}, err
+		}
+	}
+	scope, task, err := checkScope(project, scope, task)
+	if err != nil {
+		return timeline.Filing{}, err
+	}
+	return timeline.Filing{Project: project, Scope: scope, Task: task}, nil
+}
+
+// nameIsFree refuses a title already taken in the project a place is going
+// into.
+//
+// A permanent room's title is a name: institutional, chosen, and meant to be
+// referred to. "Post it in Engineering" only works if that resolves to one
+// room. Its project is the rest of that name, so the same title in two
+// projects is two names, and the duplicate this refuses is still nearly always
+// an accident. Ad-hoc rooms are exempt: their title describes who is in them
+// rather than naming them.
+func (m *Messaging) nameIsFree(title, kind, project string) error {
+	existing, err := m.store.RoomNamed(title, timeline.Admin, kind, project)
+	if err != nil {
+		return err
+	}
+	if existing == nil {
+		return nil
+	}
+	what := "A permanent room"
+	if kind == timeline.ChannelKind {
+		what = "A channel"
+	}
+	where := "under no project"
+	if named, err := m.store.Project(project); err == nil && named != nil {
+		where = "in " + named.Name
+	}
+	return refuse("%s called '%s' already exists %s", what, title, where)
+}
+
+// SetState opens or closes a room. Closing says the work in it is done; it is
+// not deleting and not archiving, and the room stays readable to its audience.
+//
+// Who may close is who may change the room's other administrative facts: an
+// admin for an admin-founded room, any participant for a user-founded one.
+func (m *Messaging) SetState(
+	username string, isAdmin bool, roomID, state string,
+) (*RoomReply, error) {
+	if state != timeline.StateOpen && state != timeline.StateClosed {
+		return nil, refuse("A state is %q or %q", timeline.StateOpen, timeline.StateClosed)
+	}
+	room, err := m.requireRoom(roomID, "")
+	if err != nil {
+		return nil, err
+	}
+	if err := m.requireInviteAuthority(room, username, isAdmin); err != nil {
+		return nil, err
+	}
+	// A transient room ends by emptying, and its grace period is the only thing
+	// that decides when. Closing one would name a second, contradictory end.
+	if room.Retention == timeline.Transient {
+		return nil, refuse("A transient room is not closed; it ends when everyone leaves")
+	}
+
+	if room.State != state {
+		if _, err := m.store.SetState(roomID, state); err != nil {
+			return nil, err
+		}
+		what := "closed"
+		if state == timeline.StateOpen {
+			what = "reopened"
+		}
+		m.PostEventQuietly(roomID, fmt.Sprintf("%s %s this room", username, what), nil)
+	}
+	updated, err := m.store.Room(roomID)
+	if err != nil {
+		return nil, err
+	}
+	m.announceRoom(updated, nil)
+	return &RoomReply{Ok: true, Room: updated}, nil
+}
+
+// DissolveProject removes a project. Its rooms survive, filed under none: a
+// project holds no messages, so there is nothing in it to lose.
+func (m *Messaging) DissolveProject(isAdmin bool, projectID string) (*Ok, error) {
+	if err := requireAdmin(isAdmin); err != nil {
+		return nil, err
+	}
+	project, err := m.store.Project(projectID)
+	if err != nil {
+		return nil, err
+	}
+	if project == nil {
+		return nil, refuse("No such project: %s", projectID)
+	}
+
+	freed, err := m.store.RoomsIn(projectID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := m.store.DeleteProject(projectID); err != nil {
+		return nil, err
+	}
+	m.deliver(m.roster(), projectGoneEvent{Type: ProjectGonePush, Project: projectID})
+	for _, roomID := range freed {
+		if updated, err := m.store.Room(roomID); err == nil && updated != nil {
+			m.announceRoom(updated, nil)
+		}
+	}
+	return &Ok{Ok: true}, nil
+}
+
 // -- channels ----------------------------------------------------------------
 
 // EnsureChannel declares a channel. Idempotent, so it can run on every boot.
 func (m *Messaging) EnsureChannel(channelID, title string, subscribers []string) (*timeline.Room, error) {
 	if _, err := m.store.CreateRoom(
 		title, "system", timeline.ChannelKind, timeline.Admin, timeline.Persisted, channelID, nil,
+		timeline.Filing{},
 	); err != nil {
 		return nil, err
 	}
@@ -1045,7 +1396,7 @@ func (m *Messaging) EnsureChannel(channelID, title string, subscribers []string)
 // there is something to subscribe to -- and the host is where the id of the
 // machine channel lives.
 func (m *Messaging) CreateChannel(
-	username string, isAdmin bool, title string, groups []any,
+	username string, isAdmin bool, title string, groups []any, project string,
 ) (*timeline.Room, error) {
 	if err := requireAdmin(isAdmin); err != nil {
 		return nil, err
@@ -1058,14 +1409,12 @@ func (m *Messaging) CreateChannel(
 		return nil, err
 	}
 
-	// A channel's name is institutional, referred to, and unique among channels
-	// for the same reason a permanent room's is among rooms.
-	existing, err := m.store.RoomNamed(title, timeline.Admin, timeline.ChannelKind)
+	filed, err := m.filing(project, "", "")
 	if err != nil {
 		return nil, err
 	}
-	if existing != nil {
-		return nil, refuse("A channel called '%s' already exists", title)
+	if err := m.nameIsFree(title, timeline.ChannelKind, filed.Project); err != nil {
+		return nil, err
 	}
 
 	admitted := make([]string, 0, len(groups))
@@ -1085,7 +1434,7 @@ func (m *Messaging) CreateChannel(
 	}
 
 	channel, err := m.store.CreateRoom(
-		title, username, timeline.ChannelKind, timeline.Admin, timeline.Persisted, "", nil,
+		title, username, timeline.ChannelKind, timeline.Admin, timeline.Persisted, "", nil, filed,
 	)
 	if err != nil {
 		return nil, err
@@ -1632,6 +1981,10 @@ func (m *Messaging) announceRoom(room *timeline.Room, also []string) {
 		return
 	}
 	m.deliver(union(room.Audience, also), roomEvent{Type: RoomPush, Room: room})
+}
+
+func (m *Messaging) announceProject(project *timeline.Project) {
+	m.deliver(m.roster(), projectEvent{Type: ProjectPush, Project: project})
 }
 
 func (m *Messaging) announceGroup(group *timeline.Group) {

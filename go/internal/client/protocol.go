@@ -23,6 +23,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -77,7 +78,18 @@ type Room struct {
 	Occupants    []string    `json:"occupants"`
 	LastSeq      int64       `json:"lastSeq"`
 	Archive      Archive     `json:"archive"`
+	// The project this room is filed under, or empty for none; what it is
+	// about within that project; and which task, on a task room.
+	Project string `json:"project"`
+	Scope   string `json:"scope"`
+	Task    string `json:"task"`
+	// "open" or "closed". A closed place is kept and readable, and is no
+	// longer one of the places work is happening in.
+	State string `json:"state"`
 }
+
+// Open is whether this place is one of the places work is happening in.
+func (r Room) Open() bool { return r.State != "closed" }
 
 // Archive is when a room's messages leave it, and whether its audience may
 // search them afterwards. A nil period is never.
@@ -111,6 +123,14 @@ type Group struct {
 	Members []string `json:"members"`
 }
 
+// Project is a named container of rooms and channels. Wire-contract 12.
+type Project struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	CreatedAt float64  `json:"createdAt"`
+	Tags      []string `json:"tags"`
+}
+
 type User struct {
 	Username string `json:"username"`
 	Online   bool   `json:"online"`
@@ -134,6 +154,7 @@ type SyncReply struct {
 	IsAdmin     bool             `json:"isAdmin"`
 	Users       []User           `json:"users"`
 	Groups      []Group          `json:"groups"`
+	Projects    []Project        `json:"projects"`
 	Rooms       []Room           `json:"rooms"`
 	Channels    []Room           `json:"channels"`
 	Read        map[string]int64 `json:"read"`
@@ -150,6 +171,7 @@ type Client struct {
 	isAdmin   bool
 	users     []User
 	groups    []Group
+	projects  []Project
 	rooms     map[string]Room
 	channels  map[string]Room
 	log       map[string][]Message
@@ -170,6 +192,10 @@ type Client struct {
 	// Which items this user has opened, per channel: a channel's read state, in
 	// place of the read cursor a room keeps.
 	opened map[string]map[int64]bool
+
+	// The highest sequence archived out of each space, so a push that arrives
+	// after the archival that dropped its message is not applied to it.
+	archived map[string]int64
 
 	// Rooms this user has ever entered, on any device. An invitation is open
 	// until then, and nothing reopens it, so forgetting a room keeps its entry.
@@ -209,6 +235,7 @@ func NewClient(socket *Socket) *Client {
 		cursors:     map[string]int64{},
 		repairing:   map[string]chan struct{}{},
 		opened:      map[string]map[int64]bool{},
+		archived:    map[string]int64{},
 		occupancies: map[string]seat{},
 		visited:     map[string]bool{},
 		pending:     map[int64]chan json.RawMessage{},
@@ -520,6 +547,25 @@ func (c *Client) dispatch(raw json.RawMessage) {
 			c.trackGroup(*event.Group)
 		}
 		c.changed()
+	case "project":
+		var event struct {
+			Project *Project `json:"project"`
+		}
+		if json.Unmarshal(raw, &event) == nil && event.Project != nil {
+			c.trackProject(*event.Project)
+		}
+		c.changed()
+	case "projectGone":
+		var event struct {
+			Project string `json:"project"`
+		}
+		if json.Unmarshal(raw, &event) == nil {
+			c.mutex.Lock()
+			c.projects = slices.DeleteFunc(slices.Clone(c.projects),
+				func(p Project) bool { return p.ID == event.Project })
+			c.mutex.Unlock()
+		}
+		c.changed()
 	case "submission":
 		var event struct {
 			Submission *Submission `json:"submission"`
@@ -570,6 +616,7 @@ func (c *Client) dispatch(raw json.RawMessage) {
 func (c *Client) dropThrough(room string, through int64) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.archived[room] = max(c.archived[room], through)
 	c.log[room] = slices.DeleteFunc(slices.Clone(c.log[room]), func(m Message) bool { return m.Seq <= through })
 	for seq := range c.opened[room] {
 		if seq <= through {
@@ -578,7 +625,15 @@ func (c *Client) dropThrough(room string, through int64) {
 	}
 }
 
+// markOpenedLocked records that an item has been opened, unless it has been
+// archived away. Opening a channel item is answered with a push to the opener
+// as well as a reply, so that push can arrive after the archival that dropped
+// the item -- pushes are reordered, and here the mark would outlive its
+// message with nothing left to clear it.
 func (c *Client) markOpenedLocked(channel string, seq int64) {
+	if seq <= c.archived[channel] {
+		return
+	}
 	if c.opened[channel] == nil {
 		c.opened[channel] = map[int64]bool{}
 	}
@@ -697,7 +752,7 @@ func (c *Client) Sync() (*SyncReply, error) {
 
 	c.mutex.Lock()
 	c.me, c.isAdmin = reply.Me, reply.IsAdmin
-	c.users, c.groups = reply.Users, reply.Groups
+	c.users, c.groups, c.projects = reply.Users, reply.Groups, reply.Projects
 	c.rooms, c.channels = map[string]Room{}, map[string]Room{}
 	for _, room := range reply.Rooms {
 		c.rooms[room.ID] = room
@@ -753,9 +808,16 @@ func (c *Client) OpenRoom(invite []Principal, title, retention string) (Room, er
 	return c.track(room), nil
 }
 
-func (c *Client) CreateRoom(title string, invite []Principal) (Room, error) {
+// CreateRoom founds a permanent room, in a project when one is named. Its
+// title is unique within that project, so founding it filed and founding it
+// loose are different questions and the server needs the answer up front.
+func (c *Client) CreateRoom(title string, invite []Principal, project, scope, task string) (Room, error) {
 	var room Room
-	if err := c.call("create", map[string]any{"title": title, "invite": orEmpty(invite)}, &room); err != nil {
+	body := map[string]any{
+		"title": title, "invite": orEmpty(invite),
+		"project": project, "scope": scope, "task": task,
+	}
+	if err := c.call("create", body, &room); err != nil {
 		return room, err
 	}
 	return c.track(room), nil
@@ -888,9 +950,74 @@ func (c *Client) UnassignGroup(group, username string) (Group, error) {
 }
 
 // CreateChannel founds a channel. Founding is not subscribing, so it is not tracked.
-func (c *Client) CreateChannel(title string, groups []string) (Room, error) {
+// CreateProject founds a project. Administrator only, as filing is.
+func (c *Client) CreateProject(name string, tags []string) (Project, error) {
+	var reply struct {
+		Project Project `json:"project"`
+	}
+	body := map[string]any{"name": name, "tags": orEmpty(tags)}
+	if err := c.call("project.create", body, &reply); err != nil {
+		return Project{}, err
+	}
+	return c.trackProject(reply.Project), nil
+}
+
+// Tag and Untag classify a project. Either answers the project as it now is,
+// whether or not it changed.
+func (c *Client) Tag(project, tag string) (Project, error) {
+	return c.classify("project.tag", project, tag)
+}
+
+func (c *Client) Untag(project, tag string) (Project, error) {
+	return c.classify("project.untag", project, tag)
+}
+
+func (c *Client) classify(op, project, tag string) (Project, error) {
+	var reply struct {
+		Project Project `json:"project"`
+	}
+	if err := c.call(op, map[string]any{"project": project, "tag": tag}, &reply); err != nil {
+		return Project{}, err
+	}
+	return c.trackProject(reply.Project), nil
+}
+
+// FileRoom files a room under a project, or under none when project is empty,
+// and sets what it is about within it. An empty scope under a project means
+// the project as a whole.
+func (c *Client) FileRoom(room, project, scope, task string) (Room, error) {
+	body := map[string]any{"room": room, "project": project, "scope": scope, "task": task}
+	return c.reshape("project.file", body)
+}
+
+// SetState closes a place or reopens it.
+func (c *Client) SetState(room string, open bool) (Room, error) {
+	op := "room.close"
+	if open {
+		op = "room.reopen"
+	}
+	return c.reshape(op, map[string]any{"room": room})
+}
+
+func (c *Client) reshape(op string, body map[string]any) (Room, error) {
+	var reply struct {
+		Room Room `json:"room"`
+	}
+	if err := c.call(op, body, &reply); err != nil {
+		return Room{}, err
+	}
+	return c.track(reply.Room), nil
+}
+
+// DissolveProject removes a project, leaving its rooms filed under none.
+func (c *Client) DissolveProject(project string) error {
+	return c.call("project.dissolve", map[string]any{"project": project}, nil)
+}
+
+func (c *Client) CreateChannel(title string, groups []string, project string) (Room, error) {
 	var channel Room
-	err := c.call("channel.create", map[string]any{"title": title, "groups": orEmpty(groups)}, &channel)
+	body := map[string]any{"title": title, "groups": orEmpty(groups), "project": project}
+	err := c.call("channel.create", body, &channel)
 	return channel, err
 }
 
@@ -1101,6 +1228,23 @@ func (c *Client) trackGroup(group Group) Group {
 	return group
 }
 
+// trackProject records a project at once rather than waiting for its push,
+// which a caller that creates one and immediately files a room would race.
+func (c *Client) trackProject(project Project) Project {
+	if project.ID == "" {
+		return project
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.projects = slices.DeleteFunc(slices.Clone(c.projects),
+		func(p Project) bool { return p.ID == project.ID })
+	c.projects = append(c.projects, project)
+	sort.SliceStable(c.projects, func(i, j int) bool {
+		return strings.ToLower(c.projects[i].Name) < strings.ToLower(c.projects[j].Name)
+	})
+	return project
+}
+
 func (c *Client) track(space Room) Room {
 	if space.ID == "" {
 		return space
@@ -1186,6 +1330,14 @@ func (c *Client) Groups() []Group {
 	return slices.Clone(c.groups)
 }
 
+// Projects is every project, by name. A project decides no access, so this is
+// the same list for everyone.
+func (c *Client) Projects() []Project {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return slices.Clone(c.projects)
+}
+
 func (c *Client) Rooms() map[string]Room {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -1262,6 +1414,32 @@ func (c *Client) OpenInvitations() int {
 		}
 	}
 	return open
+}
+
+// Recent is how many things people said in a place since a moment, as this
+// client has it. Events do not count: joining a room is not activity in it.
+//
+// It reads the local log, so it counts no further back than the backfill did.
+// That is the right bound for ranking what is busy now.
+func (c *Client) Recent(space string, since float64) int {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	said := 0
+	for _, message := range c.log[space] {
+		if message.Kind != "event" && message.At >= since {
+			said++
+		}
+	}
+	return said
+}
+
+// Visited is whether this user has ever been in a room. Unread messages are
+// counted only in rooms they have, so a caller that totals Unread itself must
+// filter by this or disagree with UnreadMessages.
+func (c *Client) Visited(room string) bool {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return c.visited[room]
 }
 
 // UnreadMessages is the unread messages across the rooms this user has visited.

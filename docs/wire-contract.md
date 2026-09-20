@@ -267,7 +267,8 @@ A room, and a channel in the same shape:
 its subscribers. `audience` resolves group grants, so it lists users and never
 groups. `occupants` is who is in the room now, not who may be. `restrictedTo`
 is the groups a channel admits, empty on an open channel and on every room.
-Section 9 adds `moderators`, and section 11 adds `archive`.
+Section 9 adds `moderators`, section 11 adds `archive`, section 12 adds
+`project`, `scope` and `task`, and section 13 adds `state`.
 
 A message:
 
@@ -293,15 +294,19 @@ Sync:
 
 `users` is every account, sorted; `groups` sorted by name. `visited` is every
 room the caller has ever entered, sorted. `read` omits rooms
-with no cursor. Section 9 adds `submissions`, and section 10 removes channels
-from `read`.
+with no cursor. Section 9 adds `submissions`, section 10 removes channels
+from `read`, and section 12 adds `projects`.
 
 ### Rules a reimplementation must reproduce
 
-- `create` is administrators only, always persisted, and its title is unique
-  among permanent rooms, compared without case. A `retention` field sent with it
-  is ignored rather than refused, so no room is both admin-founded and
-  transient. `open` is open to anyone and its title is not unique.
+- `create` is administrators only, always persisted, and takes `project`,
+  `scope` and `task` as section 12 defines them: a permanent room is founded
+  where it belongs rather than filed afterwards, because its title is unique
+  only within its project. That title is unique among the permanent rooms of
+  the project it is founded in, compared without case; rooms under no project
+  are a bucket of their own. A `retention` field sent with it is ignored rather
+  than refused, so no room is both admin-founded and transient. `open` is open
+  to anyone and its title is not unique.
 - `open` with no title derives one from the sorted principal names.
 - `retention` must be `persisted` or `transient`; anything else is refused.
 - Only an administrator may invite to an admin-founded room. Any participant
@@ -316,9 +321,10 @@ from `read`.
 - Losing access to a room, by `leave`, `uninvite` or `group.unassign`, releases
   every place the user held in it, and the user is sent a `roomGone`.
 - `send` to a channel is refused: a channel is read-only to its audience.
-- `channel.create` is administrators only. Its title is unique among channels,
-  compared without case, for the reason a permanent room's is among rooms.
-  `groups` sets the audience rule at once and each must exist. Nothing is pushed
+- `channel.create` is administrators only and takes `project`. Its title is
+  unique among the channels of that project, compared without case, for the
+  reason a permanent room's is among rooms. `groups` sets the audience rule at
+  once and each must exist. Nothing is pushed
   to the new channel -- it has no subscribers -- and the server announces it on
   `system` instead, as `<user> opened the channel <title> (<id>)`.
 - `channel.publish` is administrators only and writes as its caller, `kind`
@@ -384,6 +390,8 @@ from `read`.
 | `roomGone` | `{"room": "<id>"}` | whoever must drop it |
 | `presence` | `{"username", "online"}` | everyone but its subject |
 | `group` | `{"group": <group>}` | everyone |
+| `project` | `{"project": <project>}` | everyone |
+| `projectGone` | `{"project": "<id>"}` | everyone |
 | `exited` | `{"room": "<id>", "occupancy": "<id>"}` | the user whose occupancy `enter` released |
 
 A `room` push carries the whole object rather than a delta, so a client that
@@ -601,7 +609,139 @@ A room or channel carries `archive`: `{"period": <seconds or null>,
 
 A client drops its copies of the messages up to `through`.
 
-## 12. Not part of the contract
+## 12. Projects
+
+A project is a named container of rooms and channels. It holds no messages and
+decides no access, so it has no audience: every caller sees every project. A
+room is filed under at most one, and `project` on a room object names it.
+
+Depth is one. A project contains rooms, never other projects.
+
+### Fields added to core shapes
+
+A room and a channel gain three:
+
+| Field | Meaning |
+|-|-|
+| `project` | the project it is filed under, or `""` |
+| `scope` | `project`, `task`, or `""` under no project |
+| `task` | which task, on a task room; `""` otherwise |
+
+`task` is opaque. The server stores and returns it and never parses it: which
+task it names is the caller's business.
+
+Sync gains `projects`, every project sorted by name without case:
+
+```json
+{"projects": [{"id": "<hex>", "name": "cynn", "createdAt": 1757030400.0,
+               "tags": ["go", "infra"]}]}
+```
+
+`tags` classify a project and decide nothing. They are sorted, lower case, and
+each is one word of at most 32 characters.
+
+### Operations
+
+| Op | Request fields | Reply |
+|-|-|-|
+| `project.create` | `name`, `tags` | `{ok: true, project}` |
+| `project.tag` | `project`, `tag` | `{ok: true, project}` |
+| `project.untag` | `project`, `tag` | `{ok: true, project}` |
+| `project.file` | `room`, `project`, `scope`, `task` | `{ok: true, room}` |
+| `project.dissolve` | `project` | `{ok: true}` |
+
+All five are administrator-only and answer
+`{"error": "Only an administrator may do that"}` otherwise.
+
+### Rules
+
+- **A name is unique, compared without case, and holds no `/`.** A second
+  `project.create` with a name already taken is refused with `There is already
+  a project called <name>`; it does not return the existing one. A name with a
+  slash is refused with `A project name has no '/' in it`, because a place is
+  referred to from outside its project as `<project>/<title>`, split at the
+  first slash. A room title may still hold one: everything after that first
+  slash is the title, so `cynn/task/31` is `task/31` in `cynn`.
+- **A title is unique within its project, not across them.** `design` in `cynn`
+  and `design` in `sanduk` are two rooms; a second `design` in `cynn` is
+  refused with `A permanent room called 'design' already exists in cynn`, or
+  `... already exists under no project` for the unfiled bucket. The qualified
+  name is a client's way of saying which; the server carries `project` and
+  `title` separately and never parses a slash.
+- **`project.file` refuses a move into a project where the title is taken**,
+  with the same message. A room already in that project is not moving, so
+  re-filing it where it is answers `ok`.
+- **A tag is folded to lower case and one word.** `Go` and `go` are the same
+  tag, because a tag exists to be filtered on and two that filter apart would
+  divide the projects rather than classify them. A tag with a space is refused
+  with `A tag is one word`.
+- **`project.tag` and `project.untag` answer the state, not the change.**
+  Tagging a project that already carries the tag, and untagging one that does
+  not, both answer `ok` with the project.
+- **`project.file` with an empty `project` files the room under none.** That is
+  how a room leaves a project; there is no separate unfile. It clears `scope`
+  and `task` with it, because a scope is a position within a project.
+- **A scope needs a project, and a task needs a task scope.** `scope` or `task`
+  with no project is refused with `A room under no project has no scope`;
+  `task` on a project-scoped room with `Only a task room names a task`; a task
+  scope with no task with `A task room names its task`. Filing under a project
+  without naming a scope gives `project`.
+- **A transient room cannot be filed**, and `project.file` on one is refused
+  with `A transient room is not filed under a project`. A transient room is
+  discarded when everyone leaves, so filing it records a place about to stop
+  existing.
+- **`project.dissolve` keeps the rooms.** They are filed under none, `scope`
+  and `task` cleared, and each gets a `room` push. A project holds no messages,
+  so there is nothing in it to lose.
+- **Filing a room does not change who may reach it.** No grant, subscription or
+  audience moves, and no `roomGone` is sent.
+
+### Pushes
+
+| Type | Payload | Sent to |
+|-|-|-|
+| `project` | `{"project": <project>}` | everyone |
+| `projectGone` | `{"project": "<id>"}` | everyone |
+
+Everyone, as `group` is, because a project decides no access and so has no
+narrower audience to send to.
+
+## 13. Open and closed
+
+A room or a channel is `open` or `closed`. Closing says the work in it is done.
+It is not deleting and not archiving: the room stays, its messages stay, and
+its audience still reads and writes it. What changes is that it is no longer
+one of the places work is happening in, which is what a client counts when it
+says how many places are active.
+
+### Fields added to core shapes
+
+A room and a channel gain `state`: `open` or `closed`. Everything is created
+open.
+
+### Operations
+
+| Op | Request fields | Reply |
+|-|-|-|
+| `room.close` | `room` | `{ok: true, room}` |
+| `room.reopen` | `room` | `{ok: true, room}` |
+
+### Rules
+
+- **Who may close is who may invite.** An administrator for an admin-founded
+  room or a channel; any participant for a user-founded room. The refusal is
+  the existing `Only an administrator may invite to this room` or `Not invited
+  to that room`.
+- **A transient room is not closed**, and either op on one is refused with
+  `A transient room is not closed; it ends when everyone leaves`. Its grace
+  period already decides when it ends, and closing would name a second,
+  contradictory end.
+- **Closing and reopening are idempotent**, and answer the room either way.
+- **A change posts an event** to the room, `<user> closed this room` or
+  `<user> reopened this room`, and pushes the room to its audience. Closing a
+  room that is already closed posts nothing.
+
+## 14. Not part of the contract
 
 An implementation may do any of this differently:
 

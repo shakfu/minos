@@ -195,6 +195,14 @@ The model has one object that bundles principals and none that bundles places. A
 
 **A room belongs to one space.** `pma dispatch cynn:31` names a task in one project and gives the run a worktree of that project. A task that unblocks another repository still belongs to the one whose worktree it holds.
 
+**Built, as `project`.** Wire-contract 12 and 13, schema 7. The name is `project` rather than `space` because `space` was already the terminal client's word for a room-or-channel, and the example above reads the container as a project. Beyond the container: tags on a project, `scope` and `task` on a room, and `state` on both.
+
+`scope` is what this section's second axis asked for. A room filed under a project is about the project as a whole or about one task, so `projects > cynn > task/31` is expressed with one level of container and one attribute rather than two levels. The task label is opaque -- the server stores and returns it and never parses it -- which is what keeps `pma`'s mapping to TODO.md out of the wire.
+
+`state` is open or closed, and it is the third thing a place can stop being, alongside archived and deleted. They answer different questions: archival is how long messages live, deletion is a room ceasing to exist, and closing is whether anybody should still be looking. A client counts open places as active and ranks them by what was said lately, so a task room mid-run does not read as finished because nobody has spoken for an hour.
+
+Retention inheritance is not built: a room still carries its own period, so the null-period rule is unchanged from chat-concepts 4.
+
 ## 8. Wire changes
 
 Against wire-contract. Every one is a socket operation or an additive field. HTTP routes are frozen (wire-contract 3), and sections 9 to 11 set the precedent that operations extend and routes do not.
@@ -331,6 +339,10 @@ Request and reply is about 80 percent built. Submissions are the right primitive
 ## 11. Known holes
 
 Stated, not solved.
+
+**A container has no credential of its own.** Section 7.2's model is built and the interface reads it, so the places the workflow needs exist: a project per repository, a task room per task, open until `pma` closes it. What crosses the wire into one of those rooms is still a 12-hour cookie from `POST /login`, which 8.1 says is the wrong shape for a caller inside a box it controls. Grants, capabilities and the `/vfs` and `/settings` denials of 8.2 and 8.3 are unbuilt. Until they are, a worker agent in a container is an ordinary account with an ordinary session, and the isolation the design relies on is a convention rather than a rule.
+
+**A participant cannot tell an agent from a person.** 7.1 adds `kind` to the user object and it is unbuilt, so a room that mixes a worker agent, `pma-agent` and the developer shows three authors that look alike. That matters most in the one place this design puts them together.
 
 **Nothing deletes a workflow room.** D9 founds rooms as an administrator, and chat-concepts open question 1 leaves unanswered who may delete a persisted room. A space bounds what its rooms hold and not how many there are.
 

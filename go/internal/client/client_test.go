@@ -90,7 +90,7 @@ func TestAnOrdinaryUserIsNotAnAdmin(t *testing.T) {
 		t.Fatal("alice is an administrator")
 	}
 	var refusal *ChatError
-	if _, err := alice.CreateRoom("Engineering", nil); !errors.As(err, &refusal) {
+	if _, err := alice.CreateRoom("Engineering", nil, "", "", ""); !errors.As(err, &refusal) {
 		t.Fatalf("founding a permanent room gave %v", err)
 	}
 }
@@ -189,7 +189,7 @@ func TestAGroupCanBeInvitedAndTracksItsMembership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	room, err := demo.CreateRoom("Team room", nil)
+	room, err := demo.CreateRoom("Team room", nil, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +339,7 @@ func TestInvitationsAndUnreadMessagesAreCountedApart(t *testing.T) {
 // channel is a new channel with each client given subscribed to it.
 func channel(t *testing.T, demo *Client, subscribers ...*Client) string {
 	t.Helper()
-	founded, err := demo.CreateChannel("Feed "+t.Name(), nil)
+	founded, err := demo.CreateChannel("Feed "+t.Name(), nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,5 +489,32 @@ func TestARefusedReadPutsTheCursorBack(t *testing.T) {
 	}
 	if got := demo.ReadCursor("absent"); got != 0 {
 		t.Fatalf("the cursor stayed at %d", got)
+	}
+}
+
+// Opening an item is answered with a push to the opener as well as a reply, so
+// that push can arrive after the archival that dropped the item. The mark would
+// then outlive its message, with nothing left to clear it.
+func TestAnOpenedPushForAnArchivedItemIsIgnored(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	feed := channel(t, demo, alice)
+	for _, body := range []string{"one", "two"} {
+		if err := demo.Publish(feed, "", body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor(t, "both items", func() bool { return len(alice.Log(feed)) == 2 })
+
+	alice.dispatch(json.RawMessage(`{"type": "archived", "room": "` + feed + `", "through": 1}`))
+	alice.dispatch(json.RawMessage(`{"type": "opened", "channel": "` + feed + `", "seq": 1}`))
+
+	if opened := alice.Opened(feed); len(opened) != 0 {
+		t.Fatalf("a mark outlived its item: %v", opened)
+	}
+	// An item still in the channel is marked as it always was.
+	alice.dispatch(json.RawMessage(`{"type": "opened", "channel": "` + feed + `", "seq": 2}`))
+	if opened := alice.Opened(feed); !opened[2] || len(opened) != 1 {
+		t.Fatalf("a live item was not marked: %v", opened)
 	}
 }

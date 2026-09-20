@@ -57,6 +57,19 @@ const (
 	Transient = "transient"
 )
 
+// What a room is about within its project. Empty on a room under no project.
+const (
+	ProjectScope = "project"
+	TaskScope    = "task"
+)
+
+// Whether a room is one of the places work is happening in. A closed room is
+// kept and readable; closing is not deleting and not archiving.
+const (
+	StateOpen   = "open"
+	StateClosed = "closed"
+)
+
 // Principal kinds a grant can name.
 const (
 	PrincipalUser  = "user"
@@ -80,7 +93,7 @@ const (
 // SchemaVersion is stamped in PRAGMA user_version and checked on open. The
 // retired Python server wrote versions 1 and 2, plus presence and occupants
 // tables that no version covers.
-const SchemaVersion = 5
+const SchemaVersion = 7
 
 // SubjectLimit is the most characters a channel message's subject may have.
 const SubjectLimit = 200
@@ -122,6 +135,18 @@ var migrations = map[int][]string{
 			" SELECT c.room_id, c.username FROM read_cursors c" +
 			" JOIN rooms r ON r.id = c.room_id WHERE r.kind = 'room'",
 	},
+	// Projects. Additive but for the column: schema creates the table, and
+	// every existing room starts filed under none.
+	6: {"ALTER TABLE rooms ADD COLUMN project TEXT"},
+	// Tags, a room's scope within its project, and whether it is still open.
+	// Every existing room is open: closing is an act, and none has happened.
+	7: {
+		"CREATE TABLE IF NOT EXISTS project_tags (project_id TEXT NOT NULL," +
+			" tag TEXT NOT NULL, PRIMARY KEY (project_id, tag))",
+		"ALTER TABLE rooms ADD COLUMN scope TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE rooms ADD COLUMN task TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE rooms ADD COLUMN state TEXT NOT NULL DEFAULT 'open'",
+	},
 }
 
 // firstLine is Subject's fallback in SQL, for rows written before subjects:
@@ -158,6 +183,23 @@ CREATE TABLE IF NOT EXISTS group_members (
     PRIMARY KEY (group_id, username)
 );
 
+-- A project bundles places, as a group bundles principals. It holds no
+-- messages and decides no access: it exists to be the container a room is
+-- listed under. See docs/dev/design.md section 7.2.
+CREATE TABLE IF NOT EXISTS projects (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
+-- How a project is classified. A tag names nothing in the model and decides
+-- nothing: it exists to be filtered on.
+CREATE TABLE IF NOT EXISTS project_tags (
+    project_id TEXT NOT NULL,
+    tag        TEXT NOT NULL,
+    PRIMARY KEY (project_id, tag)
+);
+
 CREATE TABLE IF NOT EXISTS rooms (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
@@ -170,7 +212,16 @@ CREATE TABLE IF NOT EXISTS rooms (
     empty_since REAL,
     -- Seconds a message stays live before it is archived; null is never.
     archive_period     REAL,
-    archive_searchable INTEGER NOT NULL DEFAULT 0
+    archive_searchable INTEGER NOT NULL DEFAULT 0,
+    -- The project this room is filed under; null is none.
+    project     TEXT,
+    -- What this room is about within its project: 'project', 'task', or '' for
+    -- a room that is under no project. task names the task, opaquely.
+    scope       TEXT NOT NULL DEFAULT '',
+    task        TEXT NOT NULL DEFAULT '',
+    -- 'open' or 'closed'. A closed room is kept and readable; it has simply
+    -- stopped being one of the places work is happening in.
+    state       TEXT NOT NULL DEFAULT 'open'
 );
 
 -- Who was invited. principal_kind is 'user' or 'group'; a group grant is
@@ -312,6 +363,14 @@ type Room struct {
 	Occupants  []string `json:"occupants"`
 	LastSeq    int64    `json:"lastSeq"`
 	Archive    Archive  `json:"archive"`
+	// The project this room is filed under, or empty for none.
+	Project string `json:"project"`
+	// What this room is about within its project, and which task when its
+	// scope is "task". Both empty under no project.
+	Scope string `json:"scope"`
+	Task  string `json:"task"`
+	// "open" or "closed".
+	State string `json:"state"`
 }
 
 // Archive is when a room's messages leave it, and whether its audience may
@@ -351,6 +410,15 @@ type Group struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
 	Members []string `json:"members"`
+}
+
+// Project is a named container of rooms and channels. It carries no audience
+// and no log, so it is the name and when it was made.
+type Project struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	CreatedAt float64  `json:"createdAt"`
+	Tags      []string `json:"tags"`
 }
 
 // Timeline owns the database and the live connection state.
@@ -573,6 +641,137 @@ func (t *Timeline) UnassignGroup(groupID, username string) error {
 	return err
 }
 
+// -- projects ----------------------------------------------------------------
+
+// CreateProject creates a project, or returns the existing one with that id.
+func (t *Timeline) CreateProject(name, projectID string, tags []string) (*Project, error) {
+	if projectID == "" {
+		projectID = uuid.NewString()
+	}
+	transaction, err := t.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer transaction.Rollback()
+
+	if _, err := transaction.Exec(
+		"INSERT OR IGNORE INTO projects (id, name, created_at) VALUES (?, ?, ?)",
+		projectID, name, now(),
+	); err != nil {
+		return nil, err
+	}
+	for _, tag := range tags {
+		if _, err := transaction.Exec(
+			"INSERT OR IGNORE INTO project_tags (project_id, tag) VALUES (?, ?)", projectID, tag,
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		return nil, err
+	}
+	return t.Project(projectID)
+}
+
+// Tag and Untag classify a project. Both report whether anything changed.
+func (t *Timeline) Tag(projectID, tag string) (bool, error) {
+	return t.changed(
+		"INSERT OR IGNORE INTO project_tags (project_id, tag) VALUES (?, ?)", projectID, tag)
+}
+
+func (t *Timeline) Untag(projectID, tag string) (bool, error) {
+	return t.changed("DELETE FROM project_tags WHERE project_id = ? AND tag = ?", projectID, tag)
+}
+
+func (t *Timeline) Project(projectID string) (*Project, error) {
+	project := Project{ID: projectID, Tags: []string{}}
+	err := t.db.QueryRow(
+		"SELECT name, created_at FROM projects WHERE id = ?", projectID,
+	).Scan(&project.Name, &project.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	tags, err := t.strings(
+		"SELECT tag FROM project_tags WHERE project_id = ? ORDER BY tag", projectID)
+	if err != nil {
+		return nil, err
+	}
+	project.Tags = tags
+	return &project, nil
+}
+
+// ProjectNamed finds a project by name, compared without case, as RoomNamed
+// does and for the same reason: the name exists to be referred to.
+func (t *Timeline) ProjectNamed(name string) (*Project, error) {
+	var id string
+	err := t.db.QueryRow("SELECT id FROM projects WHERE lower(name) = lower(?)", name).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return t.Project(id)
+}
+
+// Projects is every project, by name. There is no audience to filter by: a
+// project decides no access, so everyone sees the same list.
+func (t *Timeline) Projects() ([]Project, error) {
+	ids, err := t.strings("SELECT id FROM projects ORDER BY lower(name), id")
+	if err != nil {
+		return nil, err
+	}
+	projects := make([]Project, 0, len(ids))
+	for _, id := range ids {
+		project, err := t.Project(id)
+		if err != nil {
+			return nil, err
+		}
+		if project != nil {
+			projects = append(projects, *project)
+		}
+	}
+	return projects, nil
+}
+
+// RoomsIn is every room filed under a project, by id.
+func (t *Timeline) RoomsIn(projectID string) ([]string, error) {
+	return t.strings("SELECT id FROM rooms WHERE project = ? ORDER BY lower(title), id", projectID)
+}
+
+// FileRoom files a room under a project, or under none when projectID is
+// empty. Reports whether the room exists.
+func (t *Timeline) FileRoom(roomID, projectID, scope, task string) (bool, error) {
+	var project any
+	if projectID != "" {
+		project = projectID
+	}
+	return t.changed("UPDATE rooms SET project = ?, scope = ?, task = ? WHERE id = ?",
+		project, scope, task, roomID)
+}
+
+// SetState opens or closes a room.
+func (t *Timeline) SetState(roomID, state string) (bool, error) {
+	return t.changed("UPDATE rooms SET state = ? WHERE id = ?", state, roomID)
+}
+
+// DeleteProject dissolves a project, leaving its rooms filed under none.
+func (t *Timeline) DeleteProject(projectID string) (bool, error) {
+	// A scope is a position within a project, so it goes with the project.
+	if _, err := t.db.Exec(
+		"UPDATE rooms SET project = NULL, scope = '', task = '' WHERE project = ?", projectID,
+	); err != nil {
+		return false, err
+	}
+	if _, err := t.db.Exec("DELETE FROM project_tags WHERE project_id = ?", projectID); err != nil {
+		return false, err
+	}
+	return t.changed("DELETE FROM projects WHERE id = ?", projectID)
+}
+
 // -- rooms -------------------------------------------------------------------
 
 // CreateRoom creates a room and returns its description. A room whose id
@@ -580,6 +779,7 @@ func (t *Timeline) UnassignGroup(groupID, username string) error {
 // can be declared on every boot without a guard.
 func (t *Timeline) CreateRoom(
 	title, createdBy, kind, authority, retention, roomID string, grants []Principal,
+	filed Filing,
 ) (*Room, error) {
 	if roomID == "" {
 		roomID = uuid.NewString()
@@ -592,11 +792,17 @@ func (t *Timeline) CreateRoom(
 	}
 	defer transaction.Rollback()
 
+	var project any
+	if filed.Project != "" {
+		project = filed.Project
+	}
 	if _, err := transaction.Exec(
 		"INSERT OR IGNORE INTO rooms"+
-			" (id, title, kind, authority, retention, created_by, created_at, high_seq)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+			" (id, title, kind, authority, retention, created_by, created_at, high_seq,"+
+			" project, scope, task)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
 		roomID, title, kind, authority, retention, createdBy, at,
+		project, filed.Scope, filed.Task,
 	); err != nil {
 		return nil, err
 	}
@@ -622,11 +828,14 @@ func (t *Timeline) Room(roomID string) (*Room, error) {
 		RestrictedTo: []string{}, Moderators: []string{}, Occupants: []string{},
 	}
 	var period sql.NullFloat64
+	var project sql.NullString
 	err := t.db.QueryRow(
 		"SELECT title, kind, authority, retention, created_by, created_at, high_seq,"+
-			" archive_period, archive_searchable FROM rooms WHERE id = ?", roomID,
+			" archive_period, archive_searchable, project, scope, task, state"+
+			" FROM rooms WHERE id = ?", roomID,
 	).Scan(&room.Title, &room.Kind, &room.Authority, &room.Retention,
-		&room.CreatedBy, &room.CreatedAt, &room.LastSeq, &period, &room.Archive.Searchable)
+		&room.CreatedBy, &room.CreatedAt, &room.LastSeq, &period, &room.Archive.Searchable,
+		&project, &room.Scope, &room.Task, &room.State)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -636,6 +845,7 @@ func (t *Timeline) Room(roomID string) (*Room, error) {
 	if period.Valid {
 		room.Archive.Period = &period.Float64
 	}
+	room.Project = project.String
 
 	if room.Kind == ChannelKind {
 		audience, err := t.subscribers(roomID)
@@ -667,16 +877,29 @@ func (t *Timeline) Room(roomID string) (*Room, error) {
 	return &room, nil
 }
 
-// RoomNamed finds an existing room of this authority with this name.
+// Filing is where a room sits: its project, and what it is about within it.
+// Zero is a room under no project.
+type Filing struct {
+	Project string
+	Scope   string
+	Task    string
+}
+
+// RoomNamed finds an existing room of this authority with this name, in one
+// project. An empty project searches the rooms under none, which are a bucket
+// of their own rather than a wildcard.
 //
 // Compared without case, because the name exists to be referred to -- "post it
 // in Engineering" has to resolve to one room, and two that differ only in
-// capitalisation would not help anybody tell them apart.
-func (t *Timeline) RoomNamed(title, authority, kind string) (*Room, error) {
+// capitalisation would not help anybody tell them apart. Scoped to a project
+// because that is the rest of the name: `cynn/design` and `sanduk/design` are
+// two rooms nobody would confuse.
+func (t *Timeline) RoomNamed(title, authority, kind, project string) (*Room, error) {
 	var id string
 	err := t.db.QueryRow(
-		"SELECT id FROM rooms WHERE kind = ? AND authority = ? AND lower(title) = lower(?)",
-		kind, authority, title,
+		"SELECT id FROM rooms WHERE kind = ? AND authority = ? AND lower(title) = lower(?)"+
+			" AND ifnull(project, '') = ?",
+		kind, authority, title, project,
 	).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

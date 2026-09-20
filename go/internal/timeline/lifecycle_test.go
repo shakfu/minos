@@ -23,7 +23,7 @@ func fresh(t *testing.T) (*Timeline, string) {
 func alone(t *testing.T, store *Timeline, authority string) *Room {
 	t.Helper()
 	room, err := store.CreateRoom("Solo", "alice", RoomKind, authority, Transient, "",
-		[]Principal{{Kind: PrincipalUser, ID: "alice"}})
+		[]Principal{{Kind: PrincipalUser, ID: "alice"}}, Filing{})
 	if err != nil {
 		t.Fatalf("cannot create a room: %v", err)
 	}

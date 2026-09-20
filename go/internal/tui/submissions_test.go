@@ -14,7 +14,7 @@ import (
 
 func found(t *testing.T, demo *client.Client, subscribers ...*client.Client) string {
 	t.Helper()
-	channel, err := demo.CreateChannel("Curated", nil)
+	channel, err := demo.CreateChannel("Curated", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestAnAppointedModeratorPublishesFromTheComposer(t *testing.T) {
 	waitFor(t, "alice to moderate", func() bool { return alice.Moderates(channel) })
 
 	ui := headless(alice)
-	ui.selectSpace(channel)
+	ui.show(channel)
 	if ui.submitting(channel) {
 		t.Fatal("a moderator's composer submits")
 	}
@@ -72,7 +72,7 @@ func TestASubscribersComposerSubmitsAndAModeratorApproves(t *testing.T) {
 	channel := moderated(t, demo, alice, bob)
 
 	writer := headless(bob)
-	writer.selectSpace(channel)
+	writer.show(channel)
 	if !writer.submitting(channel) {
 		t.Fatal("a subscriber's composer publishes")
 	}
@@ -80,7 +80,7 @@ func TestASubscribersComposerSubmitsAndAModeratorApproves(t *testing.T) {
 	writer.mustSay(t, "Submitted")
 
 	moderator := headless(alice)
-	moderator.selectSpace(channel)
+	moderator.show(channel)
 	moderator.command("/queue")
 	listed := moderator.mustSay(t, "a tip")
 	moderator.command("/approve " + listed[1:9])
@@ -173,7 +173,7 @@ func TestAnUnmoderatedChannelPublishesAndIsRefusedAsBefore(t *testing.T) {
 	channel := found(t, demo, bob)
 
 	ui := headless(bob)
-	ui.selectSpace(channel)
+	ui.show(channel)
 	ui.compose("hello")
 	ui.mustSay(t, "Only an administrator may do that")
 }

@@ -61,6 +61,17 @@ func simulated(t *testing.T, width, height int) tcell.SimulationScreen {
 	return screen
 }
 
+// rowFields is the whitespace-separated fields of the drawn line holding text,
+// so a test names what a row says without pinning how wide its columns are.
+func rowFields(drawn, text string) []string {
+	for _, line := range strings.Split(drawn, "\n") {
+		if strings.Contains(line, text) {
+			return strings.Fields(line)
+		}
+	}
+	return nil
+}
+
 func contents(screen tcell.SimulationScreen) string {
 	cells, width, _ := screen.GetContents()
 	var text strings.Builder
@@ -92,13 +103,13 @@ func TestTheScreenIsDrawnAndATinyOneIsRefused(t *testing.T) {
 	ui.draw()
 	drawn := contents(screen)
 	// In the room, the screen is that room.
-	for _, want := range []string{" minos  demo (admin)  in alice, demo", "connected", "word word", "> ", "/exit"} {
+	for _, want := range []string{" demo (admin)  in alice, demo", "connected", "word word", "> ", "/exit"} {
 		if !strings.Contains(drawn, want) {
 			t.Errorf("the room lacks %q:\n%s", want, drawn)
 		}
 	}
-	if strings.Contains(drawn, "CHANNELS") {
-		t.Errorf("the room shows the sidebar:\n%s", drawn)
+	if strings.Contains(drawn, "PROJECTS") {
+		t.Errorf("the room shows the tab bar:\n%s", drawn)
 	}
 	if strings.Contains(drawn, "disconnected") || strings.ContainsRune(drawn, '\x1b') {
 		t.Errorf("the screen is wrong:\n%q", drawn)
@@ -108,13 +119,17 @@ func TestTheScreenIsDrawnAndATinyOneIsRefused(t *testing.T) {
 		t.Errorf("unread %d after drawing", demo.Unread(room))
 	}
 
-	// Stepping out brings the rest back, with the room still highlighted.
+	// Stepping out brings the tab bar and the rooms list back, with the room
+	// still highlighted.
 	ui.command("/exit")
 	ui.draw()
-	for _, want := range []string{"ROOMS", "CHANNELS", "PEOPLE", "Enter to join"} {
+	for _, want := range []string{"PROJECTS", "ROOMS", "PEOPLE", "PLACE", "Enter: go in"} {
 		if drawn := contents(screen); !strings.Contains(drawn, want) {
 			t.Errorf("stepping out lacks %q:\n%s", want, drawn)
 		}
+	}
+	if ui.selected != room {
+		t.Errorf("stepping out lost the room: selected %q", ui.selected)
 	}
 
 	// A highlighted room is a preview: drawing it marks nothing read.
@@ -161,7 +176,7 @@ func TestTypingAndEnterSendFromTheComposer(t *testing.T) {
 func TestAChannelShowsSubjectsAndTheOpenedBody(t *testing.T) {
 	server := testserver.Start(t, config.HistoryLimit)
 	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
-	founded, err := demo.CreateChannel("News", nil)
+	founded, err := demo.CreateChannel("News", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +190,7 @@ func TestAChannelShowsSubjectsAndTheOpenedBody(t *testing.T) {
 
 	screen := simulated(t, 80, 24)
 	ui := newUi(screen, alice, client.Profile{Username: "alice"})
-	ui.selectSpace(founded.ID)
+	ui.show(founded.ID)
 	ui.draw()
 	drawn := contents(screen)
 	for _, want := range []string{"Pending (1)", "Deploy at four", "Up/Down: item"} {
@@ -214,10 +229,10 @@ func TestInvitationsAndUnreadMessagesAreShownApart(t *testing.T) {
 
 	screen := simulated(t, 100, 24)
 	ui := newUi(screen, alice, client.Profile{Username: "alice"})
-	ui.ensureSelection()
+	ui.showTabRooms(room.ID)
 	ui.draw()
 	drawn := contents(screen)
-	for _, want := range []string{"1 open invitation", "Standup (invited)"} {
+	for _, want := range []string{"1 open invitation", "Standup", "invited"} {
 		if !strings.Contains(drawn, want) {
 			t.Errorf("before entering, the screen lacks %q:\n%s", want, drawn)
 		}
@@ -230,6 +245,7 @@ func TestInvitationsAndUnreadMessagesAreShownApart(t *testing.T) {
 	ui.compose("")
 	ui.draw()
 	ui.command("/exit")
+	ui.draw()
 	if err := demo.Send(room.ID, "two"); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +255,7 @@ func TestInvitationsAndUnreadMessagesAreShownApart(t *testing.T) {
 	// The header's "2 invited" is the audience, not an invitation, so the check
 	// names the marker and the count exactly.
 	if !strings.Contains(drawn, "1 unread message") ||
-		strings.Contains(drawn, "(invited)") || strings.Contains(drawn, "open invitation") {
+		strings.Contains(drawn, "invited") || strings.Contains(drawn, "open invitation") {
 		t.Errorf("after the visit the screen is wrong:\n%s", drawn)
 	}
 }
@@ -248,7 +264,7 @@ func TestArchiveResultsReplaceThePaneUntilEsc(t *testing.T) {
 	demo := connect(t, testserver.Start(t, config.HistoryLimit).Base, "demo")
 	screen := simulated(t, 80, 24)
 	ui := newUi(screen, demo, client.Profile{Username: "demo"})
-	ui.ensureSelection()
+	ui.show(systemChannel)
 	ui.showResults("System: 1 archived match(es) for 'budget'",
 		[]string{"[1] 2026-09-11 10:00 demo       Budget"})
 
@@ -260,10 +276,19 @@ func TestArchiveResultsReplaceThePaneUntilEsc(t *testing.T) {
 		}
 	}
 
+	// Esc closes the results first, leaving the channel that was under them.
 	ui.key(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
 	ui.draw()
-	if drawn := contents(screen); strings.Contains(drawn, "Esc: back") || !strings.Contains(drawn, "System") {
+	if drawn := contents(screen); strings.Contains(drawn, "archived match(es)") ||
+		!strings.Contains(drawn, "System") {
 		t.Errorf("Esc left the results up:\n%s", drawn)
+	}
+
+	// A second Esc steps out of the channel, to the list it was listed in.
+	ui.key(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
+	ui.draw()
+	if drawn := contents(screen); !strings.Contains(drawn, "PLACE") {
+		t.Errorf("Esc did not leave the channel:\n%s", drawn)
 	}
 }
 
@@ -273,12 +298,12 @@ func TestAPersonAndARoomSayWhatEnterAndInviteDo(t *testing.T) {
 	screen := simulated(t, 80, 24)
 	ui := newUi(screen, demo, client.Profile{Username: "demo"})
 
-	ui.selectPerson("alice")
+	ui.showTab(tabPeople)
 	ui.draw()
 	drawn := contents(screen)
-	for _, want := range []string{">  alice", "(to alice)", "Enter: open a room with alice", "Enter raises a room"} {
+	for _, want := range []string{"PERSON", "> alice", "(to alice)", "Enter: open a room with alice"} {
 		if !strings.Contains(drawn, want) {
-			t.Errorf("a selected person lacks %q:\n%s", want, drawn)
+			t.Errorf("the people list lacks %q:\n%s", want, drawn)
 		}
 	}
 
@@ -286,5 +311,133 @@ func TestAPersonAndARoomSayWhatEnterAndInviteDo(t *testing.T) {
 	ui.draw()
 	if drawn := contents(screen); !strings.Contains(drawn, "/invite <who>") {
 		t.Errorf("a room does not say how to invite:\n%s", drawn)
+	}
+}
+
+// The projects tab is a table of containers, and Enter on a row is the rooms
+// it holds. Counts are per project, because a project holds no messages of its
+// own.
+func TestTheProjectsTabTabulatesWhatEachProjectHolds(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	room, err := demo.CreateRoom("Standup", []client.Principal{{Kind: "user", ID: "alice"}}, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	news, err := demo.CreateChannel("News", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A founder is not in a channel's audience until they subscribe, and the
+	// list shows what the user reaches.
+	if _, err := demo.Subscribe(news.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the channel", func() bool { _, ok := demo.Space(news.ID); return ok })
+
+	screen := simulated(t, 80, 24)
+	ui := newUi(screen, demo, client.Profile{Username: "demo"})
+	for _, args := range [][]string{
+		{"new", "cynn"}, {"file", "Standup", "cynn"}, {"file", "News", "cynn"},
+	} {
+		if err := ui.cmdProject(args); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor(t, "alice to be told", func() bool { _, ok := alice.Space(room.ID); return ok })
+
+	ui.showTab(tabProjects)
+	ui.draw()
+	drawn := contents(screen)
+	for _, want := range []string{"PROJECT", "ROOMS", "CHANNELS", "LAST", "> cynn", "(none)"} {
+		if !strings.Contains(drawn, want) {
+			t.Errorf("the projects tab lacks %q:\n%s", want, drawn)
+		}
+	}
+
+	// In: only that project's places, and the room says which project it is in.
+	ui.compose("")
+	if rows := ui.roomRows(); len(rows) != 2 {
+		t.Fatalf("the project holds %d places, want 2", len(rows))
+	}
+	ui.draw()
+	if drawn := contents(screen); !strings.Contains(drawn, "Standup") ||
+		!strings.Contains(drawn, "News") || strings.Contains(drawn, "System") {
+		t.Errorf("the scoped list is wrong:\n%s", drawn)
+	}
+
+	// In the place itself the tab bar is gone, so its header carries the
+	// qualified name: which project, then which place in it.
+	ui.show(news.ID)
+	ui.draw()
+	if drawn := contents(screen); !strings.Contains(drawn, "cynn/News") {
+		t.Errorf("the channel header does not qualify its name:\n%s", drawn)
+	}
+}
+
+// The header bar carries the name and the tabs, as gwiki's does, and the
+// overview opens on where the work is.
+func TestTheHeaderBarCarriesTheNameAndTheOverviewOpensFirst(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	room, err := demo.CreateRoom("task/31", []client.Principal{{Kind: "user", ID: "alice"}}, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := alice.Send(room.ID, "starting on it"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the message", func() bool { return len(demo.Log(room.ID)) == 1 })
+
+	screen := simulated(t, 86, 20)
+	ui := newUi(screen, demo, client.Profile{Username: "demo"})
+	for _, args := range [][]string{{"new", "cynn", "#go"}, {"file", "task/31", "cynn", "31"}} {
+		if err := ui.cmdProject(args); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ui.draw()
+
+	drawn := contents(screen)
+	for _, want := range []string{
+		" minos   OVERVIEW   PROJECTS   ROOMS   PEOPLE",
+		"PROJECT", "TAGS", "ACTIVE", "SAID", "BUSIEST",
+		"> cynn", "go", "task/31",
+		"1 project", "places open",
+	} {
+		if !strings.Contains(drawn, want) {
+			t.Errorf("the overview lacks %q:\n%s", want, drawn)
+		}
+	}
+
+	// Enter opens that project's own page: what it holds, then its places.
+	ui.compose("")
+	ui.draw()
+	drawn = contents(screen)
+	for _, want := range []string{"cynn  #go", "1 open of 1 place", "SCOPE", "TASK"} {
+		if !strings.Contains(drawn, want) {
+			t.Errorf("the project page lacks %q:\n%s", want, drawn)
+		}
+	}
+	// The row's own fields, rather than the spacing between them.
+	if fields := rowFields(drawn, "task/31"); !slices.Equal(fields,
+		[]string{">", "task/31", "room", "task", "31", "1"}) {
+		t.Errorf("the task room's row is %q:\n%s", fields, drawn)
+	}
+
+	// Closed places are out of the way until asked for.
+	if err := ui.cmdClose([]string{"task/31"}); err != nil {
+		t.Fatal(err)
+	}
+	ui.draw()
+	if drawn := contents(screen); !strings.Contains(drawn, "0 open of 1 place, 1 closed") ||
+		!strings.Contains(drawn, "a shows the closed ones") {
+		t.Errorf("a closed place is drawn wrong:\n%s", drawn)
+	}
+	ui.key(tcell.NewEventKey(tcell.KeyRune, 'a', tcell.ModNone))
+	ui.draw()
+	if drawn := contents(screen); !strings.Contains(drawn, "closed") ||
+		!strings.Contains(drawn, "task/31") {
+		t.Errorf("a did not bring the closed place back:\n%s", drawn)
 	}
 }

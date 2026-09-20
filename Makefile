@@ -20,8 +20,11 @@ serve: go/minosd
 tui: go/minos
 	./go/minos
 
+demo: go/minos
+	./go/minos -user demo -password demo
+
 ## A narrated run of the channel audience rule against a server of its own.
-demo: go/minosd
+demo-run: go/minosd
 	cd go && MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd go run ./cmd/demo
 
 ## Unit tests, then the wire contract against the built server. -count=1

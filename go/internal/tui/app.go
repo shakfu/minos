@@ -5,10 +5,12 @@
 // Looking away leaves it. For a transient room that is what keeps it alive, and
 // closing the program is leaving.
 //
-// Everything the retired desktop expressed by dragging is a command here. The
-// sidebar lists what you can enter, the pane shows one conversation, the
-// composer takes text or a command, and the status line says whether the socket
-// is up -- in a terminal there is nowhere else to notice that it is not.
+// Everything the retired desktop expressed by dragging is a command here. A
+// tab bar lists what there is, each tab a table: projects, then the rooms of
+// one project, then the room itself. Tab moves between tabs, Enter goes one
+// level in, Esc one level out. The composer takes text or a command, and the
+// status line says whether the socket is up -- in a terminal there is nowhere
+// else to notice that it is not.
 package tui
 
 import (
@@ -34,20 +36,68 @@ import (
 const systemChannel = "system"
 
 const (
-	sidebarWidth = 24
-	authorWidth  = 10
+	authorWidth = 10
 
 	// Lines of command output kept under the conversation, and in memory.
 	noticeLines = 6
 	noticeKeep  = 200
 )
 
+// tab is one entry in the tab bar, and the list it opens on.
+type tab int
+
+const (
+	tabOverview tab = iota
+	tabProjects
+	tabRooms
+	tabPeople
+)
+
+// tabs are the tab bar's entries, in the order it shows them and Tab moves
+// through them.
+var tabs = []tab{tabOverview, tabProjects, tabRooms, tabPeople}
+
+func (t tab) String() string {
+	switch t {
+	case tabProjects:
+		return "PROJECTS"
+	case tabRooms:
+		return "ROOMS"
+	case tabPeople:
+		return "PEOPLE"
+	}
+	return "OVERVIEW"
+}
+
+// activeWindow is how far back what was said counts towards a place being
+// busy, and overviewTop how many projects the overview ranks.
+const (
+	activeWindow = 7 * 24 * time.Hour
+	overviewTop  = 5
+)
+
+// view is what the body shows: one of the tabs' lists, one project's page, or
+// a space.
+type view int
+
+const (
+	viewOverview view = iota
+	viewProjects
+	viewProject
+	viewRooms
+	viewPeople
+	viewSpace
+)
+
+// unfiled stands for the rooms under no project, in the projects list.
+const unfiled = "\x00none"
+
 var help = [][2]string{
 	{"/help", "this list"},
-	{"/rooms  /people  /groups", "list what there is"},
+	{"/rooms  /people  /groups  /projects", "list what there is"},
 	{"/open <who>...", "raise an ad-hoc room, kept"},
 	{"/meet <who>...", "raise an ad-hoc room, discarded when everyone leaves"},
-	{"/create <title>", "found a permanent room (admin)"},
+	{"/create [project/]<title>", "found a permanent room (admin)"},
 	{"/invite <who>", "admit a user, or @group"},
 	{"/uninvite <who>", "withdraw a grant"},
 	{"/exit", "step out of this room, keeping your place in it"},
@@ -59,6 +109,7 @@ var help = [][2]string{
 	{"/channel admit|revoke <channel> <group>", "restrict a channel to groups (admin)"},
 	{"/channel appoint|dismiss <channel> <user>", "who moderates a channel (admin)"},
 	{"<channel>", "one word: a channel's name with _ for a space, its id, or the start of its id"},
+	{"project/<title>", "naming a place outside the project you are looking at"},
 	{"/queue", "what this channel's moderators have to decide"},
 	{"/approve <id>  /reject <id> [why]", "decide a submission (moderator)"},
 	{"/submissions  /ack <id>", "what you submitted, and closing a rejection"},
@@ -67,10 +118,18 @@ var help = [][2]string{
 	{"/search <text>", "search this space's archive, where allowed"},
 	{"Esc", "close archive results"},
 	{"/quit", "leave every room and stop"},
-	{"Tab / S-Tab", "next or previous space or person, outside a room"},
+	{"/project new <name> [#tag]...", "found a project (admin)"},
+	{"/project tag|untag <name> <tag>", "classify a project (admin)"},
+	{"/project file <room> [name] [task]", "file a room under a project, or under none (admin)"},
+	{"/project rm <name>", "dissolve a project; its rooms survive (admin)"},
+	{"/close  /reopen [room]", "say whether the work in a place is done"},
+	{"Tab / S-Tab", "next or previous tab, outside a room"},
+	{"Up / Down", "move through the list, or a channel's items"},
+	{"a", "in a list of places, show the closed ones too"},
+	{"Enter on a project", "open its page: what it holds, and its places"},
 	{"Enter on a room", "go in: the screen is that room until you step out"},
 	{"Enter on a person", "raise a room with them"},
-	{"Up / Down", "move through a channel's items"},
+	{"Esc", "back one level"},
 	{"Enter on an item", "open it and show its body, or close it"},
 	{"subject | body", "in a channel: a headline, then the text"},
 	{"PgUp / PgDn", "scroll this room"},
@@ -87,6 +146,23 @@ type Ui struct {
 	selected  string
 	person    string // selected in PEOPLE instead of a space; selected is then ""
 	occupancy string
+
+	// The tab bar's current entry, and what the body shows. A list drills into
+	// the next one; the last is the space itself.
+	tab  tab
+	view view
+
+	// The project the rooms list is limited to, when it was reached from the
+	// projects list. scoped tells a scope of unfiled from no scope at all.
+	scope  string
+	scoped bool
+
+	// The row under the cursor in whichever list is shown.
+	cursor int
+
+	// Whether a list of places shows the closed ones too. Off on every move to
+	// a tab or a project, because what is active is what a list is for.
+	showClosed bool
 
 	// In a channel: the item under the cursor, as an index into feedOrder, and
 	// the one whose body is shown, by seq.
@@ -111,6 +187,9 @@ type Ui struct {
 	running bool
 	colours map[string]tcell.Color
 
+	// now is the clock the activity window is measured against; tests replace it.
+	now func() time.Time
+
 	// Notices arrive from the client's applier as well as from commands.
 	mutex   sync.Mutex
 	notices []string
@@ -134,7 +213,7 @@ func Run(c *client.Client, profile client.Profile) error {
 func newUi(screen tcell.Screen, c *client.Client, profile client.Profile) *Ui {
 	u := &Ui{
 		screen: screen, client: c, profile: profile, running: true,
-		colours: map[string]tcell.Color{},
+		colours: map[string]tcell.Color{}, now: time.Now,
 	}
 	if screen != nil {
 		if screen.Colors() > 0 {
@@ -158,8 +237,10 @@ func newUi(screen tcell.Screen, c *client.Client, profile client.Profile) *Ui {
 		}
 	}
 	if len(c.Rooms()) == 0 {
-		u.notice("No rooms yet. Tab to a person and press Enter to start one, or /open <user>.")
+		u.notice("No rooms yet. Tab to PEOPLE and press Enter on someone, or /open <user>.")
 	}
+	// Where the work is, which is what a session opens to want to know.
+	u.showTab(tabOverview)
 	u.known = map[string]bool{}
 	for id := range c.Rooms() {
 		u.known[id] = true
@@ -250,24 +331,179 @@ func (u *Ui) spaces() []client.Room {
 	return append(order(u.client.Rooms()), order(u.client.Channels())...)
 }
 
+// ensureSelection keeps the cursor and the selection on something that still
+// exists: a room can close, and a project can be dissolved, under either.
 func (u *Ui) ensureSelection() {
-	if u.person != "" && slices.Contains(u.people(), u.person) {
-		return
-	}
-	u.person = ""
-	spaces := u.spaces()
-	for _, space := range spaces {
-		if space.ID == u.selected {
-			return
+	if u.view == viewSpace || u.view == viewRooms || u.view == viewProject {
+		if _, ok := u.client.Space(u.selected); u.selected != "" && !ok {
+			// The room went away under us. Back to the list it was listed in.
+			if u.occupancy != "" {
+				u.notice("The room you were in has closed")
+				u.occupancy = ""
+			}
+			u.selected = ""
+			u.view = viewRooms
 		}
 	}
-	if u.occupancy != "" {
-		u.notice("The room you were in has closed")
+	// A dissolved project leaves its page with nothing to show.
+	if u.view == viewProject && u.scope != unfiled && u.project(u.scope) == nil {
+		u.scoped, u.scope, u.cursor = false, "", 0
+		u.view = viewProjects
 	}
-	if len(spaces) > 0 {
-		u.selectSpace(spaces[0].ID)
-	} else {
+	u.cursor = max(0, min(u.cursor, u.rowCount()-1))
+	if u.view == viewRooms || u.view == viewProject {
+		u.followCursor()
+	}
+}
+
+// project is one project by id, or nil.
+func (u *Ui) project(id string) *client.Project {
+	for _, project := range u.client.Projects() {
+		if project.ID == id {
+			return &project
+		}
+	}
+	return nil
+}
+
+// rowCount is how many rows the list on screen has.
+func (u *Ui) rowCount() int {
+	switch u.view {
+	case viewOverview:
+		return len(u.overviewRows())
+	case viewProjects:
+		return len(u.projectRows())
+	case viewProject, viewRooms:
+		return len(u.roomRows())
+	case viewPeople:
+		return len(u.people())
+	}
+	return 0
+}
+
+// followCursor makes the room under the cursor the selected one, so the status
+// line, the composer and the room commands all speak about what is highlighted.
+func (u *Ui) followCursor() {
+	rows := u.roomRows()
+	if len(rows) == 0 {
 		u.selectSpace("")
+		return
+	}
+	u.selectSpace(rows[min(u.cursor, len(rows)-1)].ID)
+}
+
+// showTab opens a tab's list, leaving any room and any drill-down behind.
+func (u *Ui) showTab(next tab) {
+	u.tab, u.cursor = next, 0
+	u.scope, u.scoped = "", false
+	u.results, u.resultsTitle = nil, ""
+	u.showClosed = false
+	switch next {
+	case tabProjects:
+		u.view = viewProjects
+		u.selectSpace("")
+		u.person = ""
+	case tabRooms:
+		u.view = viewRooms
+		u.person = ""
+		u.followCursor()
+	case tabPeople:
+		u.view = viewPeople
+		u.selectSpace("")
+		if names := u.people(); len(names) > 0 {
+			u.selectPerson(names[0])
+		}
+	default:
+		u.view = viewOverview
+		u.selectSpace("")
+		u.person = ""
+	}
+}
+
+// enterRow goes one level in from the list on screen.
+func (u *Ui) enterRow() {
+	switch u.view {
+	case viewOverview:
+		rows := u.overviewRows()
+		if len(rows) == 0 {
+			return
+		}
+		u.openProject(rows[min(u.cursor, len(rows)-1)].id)
+	case viewProjects:
+		rows := u.projectRows()
+		if len(rows) == 0 {
+			return
+		}
+		u.openProject(rows[min(u.cursor, len(rows)-1)].id)
+	case viewProject, viewRooms:
+		rows := u.roomRows()
+		if len(rows) == 0 {
+			return
+		}
+		u.openSpace(rows[min(u.cursor, len(rows)-1)])
+	case viewPeople:
+		if u.person != "" {
+			u.chat(u.person, "")
+		}
+	case viewSpace:
+		if space, ok := u.client.Space(u.selected); ok && isFeed(space) {
+			u.toggle(space)
+		}
+	}
+}
+
+// openProject opens one project's page: what it holds, and its places. The tab
+// bar stays where it was, because this is a level under a tab, not another tab.
+func (u *Ui) openProject(id string) {
+	u.scope, u.scoped, u.cursor = id, true, 0
+	u.showClosed = false
+	u.view = viewProject
+	u.followCursor()
+}
+
+// openSpace shows one room or channel, and the screen is that space. A room is
+// entered, which is what being in it means; a channel has no occupancy.
+func (u *Ui) openSpace(space client.Room) {
+	u.selectSpace(space.ID)
+	u.view = viewSpace
+	u.scroll, u.item, u.expanded = 0, 0, 0
+	if space.Kind == "room" {
+		u.enterRoom(space.ID)
+	}
+}
+
+// exited is what /exit and a released occupancy leave behind: out of the room,
+// back on the list it was listed in.
+func (u *Ui) exited() {
+	if u.view == viewSpace {
+		u.view = viewRooms
+		u.selectSpace("")
+		u.followCursor()
+	}
+}
+
+// back steps one level out: a space to the list it was in, a project's rooms to
+// the projects, and a tab's own list no further.
+func (u *Ui) back() {
+	switch {
+	case u.results != nil:
+		u.results, u.resultsTitle, u.scroll = nil, "", 0
+	case u.view == viewSpace:
+		u.release()
+		u.exited()
+	case u.view == viewProject:
+		opened := u.scope
+		u.scope, u.scoped, u.showClosed = "", false, false
+		u.selectSpace("")
+		if u.tab == tabOverview {
+			u.view = viewOverview
+			rows := u.overviewRows()
+			u.cursor = max(0, slices.IndexFunc(rows, func(r projectRow) bool { return r.id == opened }))
+			return
+		}
+		u.view = viewProjects
+		rows := u.projectRows()
+		u.cursor = max(0, slices.IndexFunc(rows, func(r projectRow) bool { return r.id == opened }))
 	}
 }
 
@@ -287,6 +523,9 @@ func (u *Ui) selectSpace(id string) {
 // out. The server takes them out of any other room, on any device.
 func (u *Ui) enterRoom(id string) {
 	u.selectSpace(id)
+	// Being in a room is the screen being that room, however the user got
+	// there: Enter on a row, /open, or Enter on a person.
+	u.view, u.scroll = viewSpace, 0
 	if u.occupancy != "" {
 		return
 	}
@@ -326,33 +565,159 @@ func (u *Ui) people() []string {
 	return names
 }
 
-// target is one stop on the Tab cycle: a space, or a person.
-type target struct{ space, person string }
-
-// cycle walks every space and then every other person, so a room can be raised
-// without knowing a command.
+// cycle moves to the next tab, wrapping. A drill-down is left behind: a tab is
+// the top level, and Tab always lands on one.
 func (u *Ui) cycle(step int) {
 	// Inside a room the screen is that room: Tab does not leave it; /exit does.
 	if u.occupancy != "" {
 		return
 	}
-	var targets []target
+	index := max(0, slices.Index(tabs, u.tab))
+	u.showTab(tabs[((index+step)%len(tabs)+len(tabs))%len(tabs)])
+}
+
+// projectRow is one line of the projects list. A project holds no messages, so
+// what it is worth showing is what its places hold.
+//
+// active counts the places still open, which is a fact somebody set; said
+// counts what was said in them lately, which is how busy they are now. The two
+// answer different questions and the overview needs both.
+type projectRow struct {
+	id      string
+	name    string
+	tags    []string
+	rooms   int
+	feeds   int
+	active  int
+	closed  int
+	said    int
+	busiest string
+	unread  int64
+	invited int
+	last    float64
+}
+
+// projectRows is every project, and last a row for the rooms under none, which
+// exists only when there are any. A project with no rooms still has a row: a
+// project survives being empty.
+func (u *Ui) projectRows() []projectRow {
+	rows := []projectRow{}
+	at := map[string]int{}
+	for _, project := range u.client.Projects() {
+		at[project.ID] = len(rows)
+		rows = append(rows, projectRow{id: project.ID, name: project.Name, tags: project.Tags})
+	}
+	none := projectRow{id: unfiled, name: "(none)"}
+
+	since := float64(u.now().Add(-activeWindow).UnixNano()) / float64(time.Second)
+	busiest := map[string]int{}
 	for _, space := range u.spaces() {
-		targets = append(targets, target{space: space.ID})
+		row := &none
+		if index, ok := at[space.Project]; ok && space.Project != "" {
+			row = &rows[index]
+		}
+		if space.Kind == "channel" {
+			row.feeds++
+		} else {
+			row.rooms++
+			if u.client.OpenInvitation(space.ID) {
+				row.invited++
+			}
+		}
+		if space.Open() {
+			row.active++
+		} else {
+			row.closed++
+		}
+		// Only an open place counts as busy: a finished task room with a long
+		// thread in it is a record, not work in progress.
+		if said := u.client.Recent(space.ID, since); said > 0 && space.Open() {
+			row.said += said
+			if said > busiest[row.id] {
+				busiest[row.id], row.busiest = said, space.Title
+			}
+		}
+		// Unread only where the user has been, as the status line counts it,
+		// or the columns would not add up to it. A channel's items are counted
+		// only inside the channel.
+		if u.client.Visited(space.ID) {
+			row.unread += u.client.Unread(space.ID)
+		}
+		row.last = max(row.last, u.lastAt(space))
 	}
-	for _, name := range u.people() {
-		targets = append(targets, target{person: name})
+	if none.rooms+none.feeds > 0 {
+		rows = append(rows, none)
 	}
-	if len(targets) == 0 {
-		return
+	return rows
+}
+
+// overviewRows is the projects with the busiest open places, most said first.
+// A project with nothing said lately is left out: the overview answers where
+// the work is, and its absence is the answer for those.
+func (u *Ui) overviewRows() []projectRow {
+	rows := []projectRow{}
+	for _, row := range u.projectRows() {
+		if row.said > 0 {
+			rows = append(rows, row)
+		}
 	}
-	index := max(0, slices.Index(targets, target{space: u.selected, person: u.person}))
-	next := targets[((index+step)%len(targets)+len(targets))%len(targets)]
-	if next.person != "" {
-		u.selectPerson(next.person)
-	} else {
-		u.selectSpace(next.space)
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].said != rows[j].said {
+			return rows[i].said > rows[j].said
+		}
+		return rows[i].last > rows[j].last
+	})
+	return rows[:min(len(rows), overviewTop)]
+}
+
+// lastAt is when a space was last spoken in, or when it was founded.
+func (u *Ui) lastAt(space client.Room) float64 {
+	log := u.client.Log(space.ID)
+	if len(log) > 0 {
+		return log[len(log)-1].At
 	}
+	return space.CreatedAt
+}
+
+// roomRows is the rooms and channels the list shows: every one, or a single
+// project's when the list was reached from the projects.
+func (u *Ui) roomRows() []client.Room {
+	rows := []client.Room{}
+	for _, space := range u.places() {
+		// A closed place is kept and readable; it is simply not what a list of
+		// where the work is happening is for. `a` shows them.
+		if space.Open() || u.showClosed {
+			rows = append(rows, space)
+		}
+	}
+	return rows
+}
+
+// places is every place the list covers, closed ones included.
+func (u *Ui) places() []client.Room {
+	rows := []client.Room{}
+	for _, space := range u.spaces() {
+		switch {
+		case !u.scoped:
+		case u.scope == unfiled && space.Project != "":
+			continue
+		case u.scope != unfiled && space.Project != u.scope:
+			continue
+		}
+		rows = append(rows, space)
+	}
+	return rows
+}
+
+// closedCount is how many of them are closed.
+func (u *Ui) closedCount() int {
+	closed := 0
+	for _, space := range u.places() {
+		if !space.Open() {
+			closed++
+		}
+	}
+	return closed
 }
 
 // -- the loop ----------------------------------------------------------------
@@ -399,7 +764,7 @@ func (u *Ui) key(event *tcell.EventKey) {
 	case tcell.KeyDown:
 		u.move(1)
 	case tcell.KeyEscape:
-		u.results, u.scroll = nil, 0
+		u.back()
 	case tcell.KeyCtrlU:
 		u.input = nil
 	case tcell.KeyCtrlD:
@@ -409,6 +774,15 @@ func (u *Ui) key(event *tcell.EventKey) {
 	case tcell.KeyCtrlC:
 		u.running = false
 	case tcell.KeyRune:
+		// With nothing typed, `a` shows the closed places too. Anywhere else
+		// the rune is text, so the composer never loses a letter to a view.
+		if event.Rune() == 'a' && len(u.input) == 0 &&
+			(u.view == viewProject || u.view == viewRooms) {
+			u.showClosed = !u.showClosed
+			u.cursor = 0
+			u.followCursor()
+			return
+		}
 		if unicode.IsPrint(event.Rune()) {
 			u.input = append(u.input, event.Rune())
 		}
@@ -428,13 +802,8 @@ func (u *Ui) submit() {
 	}
 	space, ok := u.client.Space(u.selected)
 	if text == "" {
-		// Enter on nothing typed goes into a highlighted room, or opens the
-		// channel item under the cursor.
-		if ok && space.Kind == "room" {
-			u.enterRoom(space.ID)
-		} else if ok && isFeed(space) {
-			u.toggle(space)
-		}
+		// Enter on nothing typed goes one level in.
+		u.enterRow()
 		return
 	}
 	if u.selected == "" {
@@ -514,13 +883,26 @@ func (u *Ui) feedOrder(space client.Room) []client.Message {
 	return append(pending, opened...)
 }
 
-// move steps the item cursor, in a channel only.
+// move steps the cursor: through a channel's items inside one, and through the
+// rows of whichever list is on screen otherwise.
 func (u *Ui) move(step int) {
-	space, ok := u.client.Space(u.selected)
-	if !ok || !isFeed(space) {
+	if u.view == viewSpace {
+		space, ok := u.client.Space(u.selected)
+		if !ok || !isFeed(space) {
+			return
+		}
+		u.item = max(0, min(u.item+step, len(u.feedOrder(space))-1))
 		return
 	}
-	u.item = max(0, min(u.item+step, len(u.feedOrder(space))-1))
+	u.cursor = max(0, min(u.cursor+step, u.rowCount()-1))
+	switch u.view {
+	case viewProject, viewRooms:
+		u.followCursor()
+	case viewPeople:
+		if names := u.people(); len(names) > 0 {
+			u.selectPerson(names[min(u.cursor, len(names)-1)])
+		}
+	}
 }
 
 // toggle shows the body of the item under the cursor, opening it, or hides it
@@ -615,9 +997,11 @@ func (u *Ui) commands() map[string]func([]string) error {
 	return map[string]func([]string) error{
 		"help": u.cmdHelp, "quit": u.cmdQuit,
 		"rooms": u.cmdRooms, "people": u.cmdPeople, "groups": u.cmdGroups,
-		"open": u.cmdOpen, "meet": u.cmdMeet, "create": u.cmdCreate,
+		"projects": u.cmdProjects,
+		"open":     u.cmdOpen, "meet": u.cmdMeet, "create": u.cmdCreate,
 		"invite": u.cmdInvite, "uninvite": u.cmdUninvite, "leave": u.cmdLeave, "exit": u.cmdExit,
-		"group": u.cmdGroup, "channel": u.cmdChannel,
+		"group": u.cmdGroup, "channel": u.cmdChannel, "project": u.cmdProject,
+		"close": u.cmdClose, "reopen": u.cmdReopen,
 		"subscribe": u.cmdSubscribe, "unsubscribe": u.cmdUnsubscribe,
 		"queue": u.cmdQueue, "approve": u.cmdApprove, "reject": u.cmdReject,
 		"submissions": u.cmdSubmissions, "ack": u.cmdAck,
@@ -674,7 +1058,18 @@ func (u *Ui) cmdRooms([]string) error {
 			shape = space.Kind
 		}
 		u.notice(fmt.Sprintf("%s -- %s, %d invited [%s]",
-			space.Title, shape, len(space.Audience), client.Prefix(space.ID, 8)))
+			u.qualify(space), shape, len(space.Audience), client.Prefix(space.ID, 8)))
+	}
+	return nil
+}
+
+func (u *Ui) cmdProjects([]string) error {
+	rows := u.projectRows()
+	if len(rows) == 0 {
+		u.notice("No projects yet")
+	}
+	for _, row := range rows {
+		u.notice(fmt.Sprintf("%s -- %d rooms, %d channels", row.name, row.rooms, row.feeds))
 	}
 	return nil
 }
@@ -732,16 +1127,43 @@ func (u *Ui) cmdMeet(args []string) error {
 	return nil
 }
 
+// cmdCreate founds a permanent room. `/create <project>/<title>` founds it in
+// that project, which is also where its title has to be free; the project on
+// screen is the default. The rest of the line is the title, because a title
+// may have spaces in it, so a task is named by filing afterwards.
 func (u *Ui) cmdCreate(args []string) error {
 	if len(args) == 0 {
-		return refusal("A permanent room needs a name: /create <title>")
+		return refusal("A permanent room needs a name: /create [project/]<title>")
 	}
-	room, err := u.client.CreateRoom(strings.Join(args, " "), nil)
+	project, title, err := u.split(args[0])
 	if err != nil {
 		return err
 	}
+	if len(args) > 1 {
+		title = strings.Join(append([]string{title}, args[1:]...), " ")
+	}
+
+	room, err := u.client.CreateRoom(title, nil, project, "", "")
+	if err != nil {
+		return err
+	}
+	u.notice("Founded " + u.qualify(room))
 	u.enterRoom(room.ID)
 	return nil
+}
+
+// split reads `<project>/<title>` into the two, taking the project on screen
+// when none is named.
+func (u *Ui) split(typed string) (project, title string, err error) {
+	if name, rest, ok := strings.Cut(typed, "/"); ok {
+		if project, err = u.projectID(name); err == nil {
+			return project, strings.ReplaceAll(rest, "_", " "), nil
+		}
+	}
+	if u.scoped && u.scope != unfiled {
+		project = u.scope
+	}
+	return project, strings.ReplaceAll(typed, "_", " "), nil
 }
 
 func (u *Ui) cmdInvite(args []string) error {
@@ -798,6 +1220,7 @@ func (u *Ui) cmdExit([]string) error {
 		return refusal("You are not in a room")
 	}
 	u.release()
+	u.exited()
 	return nil
 }
 
@@ -832,6 +1255,231 @@ func (u *Ui) cmdGroup(args []string) error {
 		return refusal("Usage: /group new <name> [user]... | add|rm <group> <user>")
 	}
 	return nil
+}
+
+// cmdProject founds, files and dissolves. All three are administrator-only,
+// and the server says so.
+func (u *Ui) cmdProject(args []string) error {
+	if len(args) == 0 {
+		return refusal("Usage: /project new|tag|untag|file|rm ...")
+	}
+	switch action := strings.ToLower(args[0]); {
+	// Trailing `#tag` words classify it, so the name may still have spaces.
+	case action == "new" && len(args) >= 2:
+		words, tags := splitTags(args[1:])
+		project, err := u.client.CreateProject(strings.Join(words, " "), tags)
+		if err != nil {
+			return err
+		}
+		u.notice("Founded the project " + project.Name + describeTags(project.Tags))
+
+	case (action == "tag" || action == "untag") && len(args) >= 3:
+		project, err := u.projectID(args[1])
+		if err != nil {
+			return err
+		}
+		classify := u.client.Tag
+		if action == "untag" {
+			classify = u.client.Untag
+		}
+		for _, tag := range args[2:] {
+			updated, err := classify(project, strings.TrimPrefix(tag, "#"))
+			if err != nil {
+				return err
+			}
+			u.notice(updated.Name + " is" + describeTags(updated.Tags))
+		}
+
+	// The room comes first because it is the subject; a missing project files
+	// it under none, which is how a room leaves one. A trailing task label
+	// makes it a task room.
+	case action == "file" && len(args) >= 2:
+		room, err := u.spaceID(args[1])
+		if err != nil {
+			return err
+		}
+		project, scope, task := "", "", ""
+		if len(args) > 2 {
+			if project, err = u.projectID(args[2]); err != nil {
+				return err
+			}
+			if len(args) > 3 {
+				scope, task = "task", strings.Join(args[3:], " ")
+			}
+		}
+		filed, err := u.client.FileRoom(room, project, scope, task)
+		if err != nil {
+			return err
+		}
+		u.notice(u.qualify(filed) + " is " + u.describePlace(filed))
+
+	case action == "rm" && len(args) >= 2:
+		project, err := u.projectID(strings.Join(args[1:], " "))
+		if err != nil {
+			return err
+		}
+		name := strings.Join(args[1:], " ")
+		if found := u.project(project); found != nil {
+			name = found.Name
+		}
+		if err := u.client.DissolveProject(project); err != nil {
+			return err
+		}
+		u.notice("Dissolved " + name + "; its rooms are filed under none")
+
+	default:
+		return refusal("Usage: /project new <name> [#tag]... |" +
+			" tag|untag <name> <tag>... | file <room> [name] [task] | rm <name>")
+	}
+	return nil
+}
+
+// splitTags takes the trailing `#tag` words off a command's arguments.
+func splitTags(args []string) (words, tags []string) {
+	for _, arg := range args {
+		if tag, ok := strings.CutPrefix(arg, "#"); ok {
+			tags = append(tags, tag)
+		} else {
+			words = append(words, arg)
+		}
+	}
+	return words, tags
+}
+
+func describeTags(tags []string) string {
+	if len(tags) == 0 {
+		return " with no tags"
+	}
+	return " tagged #" + strings.Join(tags, " #")
+}
+
+// qualify is how a place is referred to from outside its project:
+// `<project>/<title>`. Inside the project the title alone is its name, so a
+// place under none qualifies to itself.
+func (u *Ui) qualify(space client.Room) string {
+	if project := u.project(space.Project); project != nil {
+		return project.Name + "/" + space.Title
+	}
+	return space.Title
+}
+
+// describePlace says where a place sits: its project, and what it is about.
+func (u *Ui) describePlace(space client.Room) string {
+	project := u.project(space.Project)
+	if project == nil {
+		return "under no project"
+	}
+	if space.Scope == "task" {
+		return "task " + space.Task + " in " + project.Name
+	}
+	return "in " + project.Name
+}
+
+// cmdClose and cmdReopen say whether the work in a place is done. Naming no
+// place means the one on screen.
+func (u *Ui) cmdClose(args []string) error  { return u.setState(args, false) }
+func (u *Ui) cmdReopen(args []string) error { return u.setState(args, true) }
+
+func (u *Ui) setState(args []string, open bool) error {
+	room, err := u.spaceID(strings.Join(args, " "))
+	if err != nil {
+		return err
+	}
+	updated, err := u.client.SetState(room, open)
+	if err != nil {
+		return err
+	}
+	if open {
+		u.notice(u.qualify(updated) + " is open again")
+	} else {
+		u.notice(u.qualify(updated) + " is closed; it is still here and still read")
+	}
+	return nil
+}
+
+// projectID resolves what was typed to a project: its name, without case, or
+// the start of its id.
+func (u *Ui) projectID(typed string) (string, error) {
+	var byName, byPrefix []string
+	for _, project := range u.client.Projects() {
+		if strings.EqualFold(project.Name, typed) ||
+			strings.EqualFold(strings.ReplaceAll(project.Name, " ", "_"), typed) {
+			byName = append(byName, project.ID)
+		}
+		if strings.HasPrefix(project.ID, typed) {
+			byPrefix = append(byPrefix, project.ID)
+		}
+	}
+	for _, found := range [][]string{byName, byPrefix} {
+		if len(found) == 1 {
+			return found[0], nil
+		}
+		if len(found) > 1 {
+			return "", refusal(fmt.Sprintf("'%s' names more than one project: give more of its id", typed))
+		}
+	}
+	return "", refusal(fmt.Sprintf("No such project: %s", typed))
+}
+
+// spaceID resolves what was typed to a room or a channel: `<project>/<title>`
+// from anywhere, a bare title within the project on screen or across all of
+// them, or the start of an id. Nothing typed means the place on screen.
+//
+// A title may hold a slash, so the split is at the first one and only when
+// what precedes it names a project. `cynn/task/31` is task/31 in cynn.
+func (u *Ui) spaceID(typed string) (string, error) {
+	if typed == "" {
+		if u.selected == "" {
+			return "", refusal("Name a room, or highlight one first")
+		}
+		return u.selected, nil
+	}
+
+	// Qualified: the project is named, so only its own places are searched.
+	if name, title, ok := strings.Cut(typed, "/"); ok {
+		if project, err := u.projectID(name); err == nil {
+			return u.matchTitle(title, typed, func(space client.Room) bool {
+				return space.Project == project
+			})
+		}
+	}
+	// Bare: the project on screen first, so a name inside it is enough.
+	if u.scoped && u.scope != unfiled {
+		if id, err := u.matchTitle(typed, typed, func(space client.Room) bool {
+			return space.Project == u.scope
+		}); err == nil {
+			return id, nil
+		}
+	}
+	return u.matchTitle(typed, typed, func(client.Room) bool { return true })
+}
+
+// matchTitle finds the one place among those where covers whose title, or id,
+// is what was typed. typed is what the refusal quotes back.
+func (u *Ui) matchTitle(title, typed string, where func(client.Room) bool) (string, error) {
+	var byTitle, byPrefix []string
+	for _, space := range u.spaces() {
+		if !where(space) {
+			continue
+		}
+		if strings.EqualFold(space.Title, title) ||
+			strings.EqualFold(strings.ReplaceAll(space.Title, " ", "_"), title) {
+			byTitle = append(byTitle, space.ID)
+		}
+		if strings.HasPrefix(space.ID, title) {
+			byPrefix = append(byPrefix, space.ID)
+		}
+	}
+	for _, found := range [][]string{byTitle, byPrefix} {
+		if len(found) == 1 {
+			return found[0], nil
+		}
+		if len(found) > 1 {
+			return "", refusal(fmt.Sprintf(
+				"'%s' names more than one place: give its project, as project/%s", typed, title))
+		}
+	}
+	return "", refusal(fmt.Sprintf("No such room or channel: %s", typed))
 }
 
 func (u *Ui) cmdChannel(args []string) error {
@@ -966,7 +1614,18 @@ func (u *Ui) newChannel(args []string) error {
 		groups = append(groups, group.ID)
 	}
 
-	channel, err := u.client.CreateChannel(strings.Join(words, " "), groups)
+	if len(words) == 0 {
+		return refusal("A channel needs a name")
+	}
+	project, title, err := u.split(words[0])
+	if err != nil {
+		return err
+	}
+	if len(words) > 1 {
+		title = strings.Join(append([]string{title}, words[1:]...), " ")
+	}
+
+	channel, err := u.client.CreateChannel(title, groups, project)
 	if err != nil {
 		return err
 	}
@@ -974,7 +1633,7 @@ func (u *Ui) newChannel(args []string) error {
 	if len(groups) == 0 {
 		rule = "open to everybody"
 	}
-	u.notice(fmt.Sprintf("Opened %s (%s), %s", channel.Title, channel.ID, rule))
+	u.notice(fmt.Sprintf("Opened %s (%s), %s", u.qualify(channel), channel.ID, rule))
 	return nil
 }
 
@@ -1275,15 +1934,14 @@ func (u *Ui) draw() {
 		return
 	}
 
-	// Inside a room the screen is that room: no sidebar, the pane full width.
-	left := sidebarWidth + 2
-	if u.occupancy != "" {
-		left = 1
-	} else {
-		u.drawSidebar(height)
+	// Inside a room the screen is that room: no tab bar over it.
+	top := 1
+	if u.occupancy == "" && u.results == nil {
+		u.drawTabs(width)
+		top = 2
 	}
-	// The pane first: it marks what is on screen read, and the status counts it.
-	u.drawPane(height, width, left)
+	// The body first: it marks what is on screen read, and the status counts it.
+	u.drawBody(top, height, width)
 	u.drawStatus(width)
 	u.drawComposer(height, width)
 	u.screen.Show()
@@ -1334,7 +1992,7 @@ func (u *Ui) drawStatus(width int) {
 		who += " (admin)"
 	}
 	if space, ok := u.client.Space(u.selected); ok && u.occupancy != "" {
-		who += "  in " + space.Title
+		who += "  in " + u.qualify(space)
 	}
 	// Two counts, never mixed: rooms not yet entered, and what is unread in rooms
 	// that have been. A channel's items are counted only inside the channel.
@@ -1346,7 +2004,7 @@ func (u *Ui) drawStatus(width int) {
 	}
 
 	reverse := plain.Reverse(true)
-	u.put(0, 0, ljust(" minos  "+who, width), width, reverse, false)
+	u.put(0, 0, ljust(" "+who, width), width, reverse, false)
 	u.put(0, max(0, width-len(state)-2), state, len(state)+1, u.tint(reverse, colour), false)
 }
 
@@ -1361,119 +2019,406 @@ func count(n int64, thing string) string {
 	return fmt.Sprintf("  %d %ss", n, thing)
 }
 
-func (u *Ui) drawSidebar(height int) {
-	bottom := height - 3
-	row := 1
-	spaces := u.spaces()
-	ambiguous := ambiguousTitles(spaces)
-	heading := u.tint(plain.Bold(true), "dim")
+// drawTabs is the tab bar: the header of every screen outside a room. The
+// current tab is drawn again over itself, because only its own cells change.
+func (u *Ui) drawTabs(width int) {
 	dim := u.tint(plain, "dim")
-
-	var rooms, channels []client.Room
-	for _, space := range spaces {
-		if space.Kind == "channel" {
-			channels = append(channels, space)
-		} else {
-			rooms = append(rooms, space)
+	bar, at, current := " minos  ", 0, ""
+	for _, entry := range tabs {
+		label := " " + entry.String() + " "
+		if entry == u.tab {
+			at, current = len(bar), label
 		}
+		bar += label + " "
 	}
+	u.put(1, 0, ljust(bar, width), width, dim, true)
+	u.put(1, at, current, cells(current), plain.Bold(true).Underline(true), false)
 
-	for _, section := range []struct {
-		title  string
-		spaces []client.Room
-	}{{"ROOMS", rooms}, {"CHANNELS", channels}} {
-		if row >= bottom {
-			break
-		}
-		u.put(row, 1, section.title, sidebarWidth-2, heading, true)
-		row++
-		if len(section.spaces) == 0 {
-			u.put(row, 2, "(none)", sidebarWidth-3, dim, true)
-			row++
-		}
-		for _, space := range section.spaces {
-			if row >= bottom {
-				break
-			}
-			row = u.drawSpace(row, space, ambiguous)
-		}
-		row++
-	}
-
-	if row < bottom {
-		u.put(row, 1, "PEOPLE", sidebarWidth-2, heading, true)
-		row++
-		me := u.client.Me()
-		for _, user := range u.client.Users() {
-			if row >= bottom || user.Username == me {
-				continue
-			}
-			mark, style := " ", dim
-			if user.Online {
-				mark, style = "*", u.tint(plain, "good")
-			}
-			marker := " "
-			if user.Username == u.person {
-				marker, style = ">", style.Bold(true)
-			}
-			u.put(row, 1, marker+mark+" "+user.Username, sidebarWidth-2, style, true)
-			row++
-		}
-	}
-
-	for line := row; line < bottom; line++ {
-		u.put(line, 1, "", sidebarWidth-2, plain, true)
-	}
-	for line := 1; line < height-3; line++ {
-		u.put(line, sidebarWidth, "|", 1, dim, false)
+	if summary := u.summary(); summary != "" {
+		u.put(1, max(len(bar), width-cells(summary)-1), summary, cells(summary), dim, false)
 	}
 }
 
-// ambiguousTitles is the titles held by more than one space. Only ad-hoc rooms
-// collide, and when each began is how anybody would tell them apart.
-func ambiguousTitles(spaces []client.Room) map[string]bool {
+// summary is the count at the right of the tab bar, naming what the list holds.
+func (u *Ui) summary() string {
+	switch u.view {
+	case viewOverview:
+		return fmt.Sprintf("%d of %s busy", len(u.overviewRows()),
+			plural(len(u.client.Projects()), "project"))
+	case viewProjects:
+		return plural(len(u.client.Projects()), "project")
+	case viewProject:
+		// The page's own stats line carries the counts; repeating them here
+		// would say the same thing twice on one screen.
+		return u.scopeName()
+	case viewRooms:
+		return u.placeSummary()
+	case viewPeople:
+		return plural(len(u.people()), "person")
+	}
+	return ""
+}
+
+// placeSummary counts what a list of places shows, and what it is hiding.
+func (u *Ui) placeSummary() string {
+	summary := plural(len(u.roomRows()), "place")
+	if closed := u.closedCount(); closed > 0 {
+		summary += fmt.Sprintf("  %d closed", closed)
+	}
+	return summary
+}
+
+// scopeName names the project the rooms list is limited to.
+func (u *Ui) scopeName() string {
+	if u.scope == unfiled {
+		return "under no project"
+	}
+	if project := u.project(u.scope); project != nil {
+		return project.Name
+	}
+	return ""
+}
+
+func plural(n int, thing string) string {
+	if n == 1 {
+		return fmt.Sprintf("1 %s", thing)
+	}
+	if thing == "person" {
+		return fmt.Sprintf("%d people", n)
+	}
+	return fmt.Sprintf("%d %ss", n, thing)
+}
+
+// drawBody draws whichever screen is current, between the tab bar and the
+// composer.
+func (u *Ui) drawBody(top, height, width int) {
+	bottom := height - 3
+	if u.results != nil {
+		u.drawResults(top, width, bottom)
+		return
+	}
+	switch u.view {
+	case viewOverview:
+		u.drawOverview(top, width, bottom)
+	case viewProjects:
+		u.drawProjects(top, width, bottom)
+	case viewProject:
+		u.drawProject(top, width, bottom)
+	case viewRooms:
+		u.drawRooms(top, width, bottom)
+	case viewPeople:
+		u.drawPeople(top, width, bottom)
+	default:
+		u.drawPane(top, width, bottom)
+	}
+}
+
+// drawTable lays out a table under the tab bar and draws the rows around the
+// cursor, styling each by what style returns for its row.
+func (u *Ui) drawTable(top, width, bottom int, t *table, style func(int) tcell.Style, empty string) {
+	t.layout(width - 1)
+	u.put(top+1, 1, t.header(), width-1, u.tint(plain, "dim"), true)
+	if len(t.rows) == 0 {
+		u.put(top+2, 1, empty, width-1, u.tint(plain, "dim"), true)
+		return
+	}
+
+	// Scrolled so the row under the cursor is on screen.
+	visible := max(1, bottom-(top+2))
+	start := max(0, min(u.cursor-visible/2, len(t.rows)-visible))
+	for offset := 0; offset < visible && start+offset < len(t.rows); offset++ {
+		row := start + offset
+		marked := row == u.cursor
+		rowStyle := style(row)
+		if marked {
+			rowStyle = rowStyle.Bold(true)
+		}
+		u.put(top+2+offset, 1, t.line(row, marked), width-1, rowStyle, true)
+	}
+}
+
+// drawOverview is where the work is: the busiest projects, and then the counts
+// that say what is waiting on this user.
+func (u *Ui) drawOverview(top, width, bottom int) {
+	rows := u.overviewRows()
+	t := &table{cols: []column{
+		{title: "PROJECT", shrink: 2, min: 8},
+		{title: "TAGS", shrink: 4, min: 6},
+		{title: "ACTIVE", right: true},
+		{title: "SAID", right: true},
+		{title: "BUSIEST", shrink: 3, min: 8},
+		{title: "LAST", right: true, shrink: 5, min: 5},
+	}}
+	for _, row := range rows {
+		t.add(row.name, strings.Join(row.tags, " "), fmt.Sprint(row.active),
+			fmt.Sprint(row.said), row.busiest, u.ago(row.last))
+	}
+
+	// The table takes what it needs; the counts sit under it.
+	health := u.health()
+	u.drawTable(top, width, bottom-len(health)-1, t, func(index int) tcell.Style {
+		if rows[index].unread > 0 || rows[index].invited > 0 {
+			return u.tint(plain, "me")
+		}
+		return plain
+	}, fmt.Sprintf("(nothing said in the last %d days)", int(activeWindow.Hours()/24)))
+
+	for offset, text := range health {
+		u.put(bottom-len(health)+offset, 1, text, width-1, u.tint(plain, "dim"), true)
+	}
+}
+
+// health is the two lines under the overview: what there is, and what is
+// waiting on this user.
+func (u *Ui) health() []string {
+	open, closed, feeds := 0, 0, 0
+	for _, space := range u.spaces() {
+		switch {
+		case !space.Open():
+			closed++
+		case space.Kind == "channel":
+			feeds++
+			open++
+		default:
+			open++
+		}
+	}
+	what := fmt.Sprintf("%s  ·  %s open, %d of them channels",
+		plural(len(u.client.Projects()), "project"), plural(open, "place"), feeds)
+	if closed > 0 {
+		what += fmt.Sprintf("  ·  %d closed", closed)
+	}
+
+	waiting := []string{}
+	if invitations := u.client.OpenInvitations(); invitations > 0 {
+		waiting = append(waiting, plural(invitations, "open invitation"))
+	}
+	if unread := u.client.UnreadMessages(); unread > 0 {
+		waiting = append(waiting, plural(int(unread), "unread message"))
+	}
+	if pending := len(u.client.Queued()); pending > 0 {
+		waiting = append(waiting, plural(pending, "submission")+" to decide")
+	}
+	if len(waiting) == 0 {
+		waiting = append(waiting, "nothing waiting on you")
+	}
+	return []string{what, strings.Join(waiting, "  ·  ")}
+}
+
+// ago is how long since a moment, in the shortest form that says it.
+func (u *Ui) ago(at float64) string {
+	if at <= 0 {
+		return ""
+	}
+	since := u.now().Sub(time.Unix(0, int64(at*float64(time.Second))))
+	switch {
+	case since < time.Minute:
+		return "just now"
+	case since < time.Hour:
+		return fmt.Sprintf("%dm ago", int(since.Minutes()))
+	case since < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(since.Hours()))
+	case since < 14*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(since.Hours()/24))
+	}
+	return stamp(at, "02 Jan")
+}
+
+// drawProject is one project's own page: what it is, then its places.
+func (u *Ui) drawProject(top, width, bottom int) {
+	name, tags := u.scopeName(), ""
+	if project := u.project(u.scope); project != nil && len(project.Tags) > 0 {
+		tags = "  #" + strings.Join(project.Tags, " #")
+	}
+	u.put(top, 1, name+tags, width-1, plain.Bold(true), true)
+
+	var row projectRow
+	for _, candidate := range u.projectRows() {
+		if candidate.id == u.scope {
+			row = candidate
+		}
+	}
+	stats := fmt.Sprintf("%d open of %s", row.active, plural(row.rooms+row.feeds, "place"))
+	if row.closed > 0 {
+		stats += fmt.Sprintf(", %d closed", row.closed)
+	}
+	if row.feeds > 0 {
+		stats += fmt.Sprintf("  ·  %s", plural(row.feeds, "channel"))
+	}
+	stats += fmt.Sprintf("  ·  %s in the last %d days",
+		plural(row.said, "message"), int(activeWindow.Hours()/24))
+	u.put(top+1, 1, stats, width-1, u.tint(plain, "dim"), true)
+
+	u.drawPlaces(top+2, width, bottom)
+}
+
+// drawProjects is the projects list: a table of containers, not of places.
+func (u *Ui) drawProjects(top, width, bottom int) {
+	rows := u.projectRows()
+	t := &table{cols: []column{
+		{title: "PROJECT", shrink: 2, min: 8},
+		{title: "TAGS", shrink: 5, min: 6},
+		{title: "ACTIVE", right: true},
+		{title: "ROOMS", right: true},
+		{title: "CHANNELS", right: true},
+		{title: "UNREAD", right: true},
+		{title: "LAST", right: true, shrink: 4, min: 5},
+	}}
+	for _, row := range rows {
+		unread := ""
+		switch {
+		case row.invited > 0 && row.unread > 0:
+			unread = fmt.Sprintf("%d +%d new", row.unread, row.invited)
+		case row.invited > 0:
+			unread = fmt.Sprintf("%d new", row.invited)
+		case row.unread > 0:
+			unread = fmt.Sprintf("%d", row.unread)
+		}
+		t.add(row.name, strings.Join(row.tags, " "), fmt.Sprint(row.active),
+			fmt.Sprint(row.rooms), fmt.Sprint(row.feeds), unread, u.ago(row.last))
+	}
+
+	u.drawTable(top, width, bottom, t, func(index int) tcell.Style {
+		if rows[index].unread > 0 || rows[index].invited > 0 {
+			return u.tint(plain, "me")
+		}
+		return plain
+	}, "(no projects yet; /project new <name> founds one)")
+}
+
+// drawRooms is the flat list of places, filed or not. A project's own page
+// draws the same table over its own places.
+func (u *Ui) drawRooms(top, width, bottom int) { u.drawPlaces(top, width, bottom) }
+
+func (u *Ui) drawPlaces(top, width, bottom int) {
+	rows := u.roomRows()
+	ambiguous := u.ambiguousTitles(rows)
+	since := float64(u.now().Add(-activeWindow).UnixNano()) / float64(time.Second)
+
+	// The project column says nothing on a project's own page, and the table
+	// drops a column with no text, so it is left empty there rather than cut.
+	t := &table{cols: []column{
+		{title: "PLACE", shrink: 2, min: 8},
+		{title: "KIND"},
+		{title: "PROJECT", shrink: 5, min: 6},
+		{title: "SCOPE", shrink: 6, min: 4},
+		{title: "TASK", shrink: 4, min: 4},
+		{title: "SAID", right: true},
+		{title: "STATE", shrink: 3, min: 7},
+	}}
+	for _, space := range rows {
+		label := space.Title
+		if ambiguous[space.ID] {
+			label += stamp(space.CreatedAt, " 15:04:05")
+		}
+		kind := space.Kind
+		if space.Kind == "room" && space.Retention == "transient" {
+			kind = "room ~"
+		}
+		project := ""
+		if found := u.project(space.Project); found != nil && u.view != viewProject {
+			project = found.Name
+		}
+		said := ""
+		if count := u.client.Recent(space.ID, since); count > 0 {
+			said = fmt.Sprint(count)
+		}
+		t.add(label, kind, project, space.Scope, space.Task, said, u.placeState(space))
+	}
+
+	empty := "(nothing here; /open <user> raises a room)"
+	if u.closedCount() > 0 {
+		empty = "(nothing open here; a shows the closed ones)"
+	}
+	u.drawTable(top, width, bottom, t, func(index int) tcell.Style {
+		space := rows[index]
+		switch {
+		case !space.Open():
+			return u.tint(plain, "dim")
+		case u.client.OpenInvitation(space.ID),
+			u.client.Visited(space.ID) && u.client.Unread(space.ID) > 0:
+			return u.tint(plain, "me")
+		}
+		return plain
+	}, empty)
+}
+
+// placeState is the one thing most worth saying about a place right now.
+func (u *Ui) placeState(space client.Room) string {
+	switch {
+	case !space.Open():
+		return "closed"
+	case space.Kind == "room" && u.client.OpenInvitation(space.ID):
+		// Not yet entered, so its messages are not unread: they have never
+		// been seen.
+		return "invited"
+	case u.client.Visited(space.ID) && u.client.Unread(space.ID) > 0:
+		return fmt.Sprintf("%d unread", u.client.Unread(space.ID))
+	case len(space.Occupants) > 0:
+		return fmt.Sprintf("%d here", len(space.Occupants))
+	}
+	return ""
+}
+
+// drawPeople is the roster, and what Enter does to a row of it.
+func (u *Ui) drawPeople(top, width, bottom int) {
+	names := u.people()
+	online := map[string]bool{}
+	for _, user := range u.client.Users() {
+		online[user.Username] = user.Online
+	}
+	shared := map[string][]string{}
+	for _, space := range u.spaces() {
+		if space.Kind != "room" {
+			continue
+		}
+		for _, name := range space.Audience {
+			if name != u.client.Me() {
+				shared[name] = append(shared[name], u.qualify(space))
+			}
+		}
+	}
+
+	t := &table{cols: []column{
+		{title: "PERSON", shrink: 2, min: 6},
+		{title: "STATE"},
+		{title: "ROOMS SHARED", shrink: 3, min: 10},
+	}}
+	for _, name := range names {
+		state := "offline"
+		if online[name] {
+			state = "online"
+		}
+		t.add(name, state, strings.Join(shared[name], "; "))
+	}
+
+	u.drawTable(top, width, bottom, t, func(index int) tcell.Style {
+		if online[names[index]] {
+			return u.tint(plain, "good")
+		}
+		return u.tint(plain, "dim")
+	}, "(nobody else here)")
+}
+
+// ambiguousTitles is the places a row's own columns cannot tell apart: same
+// title, same project. Two rooms called `design` in different projects are not
+// among them, because the project column says which is which. What is left is
+// ad-hoc rooms, and when each began is how anybody would tell those apart.
+func (u *Ui) ambiguousTitles(spaces []client.Room) map[string]bool {
 	seen, twice := map[string]bool{}, map[string]bool{}
 	for _, space := range spaces {
-		if seen[space.Title] {
-			twice[space.Title] = true
+		name := u.qualify(space)
+		if seen[name] {
+			twice[space.ID] = true
+			for _, other := range spaces {
+				if u.qualify(other) == name {
+					twice[other.ID] = true
+				}
+			}
 		}
-		seen[space.Title] = true
+		seen[name] = true
 	}
 	return twice
-}
-
-func (u *Ui) drawSpace(row int, space client.Room, ambiguous map[string]bool) int {
-	selected := space.ID == u.selected
-	unread := u.client.Unread(space.ID)
-
-	marker := " "
-	if selected {
-		marker = ">"
-	}
-	label := space.Title
-	if ambiguous[space.Title] {
-		label += stamp(space.CreatedAt, " 15:04:05")
-	}
-	if space.Kind == "room" && space.Retention == "transient" {
-		label += " ~"
-	}
-
-	style := plain
-	if selected {
-		style = style.Bold(true)
-	}
-	text := marker + " " + label
-	switch {
-	case space.Kind == "room" && u.client.OpenInvitation(space.ID):
-		// Not yet entered, so its messages are not unread: they have never been seen.
-		style = u.tint(style, "me")
-		text += " (invited)"
-	case unread > 0 && !selected:
-		style = u.tint(style, "me")
-		text = fmt.Sprintf("%s (%d)", text, unread)
-	}
-	u.put(row, 1, text, sidebarWidth-2, style, true)
-	return row + 1
 }
 
 type line struct {
@@ -1481,52 +2426,44 @@ type line struct {
 	style tcell.Style
 }
 
-func (u *Ui) drawPane(height, width, left int) {
-	pane := width - left
-	bottom := height - 3
+// drawPane is one space: its header, then its log or its items.
+func (u *Ui) drawPane(top, width, bottom int) {
+	left, pane := 1, width-1
 
-	if u.results != nil {
-		u.drawResults(left, pane, bottom)
-		return
-	}
-	if u.person != "" {
-		u.drawPerson(left, pane, bottom)
-		return
-	}
 	space, ok := u.client.Space(u.selected)
 	if u.selected == "" || !ok {
-		u.put(1, left, "No room selected. /open <user> to raise one,", pane, plain, false)
-		u.put(2, left, "or /help for what else there is.", pane, plain, false)
+		u.put(top, left, "No room selected. /open <user> to raise one,", pane, plain, false)
+		u.put(top+1, left, "or /help for what else there is.", pane, plain, false)
 		return
 	}
 
-	header := space.Title
+	header := u.qualify(space)
 	if space.Kind == "channel" {
 		header += "  (channel: read-only)"
 	} else if space.Retention == "transient" {
 		header += "  (transient: discarded when everyone leaves)"
 	}
-	u.put(1, left, header, pane, plain.Bold(true), true)
+	u.put(top, left, header, pane, plain.Bold(true), true)
 	who := fmt.Sprintf("%d invited", len(space.Audience))
 	if len(space.Occupants) > 0 {
 		who += ", here now: " + strings.Join(space.Occupants, ", ")
 	}
-	if space.Kind == "room" && u.occupancy == "" {
-		who += "  (Enter to join)"
+	if space.Scope == "task" {
+		who += "  (task " + space.Task + ")"
 	}
-	u.put(2, left, who, pane, u.tint(plain, "dim"), true)
+	u.put(top+1, left, who, pane, u.tint(plain, "dim"), true)
 
 	if isFeed(space) {
-		u.drawFeed(space, left, pane, bottom)
+		u.drawFeed(space, top, pane, bottom)
 		return
 	}
 
 	lines := u.paneLines(space, pane)
-	visible := max(0, bottom-4)
+	visible := max(0, bottom-(top+2))
 	u.scroll = max(0, min(u.scroll, max(0, len(lines)-visible)))
 	end := len(lines) - u.scroll
 	for offset, line := range lines[max(0, end-visible):end] {
-		u.put(4+offset, left, line.text, pane, line.style, true)
+		u.put(top+2+offset, left, line.text, pane, line.style, true)
 	}
 
 	// Only a room has a read cursor, and only one the user is in counts as seen: a
@@ -1538,7 +2475,8 @@ func (u *Ui) drawPane(height, width, left int) {
 
 // drawFeed draws a channel as its items: the pending ones, then the opened ones,
 // each a subject line, with the body shown under the one that is expanded.
-func (u *Ui) drawFeed(space client.Room, left, pane, bottom int) {
+func (u *Ui) drawFeed(space client.Room, top, pane, bottom int) {
+	left := 1
 	pending, opened := u.items(space)
 	u.item = max(0, min(u.item, len(pending)+len(opened)-1))
 
@@ -1581,10 +2519,10 @@ func (u *Ui) drawFeed(space client.Room, left, pane, bottom int) {
 	lines = append(lines, u.sessionLines(pane)...)
 
 	// Scrolled so the item under the cursor, body included, is on screen.
-	visible := max(0, bottom-4)
+	visible := max(0, bottom-(top+2))
 	start := max(0, min(focusEnd-visible+1, focus))
 	for offset, line := range lines[start:min(len(lines), start+visible)] {
-		u.put(4+offset, left, line.text, pane, line.style, true)
+		u.put(top+2+offset, left, line.text, pane, line.style, true)
 	}
 }
 
@@ -1642,55 +2580,21 @@ func (u *Ui) sessionLines(pane int) []line {
 
 // drawResults shows archive output in place of the conversation. PgUp and PgDn
 // scroll it as they scroll a room.
-func (u *Ui) drawResults(left, pane, bottom int) {
-	u.put(1, left, u.resultsTitle, pane, plain.Bold(true), true)
-	u.put(2, left, "Esc: back to the conversation", pane, u.tint(plain, "dim"), true)
+func (u *Ui) drawResults(top, width, bottom int) {
+	left, pane := 1, width-1
+	u.put(top, left, u.resultsTitle, pane, plain.Bold(true), true)
+	u.put(top+1, left, "Esc: back to the conversation", pane, u.tint(plain, "dim"), true)
 
 	lines := make([]line, 0, len(u.results))
 	for _, text := range u.results {
 		lines = append(lines, line{text, plain})
 	}
 	lines = append(lines, u.sessionLines(pane)...)
-	visible := max(0, bottom-4)
+	visible := max(0, bottom-(top+2))
 	u.scroll = max(0, min(u.scroll, max(0, len(lines)-visible)))
 	end := len(lines) - u.scroll
 	for offset, line := range lines[max(0, end-visible):end] {
-		u.put(4+offset, left, line.text, pane, line.style, true)
-	}
-}
-
-// drawPerson is the pane for someone in PEOPLE. It lists the rooms already shared
-// with them, because Enter raises another rather than reusing one.
-func (u *Ui) drawPerson(left, pane, bottom int) {
-	state := "offline"
-	for _, user := range u.client.Users() {
-		if user.Username == u.person && user.Online {
-			state = "online"
-		}
-	}
-	u.put(1, left, u.person, pane, plain.Bold(true), true)
-	u.put(2, left, state, pane, u.tint(plain, "dim"), true)
-
-	texts := []string{"Enter raises a room with " + u.person + "; anything typed first is its first message."}
-	var shared []string
-	for _, space := range u.spaces() {
-		if space.Kind == "room" && slices.Contains(space.Audience, u.person) {
-			shared = append(shared, space.Title)
-		}
-	}
-	if len(shared) > 0 {
-		texts = append(texts, "Rooms you already share: "+strings.Join(shared, "; "))
-	}
-	var lines []line
-	for _, text := range texts {
-		for _, part := range wrap(text, max(10, pane)) {
-			lines = append(lines, line{part, plain})
-		}
-	}
-	lines = append(lines, u.sessionLines(pane)...)
-	visible := max(0, bottom-4)
-	for offset, line := range lines[max(0, len(lines)-visible):] {
-		u.put(4+offset, left, line.text, pane, line.style, true)
+		u.put(top+2+offset, left, line.text, pane, line.style, true)
 	}
 }
 
@@ -1707,22 +2611,36 @@ func (u *Ui) drawComposer(height, width int) {
 
 	u.put(height-3, 0, strings.Repeat("-", width), width, u.tint(plain, "dim"), false)
 	prompt := "> "
-	hint := " /help  Tab: next  PgUp/PgDn: scroll  ^C: quit"
-	switch {
-	case u.person != "":
-		prompt = "  (to " + u.person + ") "
-		hint = " Enter: open a room with " + u.person + "  Tab: next  ^C: quit"
-	case u.submitting(u.selected):
-		prompt = "  (submit) "
-	case readOnly:
-		prompt = "  (channel) "
-	case ok && u.occupancy != "":
-		hint = " /exit: step out  /invite <who>  /leave  /help  PgUp/PgDn: scroll  ^C: quit"
-	case ok:
-		hint = " Enter: join  Tab: next  /help  ^C: quit"
-	}
-	if ok && isFeed(space) && u.person == "" {
-		hint = " Up/Down: item  Enter: open or close  subject | body  Tab: next  ^C: quit"
+	hint := " /help  Tab: next tab  ^C: quit"
+	switch u.view {
+	case viewOverview:
+		hint = " Up/Down: project  Enter: open it  Tab: next tab  /help  ^C: quit"
+	case viewProjects:
+		hint = " Up/Down: project  Enter: open it  Tab: next tab  /help  ^C: quit"
+	case viewProject:
+		hint = " Up/Down: place  Enter: go in  a: closed too  Esc: back  ^C: quit"
+	case viewPeople:
+		if u.person != "" {
+			prompt = "  (to " + u.person + ") "
+			hint = " Enter: open a room with " + u.person + "  Up/Down: person  Tab: next tab  ^C: quit"
+		}
+	case viewRooms:
+		hint = " Up/Down: place  Enter: go in  a: closed too  Tab: next tab  ^C: quit"
+	case viewSpace:
+		switch {
+		case u.submitting(u.selected):
+			prompt = "  (submit) "
+		case readOnly:
+			prompt = "  (channel) "
+		}
+		switch {
+		case ok && isFeed(space):
+			hint = " Up/Down: item  Enter: open or close  subject | body  Esc: back  ^C: quit"
+		case ok && u.occupancy != "":
+			hint = " /exit: step out  /invite <who>  /leave  /help  PgUp/PgDn: scroll  ^C: quit"
+		default:
+			hint = " Esc: back  PgUp/PgDn: scroll  /help  ^C: quit"
+		}
 	}
 	if u.results != nil {
 		hint = " Esc: back  PgUp/PgDn: scroll  ^C: quit"

@@ -31,8 +31,8 @@ func TestAVersion3DatabaseGainsSubjectsAndArchival(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cannot open a new database: %v", err)
 	}
-	channel, _ := store.CreateRoom("News", "demo", ChannelKind, Admin, Persisted, "", nil)
-	room, _ := store.CreateRoom("Chat", "demo", RoomKind, User, Persisted, "", nil)
+	channel, _ := store.CreateRoom("News", "demo", ChannelKind, Admin, Persisted, "", nil, Filing{})
+	room, _ := store.CreateRoom("Chat", "demo", RoomKind, User, Persisted, "", nil, Filing{})
 	for _, target := range []string{channel.ID, room.ID} {
 		if _, err := store.Append(target, "demo", "", "  Deploy at four\nDetails", Text); err != nil {
 			t.Fatalf("cannot arrange a message: %v", err)
@@ -83,12 +83,14 @@ func TestAVersion4DatabaseGainsVisits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cannot open a new database: %v", err)
 	}
-	read, _ := store.CreateRoom("Read", "demo", RoomKind, User, Persisted, "", nil)
+	read, _ := store.CreateRoom("Read", "demo", RoomKind, User, Persisted, "", nil, Filing{})
 	if err := store.MarkRead(read.ID, "alice", 1); err != nil {
 		t.Fatalf("cannot arrange a read cursor: %v", err)
 	}
 	store.Close()
-	for _, statement := range []string{"DROP TABLE visits", "PRAGMA user_version = 4"} {
+	for _, statement := range append(slices.Clone(sinceVersion5),
+		"DROP TABLE visits", "PRAGMA user_version = 4",
+	) {
 		if _, err := raw(t, path).Exec(statement); err != nil {
 			t.Fatalf("cannot arrange the database: %v", err)
 		}
@@ -102,7 +104,7 @@ func TestAVersion4DatabaseGainsVisits(t *testing.T) {
 	if visited, err := store.Visited("alice"); err != nil || !slices.Equal(visited, []string{read.ID}) {
 		t.Fatalf("after the upgrade visited is %v, %v", visited, err)
 	}
-	room, _ := store.CreateRoom("Chat", "demo", RoomKind, User, Persisted, "", nil)
+	room, _ := store.CreateRoom("Chat", "demo", RoomKind, User, Persisted, "", nil, Filing{})
 	if _, err := store.Enter(room.ID, "alice"); err != nil {
 		t.Fatalf("cannot enter: %v", err)
 	}
@@ -120,7 +122,7 @@ func TestArchivalTakesTheAgedRunFromTheOldestOnly(t *testing.T) {
 		t.Fatalf("cannot open a new database: %v", err)
 	}
 	defer store.Close()
-	channel, _ := store.CreateRoom("News", "demo", ChannelKind, Admin, Persisted, "", nil)
+	channel, _ := store.CreateRoom("News", "demo", ChannelKind, Admin, Persisted, "", nil, Filing{})
 	for _, body := range []string{"one", "two", "three"} {
 		if _, err := store.Append(channel.ID, "demo", "", body, Text); err != nil {
 			t.Fatalf("cannot arrange a message: %v", err)
@@ -167,15 +169,29 @@ func raw(t *testing.T, path string) *sql.DB {
 	return db
 }
 
-// sinceVersion3 undoes what versions 4 and 5 added, to wind a database back past them.
-var sinceVersion3 = []string{
+// sinceVersion6 undoes what version 7 added.
+var sinceVersion6 = []string{
+	"DROP TABLE project_tags",
+	"ALTER TABLE rooms DROP COLUMN scope",
+	"ALTER TABLE rooms DROP COLUMN task",
+	"ALTER TABLE rooms DROP COLUMN state",
+}
+
+// sinceVersion5 undoes what versions 6 and 7 added.
+var sinceVersion5 = append(slices.Clone(sinceVersion6),
+	"DROP TABLE projects",
+	"ALTER TABLE rooms DROP COLUMN project",
+)
+
+// sinceVersion3 undoes what versions 4 to 6 added, to wind a database back past them.
+var sinceVersion3 = append(slices.Clone(sinceVersion5),
 	"DROP TABLE visits",
 	"ALTER TABLE messages DROP COLUMN subject",
 	"ALTER TABLE rooms DROP COLUMN archive_period",
 	"ALTER TABLE rooms DROP COLUMN archive_searchable",
 	"DROP TABLE opened",
 	"DROP TABLE archived_messages",
-}
+)
 
 func userVersion(t *testing.T, path string) int {
 	t.Helper()
@@ -273,7 +289,7 @@ func TestADatabaseAtTheSharedVersionIsUpgraded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cannot open a new database: %v", err)
 	}
-	channel, err := store.CreateRoom("News", "demo", ChannelKind, Admin, Persisted, "", nil)
+	channel, err := store.CreateRoom("News", "demo", ChannelKind, Admin, Persisted, "", nil, Filing{})
 	if err != nil {
 		t.Fatalf("cannot arrange a channel: %v", err)
 	}

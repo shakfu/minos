@@ -16,7 +16,8 @@ const systemChannel = "system"
 
 func TestSyncDescribesTheWholeOfWhatAClientNeeds(t *testing.T) {
 	reply := connect(t, admin).Call("sync")
-	keySet(t, reply, "me", "isAdmin", "users", "groups", "rooms", "channels", "read", "visited", "submissions")
+	keySet(t, reply, "me", "isAdmin", "users", "groups", "projects", "rooms", "channels",
+		"read", "visited", "submissions")
 	same(t, reply["me"], "demo")
 	same(t, reply["isAdmin"], true)
 }
@@ -127,13 +128,58 @@ func TestAPermanentRoomCannotBeTransient(t *testing.T) {
 	same(t, room["authority"], "admin")
 }
 
-// "Post it in Engineering" only works if that resolves to one room.
-func TestAPermanentNameIsUniqueWithoutCase(t *testing.T) {
+// "Post it in Engineering" only works if that resolves to one room. Its
+// project is the rest of that name, so the rule is per project.
+func TestAPermanentNameIsUniqueWithinItsProject(t *testing.T) {
 	demo := connect(t, admin)
 	title := unique("Engineering")
 	demo.Call("create", "title", title)
-	refusal := demo.Refuse("create", "title", strings.ToUpper(title))
-	same(t, refusal, fmt.Sprintf("A permanent room called '%s' already exists", strings.ToUpper(title)))
+	same(t, demo.Refuse("create", "title", strings.ToUpper(title)),
+		fmt.Sprintf("A permanent room called '%s' already exists under no project",
+			strings.ToUpper(title)))
+
+	// The same title in two projects is two names, and neither collides with
+	// the one under no project.
+	one := obj(demo.Call("project.create", "name", unique("one"), "tags", []any{})["project"])
+	two := obj(demo.Call("project.create", "name", unique("two"), "tags", []any{})["project"])
+	for _, project := range []Obj{one, two} {
+		room := demo.Call("create", "title", title, "project", project["id"])
+		same(t, room["project"], project["id"])
+		same(t, room["scope"], "project")
+	}
+	same(t, demo.Refuse("create", "title", title, "project", one["id"]),
+		fmt.Sprintf("A permanent room called '%s' already exists in %s", title, one["name"]))
+
+	// Nor may a room be moved somewhere its name is taken.
+	loose := byID(demo.Call("sync")["rooms"])
+	var unfiled string
+	for id, room := range loose {
+		if room["title"] == title && room["project"] == "" {
+			unfiled = id
+		}
+	}
+	truth(t, unfiled != "", "the unfiled room is missing")
+	same(t, demo.Refuse("project.file", "room", unfiled, "project", two["id"]),
+		fmt.Sprintf("A permanent room called '%s' already exists in %s", title, two["name"]))
+
+	// A room already there is not moving, so re-filing it where it is is fine.
+	inOne := demo.Call("create", "title", unique("Design"), "project", one["id"])
+	same(t, demo.Call("project.file", "room", inOne["id"], "project", one["id"])["ok"], true)
+}
+
+// A place is named from outside its project as `<project>/<title>`, split at
+// the first slash, so a project name holding one would make that ambiguous.
+func TestAProjectNameHoldsNoSlash(t *testing.T) {
+	demo := connect(t, admin)
+	same(t, demo.Refuse("project.create", "name", "a/b", "tags", []any{}),
+		"A project name has no '/' in it")
+
+	// A title may hold one: everything after the first slash is the title.
+	project := obj(demo.Call("project.create", "name", unique("cynn"), "tags", []any{})["project"])
+	room := demo.Call("create", "title", "task/31", "project", project["id"],
+		"scope", "task", "task", "31")
+	same(t, room["title"], "task/31")
+	same(t, room["task"], "31")
 }
 
 // -- invitation ---------------------------------------------------------------
