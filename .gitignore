@@ -3,7 +3,7 @@
 # Logs
 *.log
 
-# cach
+# cache
 .cache
 .*_cache
 
@@ -16,6 +16,9 @@
 # The compiled server and client. Built by `make go`.
 go/minosd
 go/minos
+
+# python
+.venv
 
 # agentics
 .claude
