@@ -62,3 +62,15 @@ func Start(t testing.TB, historyLimit int) *Server {
 	})
 	return &Server{Base: server.URL, Store: store}
 }
+
+// SocketPath is a path to bind a unix socket at, removed when the test ends.
+// Not under t.TempDir(): on macOS that path can pass the 104-byte bind limit.
+func SocketPath(t testing.TB) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "minos-")
+	if err != nil {
+		t.Fatalf("cannot create a socket directory: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return filepath.Join(dir, "run.sock")
+}

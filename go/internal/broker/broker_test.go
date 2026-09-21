@@ -8,7 +8,6 @@ package broker
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -386,7 +385,7 @@ func TestABlockedAwaitDoesNotStopDelivery(t *testing.T) {
 // operations and nothing else.
 func TestTheShimReachesTheBrokerOverTheRunsSocket(t *testing.T) {
 	run := dispatch(t, config.HistoryLimit, false)
-	path := filepath.Join(t.TempDir(), "run.sock")
+	path := testserver.SocketPath(t)
 	listener, err := link.Listen(path, 0o600)
 	if err != nil {
 		t.Fatalf("cannot create the run's socket: %v", err)

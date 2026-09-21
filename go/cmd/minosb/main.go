@@ -22,6 +22,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -37,35 +38,45 @@ import (
 // never calls `messages` again.
 const tearInterval = time.Second
 
-func main() { os.Exit(run()) }
+func main() { os.Exit(run(os.Args[1:], os.Stderr)) }
 
-func run() int {
+func run(args []string, stderr io.Writer) int {
 	fallback := os.Getenv("MINOS_SERVER")
 	if fallback == "" {
 		fallback = "http://127.0.0.1:8000"
 	}
-	server := flag.String("server", fallback, "base URL of the minos server")
-	user := flag.String("user", os.Getenv("MINOS_USER"), "the account this run speaks as")
-	room := flag.String("room", "", "the room carrying the conversation")
-	channel := flag.String("channel", "", "the channel carrying submissions; without one, submit is refused")
-	window := flag.String("window", "all", "what this run may read, reported by status")
-	socket := flag.String("socket", "", "the unix socket the container reaches, outside the work mount")
-	mode := flag.Uint("mode", 0o600, "the socket's file mode; the socket is the credential")
-	agent := flag.String("agent", "claude", "whose stream the run command speaks")
-	flag.Parse()
+	flags := flag.NewFlagSet("minosb", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	server := flags.String("server", fallback, "base URL of the minos server")
+	user := flags.String("user", os.Getenv("MINOS_USER"), "the account this run speaks as")
+	room := flags.String("room", "", "the room carrying the conversation")
+	channel := flags.String("channel", "", "the channel carrying submissions; without one, submit is refused")
+	window := flags.String("window", "all", "what this run may read, reported by status")
+	socket := flags.String("socket", "", "the unix socket the container reaches, outside the work mount")
+	mode := flags.Uint("mode", 0o600, "the socket's file mode; the socket is the credential")
+	agent := flags.String("agent", "claude", "whose stream the run command speaks")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
 
 	// The password is read from the environment alone. An argument is visible
 	// in the process list to every account on the host.
 	password := os.Getenv("MINOS_PASSWORD")
 	switch {
 	case *socket == "":
-		return fail("minosb needs -socket: the path the container reaches")
+		return fail(stderr, "minosb needs -socket: the path the container reaches")
 	case *room == "":
-		return fail("minosb needs -room")
+		return fail(stderr, "minosb needs -room")
 	case *user == "":
-		return fail("minosb needs -user, or MINOS_USER")
+		return fail(stderr, "minosb needs -user, or MINOS_USER")
 	case password == "":
-		return fail("minosb needs MINOS_PASSWORD in the environment")
+		return fail(stderr, "minosb needs MINOS_PASSWORD in the environment")
+	}
+	if err := link.CheckPath(*socket); err != nil {
+		return fail(stderr, "cannot use -socket %s: %v", *socket, err)
 	}
 
 	run, err := broker.Open(broker.Config{
@@ -73,13 +84,13 @@ func run() int {
 		Room: *room, Channel: *channel, Window: *window,
 	})
 	if err != nil {
-		return fail("%v", err)
+		return fail(stderr, "%v", err)
 	}
 	defer run.Stop()
 
 	listener, err := link.Listen(*socket, os.FileMode(*mode))
 	if err != nil {
-		return fail("cannot create %s: %v", *socket, err)
+		return fail(stderr, "cannot create %s: %v", *socket, err)
 	}
 	defer func() {
 		listener.Close()
@@ -94,13 +105,13 @@ func run() int {
 	// wants. With one, the broker owns its pipes.
 	done := make(chan int, 1)
 	var command *exec.Cmd
-	if argv := flag.Args(); len(argv) > 0 {
+	if argv := flags.Args(); len(argv) > 0 {
 		adapter, err := broker.AdapterFor(*agent)
 		if err != nil {
-			return fail("%v", err)
+			return fail(stderr, "%v", err)
 		}
 		if command, err = start(run, adapter, argv); err != nil {
-			return fail("%v", err)
+			return fail(stderr, "%v", err)
 		}
 		go func() { done <- wait(command) }()
 	}
@@ -188,7 +199,7 @@ func report(event map[string]any) {
 	fmt.Fprintln(os.Stdout, string(raw))
 }
 
-func fail(format string, args ...any) int {
-	fmt.Fprintf(os.Stderr, "minosb: "+format+"\n", args...)
+func fail(stderr io.Writer, format string, args ...any) int {
+	fmt.Fprintf(stderr, "minosb: "+format+"\n", args...)
 	return 2
 }

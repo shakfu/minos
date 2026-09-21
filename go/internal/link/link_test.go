@@ -2,17 +2,20 @@ package link
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"minos/internal/testserver"
 )
 
 func serve(t *testing.T, handle Handler) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "run.sock")
+	path := testserver.SocketPath(t)
 	listener, err := Listen(path, 0o600)
 	if err != nil {
 		t.Fatalf("cannot listen on %s: %v", path, err)
@@ -50,8 +53,57 @@ func TestTheSocketAdmitsItsOwnerAlone(t *testing.T) {
 	}
 }
 
+// A path bind would refuse is named as too long, before anything is created.
+func TestAPathPastTheSocketLimitIsRefused(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), strings.Repeat("d", maxPath))
+	_, err := Listen(filepath.Join(dir, "run.sock"), 0o600)
+	if err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("Listen returned %v", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the directory was created: %v", err)
+	}
+}
+
+// The limit is bind's own: a path of exactly that length still binds.
+func TestAPathAtTheSocketLimitBinds(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "minos-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := dir + "/" + strings.Repeat("s", maxPath-len(dir)-1)
+	listener, err := Listen(path, 0o600)
+	if err != nil {
+		t.Fatalf("a %d-byte path was refused: %v", len(path), err)
+	}
+	listener.Close()
+}
+
+// Listen replaces an earlier socket, and nothing else: a mistyped -socket must
+// not delete a file or an empty directory.
+func TestSomethingThatIsNotASocketIsNotReplaced(t *testing.T) {
+	dir := filepath.Dir(testserver.SocketPath(t))
+	file := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(file, []byte("kept"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty := filepath.Join(dir, "empty")
+	if err := os.Mkdir(empty, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{file, empty} {
+		if _, err := Listen(path, 0o600); err == nil || !strings.Contains(err.Error(), "not a socket") {
+			t.Fatalf("Listen(%s) returned %v", path, err)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s was removed: %v", path, err)
+		}
+	}
+}
+
 func TestAnEarlierSocketAtThePathIsReplaced(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "run.sock")
+	path := testserver.SocketPath(t)
 	first, err := Listen(path, 0o600)
 	if err != nil {
 		t.Fatal(err)

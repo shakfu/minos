@@ -30,6 +30,12 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 - An `opened` push for a channel item that had already been archived left a mark behind for a message no longer in the log, and nothing cleared it: `dropThrough` only removes marks at or below what it drops, and this one was already below. Opening an item is answered with a push to the opener as well as a reply, so the two can arrive in either order. The client now records the highest sequence archived out of each space and ignores a mark at or below it.
 
+- `minosb -socket` deleted whatever was at the path, not only an earlier socket: a mistyped `-socket ~/notes.txt` removed the file, and an empty directory there went too. A path holding anything but a socket is now refused.
+
+- A `-socket` path past the unix socket limit, 103 bytes on macOS and 107 on Linux, failed as `bind: invalid argument`. It is now refused with the limit named. The macOS `$TMPDIR` alone is 49 bytes, so a path nested under it can pass the limit.
+
+  Both are checked before `minosb` logs in, so a bad path no longer logs in and joins the room first.
+
 ### Added
 
 - `minosb`, one run's broker on the host, and `minosa`, the shim its container carries. The broker holds the session, the room's cursor and the run's unix socket; the container reaches six operations -- `messages`, `say`, `submit`, `await`, `progress`, `status` -- and no seventh, so it cannot reach a file write or a settings replacement at any credential. On the host rather than in the container: a client inside would speak the whole wire, which answers a 100 MiB `writefile` on the same connection as chat, and would have to be cut back by a capability system that does not exist yet. See [docs/dev/recommended-architecture.md](docs/dev/recommended-architecture.md) and [docs/dev/implementation-plan.md](docs/dev/implementation-plan.md).

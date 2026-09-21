@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -150,10 +151,31 @@ func Refuse(rule, format string, args ...any) Reply {
 // the broker's connection to the server is drained by a different goroutine.
 type Handler func(Request) Reply
 
+// maxPath is the longest path a unix socket binds at: sun_path less its NUL,
+// 103 bytes on macOS and 107 on Linux. Longer fails with a bare EINVAL.
+var maxPath = len(syscall.RawSockaddrUnix{}.Path) - 1
+
+// CheckPath refuses a path Listen cannot use: one too long to bind, or one
+// holding something other than a socket, which Listen would otherwise delete.
+// A caller runs it first to fail before work the socket's failure would waste.
+func CheckPath(path string) error {
+	if len(path) > maxPath {
+		return fmt.Errorf("the path is %d bytes and a unix socket's is at most %d; choose a shorter one", len(path), maxPath)
+	}
+	info, err := os.Lstat(path)
+	if err == nil && info.Mode().Type() != os.ModeSocket {
+		return fmt.Errorf("%s exists and is not a socket, so it is not replaced", path)
+	}
+	return nil
+}
+
 // Listen creates the run's socket. The directory is created, an earlier socket
-// at the same path is removed, and the mode is applied before anything can
+// at the same path is removed (anything else there is refused), and the mode is applied before anything can
 // connect: the socket is the credential in this design, so its mode is the gate.
 func Listen(path string, mode os.FileMode) (net.Listener, error) {
+	if err := CheckPath(path); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
