@@ -1,7 +1,7 @@
 # Agents in containers: what can reach what.
 # Source for network.svg. Regenerate with `make diagrams`, which runs
-# d2 --layout=elk over this file. Needs d2; nothing else in the tree does.
-# See docs/dev/agent-container-net.md section 2.
+# d2 --layout=tala over this file. Needs d2; nothing else in the tree does.
+# See docs/dev/recommended-architecture.md sections 3 and 4.
 
 direction: right
 
@@ -33,6 +33,12 @@ host: "Host" {
     pma: "pma -- the tool\nadmin session" {
       style.fill: "#eef2f6"
     }
+    broker1: "minosb -- run 1\nholds the grant" {
+      style.fill: "#eef2f6"
+    }
+    broker2: "minosb -- run 2\nholds its own grant" {
+      style.fill: "#eef2f6"
+    }
   }
 
   minosd: "minosd" {
@@ -42,24 +48,25 @@ host: "Host" {
       stroke-width: 3
     }
 
-    tcp: "listener A\ntcp 127.0.0.1:8000\nMINOS_HOST default" {
+    tcp: "one listener\ntcp 127.0.0.1:8000" {
       style.fill: "#eef2f6"
     }
-    unix: "listener B\nunix /run/minos/agent.sock\nnet.Listen(\"unix\")" {
-      style.fill: "#eef2f6"
-    }
-    note: "no address on the\ncontainer network" {
+    note: "no second listener.\nNo address on the\ncontainer network" {
       shape: text
       style.font-size: 16
     }
   }
 
-  sock: "/run/minos/agent.sock\nsocket file, mode 0660\nbind-mounted per container" {
+  sock1: "/run/minos/run-1.sock\nmode 0600, agent uid\nmounted outside /work" {
+    shape: page
+    style.fill: "#ffffff"
+  }
+  sock2: "/run/minos/run-2.sock\none socket per run" {
     shape: page
     style.fill: "#ffffff"
   }
 
-  relay: "sanduk relay\nHTTP/1.1, no upgrade handling\nexact-path allowlist, 3 paths\nper-run bearer token, budget" {
+  relay: "sanduk relay\nHTTP/1.1, exact-path allowlist\nper-run bearer token, budget" {
     style: {
       fill: "#ffffff"
       stroke-width: 3
@@ -73,10 +80,10 @@ host: "Host" {
       stroke-dash: 4
     }
 
-    c1: "container 1" {
+    c1: "container 1 -- not root" {
       style.fill: "#ffffff"
 
-      client: "agent client\nholds the room's one cursor" {
+      shim: "minosa\nopens the mounted file" {
         style.fill: "#eef2f6"
       }
       agent: "agent process\nno address of its own" {
@@ -86,19 +93,16 @@ host: "Host" {
         }
       }
 
-      client -> agent: "stdin: a message,\nor an interrupt" {
-        style.stroke: "#0f766e"
-      }
-      agent -> client: "stdout: the turn,\ntrace, cost" {
+      agent -> shim: "a command on PATH" {
         style.stroke: "#0f766e"
       }
 
-      note: "both pipes stay inside.\nNothing outside addresses the agent." {
+      note: "no credential, no wire, no cursor.\nThe pipes leave as the container's stdio." {
         shape: text
         style.font-size: 16
       }
     }
-    c2: "container 2\nagent client + agent" {
+    c2: "container 2 -- not root\nagent + minosa" {
       style.fill: "#ffffff"
     }
   }
@@ -111,20 +115,38 @@ provider: "model provider API\nhttps" {
 
 host.loopback.tui -> host.minosd.tcp: "websocket + HTTP"
 host.loopback.pma -> host.minosd.tcp: "admin ops:\nmint, revoke, found"
+host.loopback.broker1 -> host.minosd.tcp: "its grant:\none room, windowed" {
+  style: {
+    stroke: "#0b3d63"
+    stroke-width: 4
+  }
+}
+host.loopback.broker2 -> host.minosd.tcp: "its own grant" {
+  style: {
+    stroke: "#0b3d63"
+    stroke-width: 4
+  }
+}
 
-host.sealed.c1.client -> host.sock: "opens the mounted file" {
+host.sealed.c1.shim -> host.sock1: "six operations" {
   style: {
     stroke: "#0b3d63"
     stroke-width: 4
   }
 }
-host.sealed.c2 -> host.sock: "opens the mounted file" {
+host.sealed.c2 -> host.sock2: "six operations" {
   style: {
     stroke: "#0b3d63"
     stroke-width: 4
   }
 }
-host.sock -> host.minosd.unix: "the same socket,\nhost side" {
+host.sock1 -> host.loopback.broker1: "terminates at the broker,\nnot at minosd" {
+  style: {
+    stroke: "#0b3d63"
+    stroke-width: 4
+  }
+}
+host.sock2 -> host.loopback.broker2 {
   style: {
     stroke: "#0b3d63"
     stroke-width: 4
@@ -152,14 +174,20 @@ host.sealed.c1 -> host.minosd.tcp: "no route:\nminosd has no address here" {
     stroke-dash: 4
   }
 }
-host.sealed.c1 -> host.sealed.c2: "reachable -- which is why\nminosd stays off this network" {
+host.sealed.c1 -> host.sealed.c2: "reachable, and nothing listens:\nneither container runs a server" {
+  style: {
+    stroke: "#aa3333"
+    stroke-dash: 4
+  }
+}
+host.sealed.c1.shim -> host.sock2: "another run's socket\nis not mounted here" {
   style: {
     stroke: "#aa3333"
     stroke-dash: 4
   }
 }
 
-legend: "navy, heavy: the one path a container has to minos\nteal: inside the container -- pipes that cross no boundary\ngrey dotted: model traffic, through the relay\nred dashed: no route, or a route minos declines to take\nThe socket removes reach. The grant removes authority. Build both." {
+legend: "navy, heavy: the one path a container has, and where it stops\ngrey dotted: model traffic, through the relay\nred dashed: no route, or nothing to reach\nThe mount removes reach. The grant, held outside, removes authority.\nThe six operations remove the rest: minosd's file and settings routes are not implemented here." {
   shape: text
   near: bottom-center
   style.font-size: 18

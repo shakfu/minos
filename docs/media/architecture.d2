@@ -1,7 +1,7 @@
 # Agents in containers: who talks to whom.
 # Source for architecture.svg. Regenerate with `make diagrams`, which runs
 # d2 --layout=tala over this file. Needs d2; nothing else in the tree does.
-# See docs/dev/agent-container-net.md
+# See docs/dev/recommended-architecture.md
 
 direction: down
 
@@ -43,7 +43,42 @@ host: "Host" {
     }
   }
 
-  sanduk: "sanduk\nowns the container\nand a per-agent adapter" {
+  broker: "minosb -- the broker" {
+    style: {
+      fill: "#ffffff"
+      stroke-width: 3
+    }
+
+    note: "one per run.\nHolds the grant, the cursor and the pipes" {
+      shape: text
+      style.font-size: 16
+    }
+
+    wire: "wire side\ngrant, 6 ops, one queue, one cursor" {
+      style.fill: "#eef2f6"
+    }
+    sockd: "socket server\nsix operations, and no seventh" {
+      style.fill: "#eef2f6"
+    }
+    pipes: "process side\nruns the stage through sanduk,\nstream-json in and out" {
+      style.fill: "#eef2f6"
+    }
+
+    wire -> sockd: "drains the queue\nwhen the agent asks" {
+      style.stroke: "#0f766e"
+    }
+    sockd -> wire: "say, submit,\nawait, progress" {
+      style.stroke: "#0f766e"
+    }
+    wire -> pipes: "pushes what\nwill not wait" {
+      style.stroke: "#0f766e"
+    }
+    pipes -> wire: "relays the turn's\nfinal message" {
+      style.stroke: "#0f766e"
+    }
+  }
+
+  sanduk: "sanduk\nbuilds, starts and kills the container\nowns the per-agent adapter" {
     style.fill: "#ffffff"
   }
 
@@ -53,7 +88,7 @@ host: "Host" {
       stroke-width: 3
     }
 
-    core: "socket + chat + timeline" {
+    core: "one listener\nsocket + chat + timeline" {
       style.fill: "#eef2f6"
     }
     control: "control\nchannel, restricted to group workers\nread-only to its audience" {
@@ -68,32 +103,11 @@ host: "Host" {
   }
 }
 
-box: "Sealed container -- one per run" {
+box: "Sealed container -- one per run\nno credential, no wire, no address" {
   style: {
     fill: "#fbf9f5"
     stroke: "#666666"
     stroke-dash: 4
-  }
-
-  client: "agent client -- owns the agent process" {
-    style.fill: "#ffffff"
-
-    wire: "wire side\n7 ops, one queue, one cursor" {
-      style.fill: "#eef2f6"
-    }
-    mcp: "MCP server, stdio\nthe agent calls in" {
-      style.fill: "#eef2f6"
-    }
-    pipes: "process side\nspawns the agent,\nstream-json in and out" {
-      style.fill: "#eef2f6"
-    }
-
-    wire -> mcp: "drains the queue on demand" {
-      style.stroke: "#0f766e"
-    }
-    wire -> pipes: "pushes what will not wait" {
-      style.stroke: "#0f766e"
-    }
   }
 
   agent: "agent process\nclaude, or another CLI" {
@@ -103,18 +117,16 @@ box: "Sealed container -- one per run" {
     }
   }
 
-  agent <-> client.mcp: "the agent asks:\nmessages, say, submit,\nawait, progress -- and the replies" {
-    style.stroke: "#0f766e"
+  shim: "minosa -- multicall shim on PATH\nmessages, say, submit,\nawait, progress, status\n(and `minosa mcp`, later)" {
+    style.fill: "#ffffff"
   }
-  client.pipes -> agent: "stdin: a pushed message,\nqueued for the turn's end;\nan interrupt, which is not" {
-    style.stroke: "#0f766e"
-  }
-  agent -> client.pipes: "stdout: the turn,\nits trace, its cost" {
+
+  agent -> shim: "runs a command;\nnever learns it is remote" {
     style.stroke: "#0f766e"
   }
 }
 
-mounts: "bind mounts\n/work, artifacts, session store" {
+mounts: "bind mounts\n/work at its host path, artifacts, session store" {
   shape: cylinder
   style.fill: "#ffffff"
 }
@@ -128,30 +140,49 @@ host.pma -> host.minosd.core: "admin: found rooms, invite,\nmint and revoke gran
     stroke-width: 4
   }
 }
-host.pma -> host.sanduk: "dispatch a stage" {
+host.pma -> host.broker: "dispatch a stage:\nthe grant, the room, the window" {
   style: {
     stroke: "#0b3d63"
     stroke-width: 4
   }
 }
-box.client.wire -> host.minosd.core: "unix socket\nno network address" {
+host.broker.wire -> host.minosd.core: "the grant, on the ordinary listener.\nThe room gets every turn's final message" {
+  style: {
+    stroke: "#0b3d63"
+    stroke-width: 4
+  }
+}
+box.shim -> host.broker.sockd: "unix socket, one per run,\nmounted outside /work.\nThe socket is the credential" {
   style: {
     stroke: "#0b3d63"
     stroke-width: 4
   }
 }
 
-host.sanduk -> box: "builds, starts, kills the container.\nSIGINT and the kill need no\ncooperation from the agent" {
+host.broker.pipes -> host.sanduk: "run the stage,\nstdio on pipes" {
   style: {
     stroke: "#7a7a7a"
     stroke-dash: 4
   }
 }
-host.pma -> box: "dispatch, then revoke" {
+host.sanduk -> box: "builds, starts, kills.\nMaps the host uid; the agent is not root" {
   style: {
     stroke: "#7a7a7a"
     stroke-dash: 4
   }
+}
+host.pma -> box: "stops it directly:\nneeds neither minosd nor the broker" {
+  style: {
+    stroke: "#7a7a7a"
+    stroke-dash: 4
+  }
+}
+
+host.broker.pipes -> box.agent: "stdin: a pushed message,\nqueued for the turn's end;\nan interrupt, which is not" {
+  style.stroke: "#0f766e"
+}
+box.agent -> host.broker.pipes: "stdout: the turn,\nits trace, its cost" {
+  style.stroke: "#0f766e"
 }
 
 box.agent -> mounts: "writes artifacts" {
@@ -167,7 +198,7 @@ host.pma -> mounts: "reads artifacts" {
   }
 }
 
-legend: "blue: conversation, through minos\nnavy, heavy: authority -- grants, dispatch, and the one wire in\nteal: inside the container -- the agent asks, the client pushes and reads\ngrey dashed: container control, never through minos\ngrey dotted: files, on the bind mount, never through minos" {
+legend: "blue: conversation, through minos\nnavy, heavy: authority -- grants, dispatch, and the one path a container has\nteal: the three lanes -- the agent asks, the broker pushes and reads\ngrey dashed: container control, never through minos\ngrey dotted: files, on the bind mount, never through minos\nThe container implements nothing. What it cannot ask for, the broker does not have." {
   shape: text
   near: bottom-center
   style.font-size: 18
