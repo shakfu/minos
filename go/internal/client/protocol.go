@@ -219,30 +219,34 @@ type Client struct {
 	stopping chan struct{}
 	stopOnce sync.Once
 
-	onChange func()
-	onNotice func(string)
+	onChange     func()
+	onNotice     func(string)
+	onSubmission func(Submission)
+	onGap        func(room string, missing int64)
 }
 
 func NewClient(socket *Socket) *Client {
 	c := &Client{
-		socket:      socket,
-		rooms:       map[string]Room{},
-		channels:    map[string]Room{},
-		log:         map[string][]Message{},
-		read:        map[string]int64{},
-		submissions: map[string]Submission{},
-		queued:      map[string]Submission{},
-		cursors:     map[string]int64{},
-		repairing:   map[string]chan struct{}{},
-		opened:      map[string]map[int64]bool{},
-		archived:    map[string]int64{},
-		occupancies: map[string]seat{},
-		visited:     map[string]bool{},
-		pending:     map[int64]chan json.RawMessage{},
-		wake:        make(chan struct{}, 1),
-		stopping:    make(chan struct{}),
-		onChange:    func() {},
-		onNotice:    func(string) {},
+		socket:       socket,
+		rooms:        map[string]Room{},
+		channels:     map[string]Room{},
+		log:          map[string][]Message{},
+		read:         map[string]int64{},
+		submissions:  map[string]Submission{},
+		queued:       map[string]Submission{},
+		cursors:      map[string]int64{},
+		repairing:    map[string]chan struct{}{},
+		opened:       map[string]map[int64]bool{},
+		archived:     map[string]int64{},
+		occupancies:  map[string]seat{},
+		visited:      map[string]bool{},
+		pending:      map[int64]chan json.RawMessage{},
+		wake:         make(chan struct{}, 1),
+		stopping:     make(chan struct{}),
+		onChange:     func() {},
+		onNotice:     func(string) {},
+		onSubmission: func(Submission) {},
+		onGap:        func(string, int64) {},
 	}
 	socket.OnFrame, socket.OnClose = c.onFrame, c.lost
 	go c.applyPushes()
@@ -255,6 +259,28 @@ func (c *Client) SetHandlers(onChange func(), onNotice func(string)) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.onChange, c.onNotice = onChange, onNotice
+}
+
+// SetSubmissionHandler installs what to call when a submission's state arrives.
+// A view reads state from the maps instead, but approval deletes a submission
+// rather than storing its new state, so a caller waiting on a decision must see
+// the event itself. It runs on the goroutine that applies pushes and must not
+// block.
+func (c *Client) SetSubmissionHandler(handler func(Submission)) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.onSubmission = handler
+}
+
+// SetGapHandler installs what to call when a backfill comes up short: the
+// server's history is capped on the tail, so a client far enough behind cannot
+// page back to its cursor. A view draws the marker the log carries; a caller
+// that must not act on a partial room needs the fact itself. It runs on the
+// goroutine that repairs and must not block.
+func (c *Client) SetGapHandler(handler func(room string, missing int64)) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.onGap = handler
 }
 
 func (c *Client) changed() {
@@ -702,7 +728,9 @@ func (c *Client) repair(room string) {
 	c.mutex.Lock()
 	// A backfill is capped at the tail, and asking again returns the same slice.
 	// The cursor must not jump the shortfall in silence, so the gap is marked.
+	var missing int64
 	if len(messages) > 0 && messages[0].Seq > before+1 {
+		missing = messages[0].Seq - before - 1
 		c.appendLocked(room, Message{
 			Room:   room,
 			Seq:    messages[0].Seq - 1,
@@ -721,7 +749,11 @@ func (c *Client) repair(room string) {
 	for _, seq := range reply.Opened {
 		c.markOpenedLocked(room, seq)
 	}
+	handler := c.onGap
 	c.mutex.Unlock()
+	if missing > 0 {
+		handler(room, missing)
+	}
 	c.changed()
 }
 
@@ -1286,6 +1318,10 @@ func (c *Client) trackSubmission(submission Submission, announce bool) Submissio
 	if announce && (mine || submission.State == "pending") {
 		c.notice(c.DescribeSubmission(submission))
 	}
+	c.mutex.Lock()
+	handler := c.onSubmission
+	c.mutex.Unlock()
+	handler(submission)
 	return submission
 }
 

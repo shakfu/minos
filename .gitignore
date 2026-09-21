@@ -13,9 +13,11 @@
 # The timeline database
 .run/
 
-# The compiled server and client. Built by `make go`.
+# The compiled binaries. Built by `make go`.
 go/minosd
 go/minos
+go/minosb
+go/minosa
 
 # python
 .venv

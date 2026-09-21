@@ -518,3 +518,32 @@ func TestAnOpenedPushForAnArchivedItemIsIgnored(t *testing.T) {
 		t.Fatalf("a live item was not marked: %v", opened)
 	}
 }
+
+// A view draws the marker the log carries. A caller that must not act on a
+// partial room needs the fact itself, and gets it here.
+func TestAShortfallIsReportedToAHandlerAsWellAsToTheLog(t *testing.T) {
+	server := testserver.Start(t, 2)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	room := pair(t, demo)
+
+	reported := make(chan int64, 1)
+	alice.SetGapHandler(func(_ string, missing int64) { reported <- missing })
+
+	send(t, demo, room.ID, "0", "1", "2", "3", "4", "5")
+	waitFor(t, "six messages", func() bool { return len(alice.Log(room.ID)) == 6 })
+
+	alice.mutex.Lock()
+	alice.log[room.ID] = nil
+	alice.cursors[room.ID] = 0
+	alice.mutex.Unlock()
+	alice.repair(room.ID)
+
+	select {
+	case missing := <-reported:
+		if missing != 4 {
+			t.Fatalf("the handler was told %d messages were missing", missing)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the shortfall was not reported to the handler")
+	}
+}
