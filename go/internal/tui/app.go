@@ -685,7 +685,7 @@ func (u *Ui) roomRows() []client.Room {
 	rows := []client.Room{}
 	for _, space := range u.places() {
 		// A closed place is kept and readable; it is simply not what a list of
-		// where the work is happening is for. `a` shows them.
+		// where the work is happening is for. ^A shows them.
 		if space.Open() || u.showClosed {
 			rows = append(rows, space)
 		}
@@ -773,16 +773,15 @@ func (u *Ui) key(event *tcell.EventKey) {
 		}
 	case tcell.KeyCtrlC:
 		u.running = false
-	case tcell.KeyRune:
-		// With nothing typed, `a` shows the closed places too. Anywhere else
-		// the rune is text, so the composer never loses a letter to a view.
-		if event.Rune() == 'a' && len(u.input) == 0 &&
-			(u.view == viewProject || u.view == viewRooms) {
+	case tcell.KeyCtrlA:
+		// A control key, not a letter: a letter would be taken from the first
+		// word typed in a list and the rest sent to row 0.
+		if u.view == viewProject || u.view == viewRooms {
 			u.showClosed = !u.showClosed
 			u.cursor = 0
 			u.followCursor()
-			return
 		}
+	case tcell.KeyRune:
 		if unicode.IsPrint(event.Rune()) {
 			u.input = append(u.input, event.Rune())
 		}
@@ -2328,7 +2327,7 @@ func (u *Ui) drawPlaces(top, width, bottom int) {
 
 	empty := "(nothing here; /open <user> raises a room)"
 	if u.closedCount() > 0 {
-		empty = "(nothing open here; a shows the closed ones)"
+		empty = "(nothing open here; ^A shows the closed ones)"
 	}
 	u.drawTable(top, width, bottom, t, func(index int) tcell.Style {
 		space := rows[index]
@@ -2618,14 +2617,14 @@ func (u *Ui) drawComposer(height, width int) {
 	case viewProjects:
 		hint = " Up/Down: project  Enter: open it  Tab: next tab  /help  ^C: quit"
 	case viewProject:
-		hint = " Up/Down: place  Enter: go in  a: closed too  Esc: back  ^C: quit"
+		hint = " Up/Down: place  Enter: go in  ^A: closed too  Esc: back  ^C: quit"
 	case viewPeople:
 		if u.person != "" {
 			prompt = "  (to " + u.person + ") "
 			hint = " Enter: open a room with " + u.person + "  Up/Down: person  Tab: next tab  ^C: quit"
 		}
 	case viewRooms:
-		hint = " Up/Down: place  Enter: go in  a: closed too  Tab: next tab  ^C: quit"
+		hint = " Up/Down: place  Enter: go in  ^A: closed too  Tab: next tab  ^C: quit"
 	case viewSpace:
 		switch {
 		case u.submitting(u.selected):

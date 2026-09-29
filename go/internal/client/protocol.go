@@ -115,6 +115,10 @@ type Message struct {
 	Subject *string `json:"subject"`
 	Body    string  `json:"body"`
 	At      float64 `json:"at"`
+	// Missing is set on the marker this client writes for a backfill that
+	// came up short: how many it stands for. The marker takes a sequence
+	// number the server gave a message, so this is what tells them apart.
+	Missing int64 `json:"-"`
 }
 
 type Group struct {
@@ -462,7 +466,13 @@ func (c *Client) reconnect() {
 			continue
 		}
 
+		// Sync succeeds without its backfills, and a drop during them found
+		// this flag set and started nothing. Checked under the lock `lost` takes.
 		c.mutex.Lock()
+		if !c.socket.Connected() {
+			c.mutex.Unlock()
+			continue
+		}
 		c.reconnecting = false
 		c.mutex.Unlock()
 		c.enterAgain()
@@ -678,10 +688,13 @@ func (c *Client) apply(message Message) {
 		return
 	}
 	if message.Seq > cursor+1 {
-		// Dropping this copy is safe: the server stored it before publishing,
-		// so the backfill about to be requested contains it.
+		// Dropping this copy is safe when this call requests the backfill: the
+		// server stored it before publishing. A backfill already in flight may
+		// predate it, so after waiting on one the message is checked again.
 		c.mutex.Unlock()
-		c.repair(message.Room)
+		if c.repair(message.Room) {
+			c.apply(message)
+		}
 		return
 	}
 	c.cursors[message.Room] = message.Seq
@@ -695,13 +708,14 @@ func (c *Client) apply(message Message) {
 }
 
 // repair backfills a room from its cursor. One backfill runs per room at a time;
-// a second caller waits for it rather than returning before the log is filled.
-func (c *Client) repair(room string) {
+// a second caller waits for it rather than returning before the log is filled,
+// and is told it waited rather than asked.
+func (c *Client) repair(room string) (waited bool) {
 	c.mutex.Lock()
 	if running, inFlight := c.repairing[room]; inFlight {
 		c.mutex.Unlock()
 		<-running
-		return
+		return true
 	}
 	done := make(chan struct{})
 	c.repairing[room] = done
@@ -732,12 +746,13 @@ func (c *Client) repair(room string) {
 	if len(messages) > 0 && messages[0].Seq > before+1 {
 		missing = messages[0].Seq - before - 1
 		c.appendLocked(room, Message{
-			Room:   room,
-			Seq:    messages[0].Seq - 1,
-			Author: "system",
-			Kind:   "event",
-			Body:   fmt.Sprintf("%d earlier message(s) not shown", messages[0].Seq-before-1),
-			At:     messages[0].At,
+			Room:    room,
+			Seq:     messages[0].Seq - 1,
+			Author:  "system",
+			Kind:    "event",
+			Body:    fmt.Sprintf("%d earlier message(s) not shown", missing),
+			At:      messages[0].At,
+			Missing: missing,
 		})
 	}
 	for _, message := range messages {
@@ -755,6 +770,7 @@ func (c *Client) repair(room string) {
 		handler(room, missing)
 	}
 	c.changed()
+	return false
 }
 
 func (c *Client) appendLocked(room string, message Message) {

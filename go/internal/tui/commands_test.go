@@ -852,9 +852,9 @@ func TestTheOverviewRanksProjectsByWhatWasSaidLately(t *testing.T) {
 	}
 }
 
-// Closing hides a place from the lists without taking it away: `a` brings it
+// Closing hides a place from the lists without taking it away: ^A brings it
 // back, and its project still counts it among what it holds.
-func TestClosingHidesAPlaceAndAShowsItAgain(t *testing.T) {
+func TestClosingHidesAPlaceAndCtrlAShowsItAgain(t *testing.T) {
 	server := testserver.Start(t, config.HistoryLimit)
 	demo := connect(t, server.Base, "demo")
 	room, err := demo.CreateRoom("task/12", nil, "", "", "")
@@ -884,15 +884,15 @@ func TestClosingHidesAPlaceAndAShowsItAgain(t *testing.T) {
 		t.Fatalf("the project counts %+v", held)
 	}
 
+	// A letter is text even in a list with nothing typed: "are" must not lose its "a".
 	ui.key(tcell.NewEventKey(tcell.KeyRune, 'a', tcell.ModNone))
-	if rows := ui.roomRows(); len(rows) != 1 {
-		t.Fatalf("a showed %d places", len(rows))
+	if string(ui.input) != "a" || ui.showClosed {
+		t.Fatalf("a toggled the list; the composer holds %q", string(ui.input))
 	}
-	// A letter typed into the composer is text, not the toggle.
-	ui.input = []rune("s")
-	ui.key(tcell.NewEventKey(tcell.KeyRune, 'a', tcell.ModNone))
-	if string(ui.input) != "sa" {
-		t.Fatalf("the composer holds %q", string(ui.input))
+	ui.input = nil
+	ui.key(tcell.NewEventKey(tcell.KeyCtrlA, 0, tcell.ModCtrl))
+	if rows := ui.roomRows(); len(rows) != 1 {
+		t.Fatalf("^A showed %d places", len(rows))
 	}
 
 	if err := ui.cmdReopen([]string{"task/12"}); err != nil {

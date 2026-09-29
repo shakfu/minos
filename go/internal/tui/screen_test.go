@@ -431,13 +431,13 @@ func TestTheHeaderBarCarriesTheNameAndTheOverviewOpensFirst(t *testing.T) {
 	}
 	ui.draw()
 	if drawn := contents(screen); !strings.Contains(drawn, "0 open of 1 place, 1 closed") ||
-		!strings.Contains(drawn, "a shows the closed ones") {
+		!strings.Contains(drawn, "^A shows the closed ones") {
 		t.Errorf("a closed place is drawn wrong:\n%s", drawn)
 	}
-	ui.key(tcell.NewEventKey(tcell.KeyRune, 'a', tcell.ModNone))
+	ui.key(tcell.NewEventKey(tcell.KeyCtrlA, 0, tcell.ModCtrl))
 	ui.draw()
 	if drawn := contents(screen); !strings.Contains(drawn, "closed") ||
 		!strings.Contains(drawn, "task/31") {
-		t.Errorf("a did not bring the closed place back:\n%s", drawn)
+		t.Errorf("^A did not bring the closed place back:\n%s", drawn)
 	}
 }

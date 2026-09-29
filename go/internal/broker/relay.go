@@ -7,7 +7,8 @@ package broker
 // message pushed there reaches a model that never calls the shim. The socket
 // is the third lane and is the agent's own, in broker.go.
 //
-// A message is pushed at the end of the turn, not into the middle of one. An
+// A message is pushed at the end of the turn, not into the middle of one, and
+// everything held during a turn goes as one frame, so one turn answers it. An
 // interrupt is a separate act and is the dispatcher's: it owns the container,
 // and this process must not be in the path of stopping a run. What the broker
 // owes the dispatcher is the fact and its order, which is the `held` control
@@ -34,11 +35,15 @@ const relayLimit = messaging.BodyLimit
 type Adapter interface {
 	// Name is the `-agent` value that selects it.
 	Name() string
-	// Push encodes one message as a line on the agent's stdin.
-	Push(text string) ([]byte, error)
+	// Push encodes messages as one line on the agent's stdin: one frame,
+	// so one turn, however many messages it carries.
+	Push(texts []string) ([]byte, error)
 	// Turn reads one line of the agent's stdout. It answers the turn's final
 	// assistant message, and whether this line ended a turn.
 	Turn(line []byte) (string, bool)
+	// Interrupt encodes a request to stop the current turn. id is the
+	// caller's, unique among its requests; the agent's reply echoes it.
+	Interrupt(id string) ([]byte, error)
 }
 
 // Claude Code's stream-json, in both directions.
@@ -49,13 +54,15 @@ type claudeAdapter struct{}
 
 func (claudeAdapter) Name() string { return "claude" }
 
-func (claudeAdapter) Push(text string) ([]byte, error) {
+// A content block per message keeps each one's bounds.
+func (claudeAdapter) Push(texts []string) ([]byte, error) {
+	content := make([]any, 0, len(texts))
+	for _, text := range texts {
+		content = append(content, map[string]any{"type": "text", "text": text})
+	}
 	frame := map[string]any{
-		"type": "user",
-		"message": map[string]any{
-			"role":    "user",
-			"content": []any{map[string]any{"type": "text", "text": text}},
-		},
+		"type":    "user",
+		"message": map[string]any{"role": "user", "content": content},
 	}
 	raw, err := json.Marshal(frame)
 	if err != nil {
@@ -73,6 +80,23 @@ func (claudeAdapter) Turn(line []byte) (string, bool) {
 		return "", false
 	}
 	return record.Result, true
+}
+
+// Interrupt is the control request the Agent SDK's `interrupt()` sends. On
+// Claude Code 2.1.284 the interrupted turn ends with one `result`, subtype
+// `error_during_execution`, and a user frame queued behind it runs as its own
+// turn (scripts/probe-interrupt.sh). Nothing sends it yet.
+func (claudeAdapter) Interrupt(id string) ([]byte, error) {
+	frame := map[string]any{
+		"type":       "control_request",
+		"request_id": id,
+		"request":    map[string]any{"subtype": "interrupt"},
+	}
+	raw, err := json.Marshal(frame)
+	if err != nil {
+		return nil, err
+	}
+	return append(raw, '\n'), nil
 }
 
 var adapters = []Adapter{claudeAdapter{}}
@@ -98,9 +122,15 @@ type Relay struct {
 	stdin   io.WriteCloser
 	control func(map[string]any)
 
+	// ended tells Deliver a turn ended; Deliver alone clears inTurn, so the
+	// `turn` event precedes the write. Buffered by one: a turn ends only after
+	// Deliver has written the frame that started it.
+	ended chan struct{}
+
 	mutex sync.Mutex
 	// A turn is under way until the agent's stream says it ended. The run
-	// starts inside one: the dispatcher gave the agent its task.
+	// starts inside one: the dispatcher gave the agent its task. A boolean
+	// suffices because only Deliver writes, one frame per turn, between turns.
 	inTurn bool
 	held   []string
 }
@@ -111,7 +141,10 @@ func NewRelay(b *Broker, adapter Adapter, stdin io.WriteCloser, control func(map
 	if control == nil {
 		control = func(map[string]any) {}
 	}
-	return &Relay{broker: b, adapter: adapter, stdin: stdin, control: control, inTurn: true}
+	return &Relay{
+		broker: b, adapter: adapter, stdin: stdin, control: control,
+		ended: make(chan struct{}, 1), inTurn: true,
+	}
 }
 
 // Read consumes the agent's stdout to its end. Each turn's final message is
@@ -131,68 +164,72 @@ func (r *Relay) Read(stdout io.Reader) error {
 				r.control(map[string]any{"event": "unrelayed", "error": err.Error()})
 			}
 		}
-		r.endTurn()
+		select {
+		case r.ended <- struct{}{}:
+		default:
+		}
 	}
 	return scanner.Err()
 }
 
 // Deliver pushes what the room says onto the agent's stdin until the broker
-// stops. It runs on its own goroutine and never touches the connection.
+// stops. It is the only writer to stdin, so nothing overtakes a held message.
 func (r *Relay) Deliver() {
 	for {
+		ended := false
 		select {
 		case <-r.broker.stopped:
 			return
 		case <-r.broker.changed:
+		case <-r.ended:
+			ended = true
 		}
-		for _, text := range r.broker.forPush() {
-			r.Push(text)
-		}
+		r.deliver(ended)
 	}
 }
 
-// Push delivers one message, or holds it until the turn ends. Held rather than
-// interrupted: an interrupt may discard what is queued, and it is the
+// deliver holds what arrived mid-turn, and between turns writes everything
+// held as one frame. Held rather than interrupted: an interrupt is the
 // dispatcher's act, not this process's.
-func (r *Relay) Push(text string) {
+func (r *Relay) deliver(ended bool) {
+	arrived := r.broker.forPush()
+
 	r.mutex.Lock()
-	if r.inTurn {
-		r.held = append(r.held, text)
-		depth := len(r.held)
-		r.mutex.Unlock()
-		r.control(map[string]any{"event": "held", "waiting": depth})
+	if ended {
+		r.inTurn = false
+	}
+	r.held = append(r.held, arrived...)
+	depth, inTurn := len(r.held), r.inTurn
+	var batch []string
+	if !inTurn && depth > 0 {
+		batch, r.held, r.inTurn = r.held, nil, true
+	}
+	r.mutex.Unlock()
+
+	if inTurn {
+		for i := range arrived {
+			r.control(map[string]any{"event": "held", "waiting": depth - len(arrived) + i + 1})
+		}
 		return
 	}
-	r.mutex.Unlock()
-	r.write(text)
-}
-
-// endTurn writes everything that arrived during the turn, in the order it
-// arrived, before the agent is told the turn is over.
-func (r *Relay) endTurn() {
-	r.mutex.Lock()
-	held := r.held
-	r.held, r.inTurn = nil, false
-	r.mutex.Unlock()
-
-	r.control(map[string]any{"event": "turn", "delivering": len(held)})
-	for _, text := range held {
-		r.write(text)
+	if ended {
+		r.control(map[string]any{"event": "turn", "delivering": len(batch)})
+	}
+	if len(batch) > 0 {
+		r.write(batch)
 	}
 }
 
-func (r *Relay) write(text string) {
-	frame, err := r.adapter.Push(text)
+func (r *Relay) write(texts []string) {
+	frame, err := r.adapter.Push(texts)
+	if err == nil {
+		_, err = r.stdin.Write(frame)
+	}
 	if err != nil {
+		// Nothing reached the agent, so no turn started.
+		r.mutex.Lock()
+		r.inTurn = false
+		r.mutex.Unlock()
 		r.control(map[string]any{"event": "unpushed", "error": err.Error()})
-		return
 	}
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-	if _, err := r.stdin.Write(frame); err != nil {
-		r.control(map[string]any{"event": "unpushed", "error": err.Error()})
-		return
-	}
-	// A pushed message starts a turn: the agent answers it.
-	r.inTurn = true
 }

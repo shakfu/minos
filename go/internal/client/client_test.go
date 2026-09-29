@@ -8,6 +8,8 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -160,6 +162,45 @@ func TestAShortfallIsReportedRatherThanHidden(t *testing.T) {
 	if !slices.Equal(got, []string{"4 earlier message(s) not shown", "4", "5"}) {
 		t.Fatalf("the log is %v", got)
 	}
+}
+
+// A push ahead of the cursor, while another goroutine's backfill is in flight,
+// must be checked again once that backfill lands: its reply may predate the push.
+func TestAPushDuringAnotherBackfillIsNotLost(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	room := pair(t, demo)
+	send(t, demo, room.ID, "one", "two", "three")
+	waitFor(t, "three messages", func() bool { return len(alice.Log(room.ID)) == 3 })
+
+	// Stand in for a backfill from 2 that is running and will return only 3.
+	done := make(chan struct{})
+	alice.mutex.Lock()
+	three := alice.log[room.ID][2]
+	alice.log[room.ID] = alice.log[room.ID][:2]
+	alice.cursors[room.ID] = three.Seq - 1
+	alice.repairing[room.ID] = done
+	alice.mutex.Unlock()
+
+	send(t, demo, room.ID, "four")
+	waitFor(t, "the push to be taken", func() bool {
+		alice.mutex.Lock()
+		defer alice.mutex.Unlock()
+		return len(alice.pushes) == 0
+	})
+	// Let apply reach the wait. Arriving later would only make this pass early.
+	time.Sleep(100 * time.Millisecond)
+
+	alice.mutex.Lock()
+	alice.cursors[room.ID] = three.Seq
+	alice.appendLocked(room.ID, three)
+	delete(alice.repairing, room.ID)
+	alice.mutex.Unlock()
+	close(done)
+
+	waitFor(t, "four after the backfill", func() bool {
+		return slices.Equal(bodies(alice.Log(room.ID)), []string{"one", "two", "three", "four"})
+	})
 }
 
 // -- the model, through the client -------------------------------------------
@@ -479,6 +520,72 @@ func TestADroppedConnectionReconnects(t *testing.T) {
 	waitFor(t, "exit by the old handle to empty the room", func() bool {
 		return len(server.Store.OccupantsOf(room.ID)) == 0
 	})
+}
+
+// A drop after the sync reply, while reconnect still holds the flag, must not
+// leave the client down with nothing retrying. The change Sync announces at its
+// end is the hook: it runs inside that window.
+func TestADropDuringTheReconnectSyncIsRetried(t *testing.T) {
+	demo := connect(t, testserver.Start(t, config.HistoryLimit).Base, "demo")
+	var once sync.Once
+	var dropped atomic.Bool
+	demo.SetHandlers(func() {
+		demo.mutex.Lock()
+		inSync := demo.reconnecting && demo.connected
+		demo.mutex.Unlock()
+		if !inSync || !demo.socket.Connected() {
+			return
+		}
+		once.Do(func() {
+			demo.socket.mutex.Lock()
+			ws := demo.socket.ws
+			demo.socket.mutex.Unlock()
+			_ = ws.CloseNow()
+			dropped.Store(true)
+			// Hold the window open until the reader has seen the close.
+			for demo.socket.Connected() {
+				time.Sleep(time.Millisecond)
+			}
+			time.Sleep(50 * time.Millisecond)
+		})
+	}, func(string) {})
+
+	demo.socket.mutex.Lock()
+	ws := demo.socket.ws
+	demo.socket.mutex.Unlock()
+	_ = ws.CloseNow()
+
+	waitFor(t, "the second drop and a reconnect after it", func() bool {
+		demo.mutex.Lock()
+		settled := !demo.reconnecting
+		demo.mutex.Unlock()
+		return dropped.Load() && settled && demo.Connected()
+	})
+}
+
+// A connection that is replaced must not take its replacement down when it
+// closes: reconnect may call Connect again after a Sync that failed.
+func TestAReplacedConnectionClosingLeavesTheLiveOneUp(t *testing.T) {
+	demo := connect(t, testserver.Start(t, config.HistoryLimit).Base, "demo")
+	closed := make(chan struct{}, 4)
+	demo.socket.OnClose = func() { closed <- struct{}{} }
+
+	demo.socket.mutex.Lock()
+	old := demo.socket.ws
+	demo.socket.mutex.Unlock()
+	if err := demo.socket.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	_ = old.CloseNow()
+
+	select {
+	case <-closed:
+		t.Fatal("the old connection's close was reported as the live one's")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if !demo.Connected() {
+		t.Fatal("the live connection is marked down")
+	}
 }
 
 // A refused read leaves the cursor where the server has it.

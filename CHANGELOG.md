@@ -36,6 +36,24 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
   Both are checked before `minosb` logs in, so a bad path no longer logs in and joins the room first.
 
+- `minosb` passed its whole environment to the run command, `MINOS_PASSWORD` included. The run command now gets the environment without `MINOS_PASSWORD` and `MINOS_USER`.
+
+- A broker attached to a room with more than the history limit, or with archived messages, reported a tear on its first `messages` and ended the run. The client's marker for a short backfill holds the sequence of a message it never fetched, so the log appeared to jump. `messages` now starts at the first retained message, and `status` reports the count before it as `earlier`. The push lane starts at the room's end: it had written every retained message to stdin. History stays on the socket, for the agent to ask for.
+
+- A relayed turn cut inside a multi-byte character was dropped rather than cut. `json.Marshal` widened each stray byte to 3, and the body passed the server's limit. The cut now steps back to a character boundary.
+
+- The client lost a push ahead of its cursor when another goroutine's backfill was already in flight: it waited for that backfill, whose reply could predate the push, and did not look at the message again. It now does.
+
+- A reconnect whose `sync` failed opened a second socket and left the first one open. When the first closed, it marked the live socket down. `Connect` now closes the connection it replaces, and a replaced connection's close is ignored.
+
+- The relay wrote each held message as its own frame, and Claude Code runs each queued frame as its own turn, so the first `result` marked the run idle while later turns were still running. A message arriving then was written into a running turn. A concurrent push could also overtake the held messages. Held messages now go as one frame, one content block each, and only the delivery goroutine writes to stdin. One frame per turn over a frame count, because it also gives the agent a burst of messages in one turn instead of answering each one separately in the room.
+
+- The run socket had no read deadline and no connection limit, so a process that connected and sent nothing held a goroutine and a descriptor until the broker exited. A connection now has 5 s to send its request, and past 64 open connections a new one is refused with a readable reply rather than queued. `await` also kept a waiter that timed out until its submission was decided, and a `timeout` too large for `time.Duration` overflowed to a negative wait that ended at once. The waiter is now removed, and `timeout` is capped at one hour.
+
+- A message body could forge a record from someone else: a newline in it started a new `[seq] author: body` line in `minosa messages` and a new `author: body` line on the agent's stdin. A body that holds a newline or another non-printable character is now quoted in both lanes; other bodies print unchanged. Quoting over indenting continuation lines, because a model still reads an indented line as a record.
+
+- A drop during the backfills after a reconnect's `sync` left the client disconnected with nothing retrying: the drop found a reconnect in progress, and that reconnect then finished. It now checks the socket before it finishes.
+
 ### Added
 
 - `minosb`, one run's broker on the host, and `minosa`, the shim its container carries. The broker holds the session, the room's cursor and the run's unix socket; the container reaches six operations -- `messages`, `say`, `submit`, `await`, `progress`, `status` -- and no seventh, so it cannot reach a file write or a settings replacement at any credential. On the host rather than in the container: a client inside would speak the whole wire, which answers a 100 MiB `writefile` on the same connection as chat, and would have to be cut back by a capability system that does not exist yet. See [docs/dev/recommended-architecture.md](docs/dev/recommended-architecture.md) and [docs/dev/implementation-plan.md](docs/dev/implementation-plan.md).
@@ -52,7 +70,7 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 - An `OVERVIEW` tab, first in the header bar and where a session opens. It ranks the five projects whose open places had the most said in them in the last seven days, and under the table says what there is and what is waiting on you. Two facts, not one: the `ACTIVE` count is places somebody left open, and the `SAID` rank is what was said lately. A recency-only reading would make a task room go quiet and read as finished while its worker agent is mid-run; an open/closed-only reading would rank a long finished thread above live work.
 
-  `PROJECTS` now opens a project's own page -- its tags, what it holds, then its places -- rather than a bare list of rooms. A place's row carries its scope, its task and what was said in it. `a` shows the closed places. The header bar carries the name, as `gwiki`'s does, so the status line no longer repeats it.
+  `PROJECTS` now opens a project's own page -- its tags, what it holds, then its places -- rather than a bare list of rooms. A place's row carries its scope, its task and what was said in it. ^A shows the closed places; it was `a` with an empty composer, which took the first letter of a message typed in a list and sent the rest to the first room. The header bar carries the name, as `gwiki`'s does, so the status line no longer repeats it.
 
 - Projects: a container of rooms and channels, the object design.md section 7.2 calls a space. It holds no messages and decides no access, so it has no audience and every caller sees every project; a room names the one it is filed under, or none. `project.create`, `project.file` and `project.dissolve` are administrator-only, and `sync` carries `projects`. Names are unique without case, as a permanent room's title is, because a project is named where a room is filed. A transient room is refused: it is discarded when everyone leaves, so filing it would record a place about to stop existing. Dissolving keeps the rooms, filed under none. Schema version 6; wire contract section 12; 8 conformance tests.
 

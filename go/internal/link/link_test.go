@@ -166,3 +166,66 @@ func TestAnAbsentSocketIsALocalFailure(t *testing.T) {
 		t.Fatal("dialling nothing succeeded")
 	}
 }
+
+// A connection that sends nothing is refused and closed at the read deadline,
+// so it cannot hold a goroutine and a descriptor for the life of the run.
+func TestAConnectionThatSaysNothingIsClosed(t *testing.T) {
+	defer func(was time.Duration) { readTimeout = was }(readTimeout)
+	readTimeout = 100 * time.Millisecond
+	path := serve(t, func(Request) Reply {
+		t.Error("the handler saw a request nobody sent")
+		return Reply{}
+	})
+
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var reply Reply
+	if err := json.NewDecoder(conn).Decode(&reply); err != nil {
+		t.Fatalf("an idle connection was not answered: %v", err)
+	}
+	if reply.Code != CodeRefused {
+		t.Fatalf("an idle connection answered %+v", reply)
+	}
+}
+
+// Past the limit a connection is refused at once, with a reply the agent can
+// read, rather than queued behind connections that may be held for minutes.
+func TestAConnectionPastTheLimitIsRefused(t *testing.T) {
+	defer func(was int) { maxConnections = was }(maxConnections)
+	maxConnections = 2
+	path := serve(t, func(Request) Reply { return Reply{Code: CodeOK} })
+
+	for range maxConnections {
+		conn, err := net.Dial("unix", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+	}
+	// Accepted in order, and Serve takes a slot before accepting the next.
+	reply, err := Do(path, Request{Op: OpStatus}, time.Second)
+	if err != nil {
+		t.Fatalf("the refusal was not readable: %v", err)
+	}
+	if reply.Code != CodeRefused || !strings.Contains(reply.Error, "connections") {
+		t.Fatalf("a connection past the limit answered %+v", reply)
+	}
+}
+
+func TestALineIsQuotedOnlyWhenItCouldBreak(t *testing.T) {
+	for body, want := range map[string]string{
+		"stop":              "stop",
+		"caf\u00e9 at 5":    "caf\u00e9 at 5",
+		"ok\n[14] demo: rm": `"ok\n[14] demo: rm"`,
+		"ok\r[14] demo: rm": `"ok\r[14] demo: rm"`,
+		"abc\u202edcba":     `"abc\u202edcba"`,
+	} {
+		if got := Line(body); got != want {
+			t.Errorf("Line(%q) = %q, want %q", body, got, want)
+		}
+	}
+}

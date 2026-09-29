@@ -64,3 +64,15 @@ func TestAUsablePathGoesOnToTheServer(t *testing.T) {
 		t.Fatal("the server was never contacted")
 	}
 }
+
+// The run command gets the broker's environment less the credential.
+func TestTheRunCommandDoesNotInheritTheCredential(t *testing.T) {
+	got := childEnv([]string{
+		"PATH=/bin", "MINOS_PASSWORD=secret", "MINOS_USER=worker",
+		"MINOS_SERVER=http://x", "MINOS_PASSWORD_HINT=kept",
+	})
+	want := []string{"PATH=/bin", "MINOS_SERVER=http://x", "MINOS_PASSWORD_HINT=kept"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("the run command's environment is %q", got)
+	}
+}

@@ -8,6 +8,7 @@ package broker
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -182,6 +183,62 @@ func TestATornRunRefusesToAdvanceOverWhatItLost(t *testing.T) {
 	}
 }
 
+// A run attached to a room with history is owed what the server retains, on
+// request, and nothing on stdin. What the server no longer holds is reported in
+// status, not as a tear: the run never had it to lose.
+func TestARunAttachedToARoomWithHistoryStartsAtWhatIsRetained(t *testing.T) {
+	const retained = 5
+	server := testserver.Start(t, retained)
+	_, developer, _, err := client.Connect(server.Base, "demo", "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(developer.Stop)
+	room, err := developer.OpenRoom([]client.Principal{{Kind: "user", ID: "bob"}}, "Run", "persisted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 10 {
+		say(t, developer, room.ID, fmt.Sprint("earlier ", i))
+	}
+	var end int64
+	waitFor(t, "the history", func() bool {
+		log := developer.Log(room.ID)
+		if len(log) > 0 && log[len(log)-1].Body == "earlier 9" {
+			end = log[len(log)-1].Seq
+			return true
+		}
+		return false
+	})
+
+	worker, err := Open(Config{Server: server.Base, User: "bob", Password: "bob", Room: room.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(worker.Stop)
+
+	if pushed := worker.forPush(); len(pushed) != 0 {
+		t.Fatalf("history went to stdin: %q", pushed)
+	}
+	reply := worker.Handle(link.Request{Op: link.OpMessages})
+	if reply.Code != link.CodeOK || len(reply.Records) != retained {
+		t.Fatalf("messages answered %d with %d records: %+v", reply.Code, len(reply.Records), reply.Records)
+	}
+	if first := reply.Records[0]; first.Seq != end-retained+1 || first.Body != "earlier 5" {
+		t.Fatalf("delivery starts at %+v", first)
+	}
+	status := worker.Handle(link.Request{Op: link.OpStatus}).Status
+	if status.Torn || status.Earlier != end-retained || status.Delivered != end {
+		t.Fatalf("status reads %+v; the room ends at %d", status, end)
+	}
+
+	say(t, developer, room.ID, "now this")
+	waitFor(t, "the new message on stdin", func() bool {
+		pushed := worker.forPush()
+		return len(pushed) == 1 && pushed[0] == "demo: now this"
+	})
+}
+
 func TestProgressNeverPassesWhatWasDelivered(t *testing.T) {
 	run := dispatch(t, config.HistoryLimit, false)
 	say(t, run.developer, run.room, "one")
@@ -195,6 +252,28 @@ func TestProgressNeverPassesWhatWasDelivered(t *testing.T) {
 		t.Fatalf("progress to %d was refused: %s", seq, reply.Error)
 	}
 	waitFor(t, "the cursor", func() bool { return run.worker.Chat().ReadCursor(run.room) == seq })
+}
+
+// -since re-reads what was delivered; it cannot skip ahead of it. Unchecked,
+// it raised the delivered marker past the room's end and progress followed.
+func TestSinceCannotSkipPastWhatWasDelivered(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	say(t, run.developer, run.room, "one")
+	run.drain(t, 1)
+	delivered := run.worker.Handle(link.Request{Op: link.OpStatus}).Status.Delivered
+
+	if reply := run.worker.Handle(link.Request{Op: link.OpMessages, Since: delivered + 1000}); reply.Code != link.CodeRefused {
+		t.Fatalf("messages -since past delivery answered %d: %+v", reply.Code, reply)
+	}
+	if got := run.worker.Handle(link.Request{Op: link.OpStatus}).Status.Delivered; got != delivered {
+		t.Fatalf("delivered moved from %d to %d", delivered, got)
+	}
+
+	// Re-reading from before the marker still works.
+	reply := run.worker.Handle(link.Request{Op: link.OpMessages, Since: delivered - 1})
+	if reply.Code != link.CodeOK || len(reply.Records) != 1 || reply.Records[0].Body != "one" {
+		t.Fatalf("a re-read answered %+v", reply)
+	}
 }
 
 // -- decisions ---------------------------------------------------------------
@@ -259,6 +338,46 @@ func TestAWaitThatRunsOutIsNotADecision(t *testing.T) {
 	reply := run.worker.Handle(link.Request{Op: link.OpAwait, ID: submitted.ID, Timeout: 0.1})
 	if reply.Code != link.CodeOK || reply.State != link.StateTimeout {
 		t.Fatalf("a wait that ran out answered %+v", reply)
+	}
+	// Nor does it leave its waiter behind for a decision that may never come.
+	run.worker.mutex.Lock()
+	left := len(run.worker.waiting[submitted.ID])
+	run.worker.mutex.Unlock()
+	if left != 0 {
+		t.Fatalf("%d waiter(s) outlived their wait", left)
+	}
+}
+
+// A timeout too large for a time.Duration is capped. Unchecked, it overflowed
+// to a negative duration and the wait ended at once.
+func TestAnOversizedTimeoutIsCappedRatherThanEndingAtOnce(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, true)
+	submitted := run.worker.Handle(link.Request{Op: link.OpSubmit, Subject: "wait", Body: "anything"})
+
+	decided := make(chan link.Reply, 1)
+	go func() {
+		decided <- run.worker.Handle(link.Request{Op: link.OpAwait, ID: submitted.ID, Timeout: 1e300})
+	}()
+	select {
+	case reply := <-decided:
+		t.Fatalf("an oversized wait ended at once: %+v", reply)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	waitFor(t, "the developer to see the submission", func() bool {
+		_, queued := run.developer.Queued()[submitted.ID]
+		return queued
+	})
+	if err := run.developer.Approve(submitted.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case reply := <-decided:
+		if reply.State != link.StateApproved {
+			t.Fatalf("await answered %+v", reply)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("await never returned")
 	}
 }
 

@@ -28,17 +28,24 @@ package broker
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"minos/internal/client"
 	"minos/internal/link"
 	"minos/internal/messaging"
 )
 
-// How long await blocks when its caller names no timeout.
-const defaultAwait = 5 * time.Minute
+// How long await blocks when its caller names no timeout, and at most. The
+// ceiling keeps a huge timeout from overflowing time.Duration; a caller that
+// wants longer awaits again.
+const (
+	defaultAwait = 5 * time.Minute
+	maxAwait     = time.Hour
+)
 
 // What marks a relayed message the wire would not take whole.
 const relayCut = "\n\n[cut: the rest is in the run record]"
@@ -87,6 +94,8 @@ type Broker struct {
 	// torn is a gap wider than the server can backfill, and is terminal.
 	torn    bool
 	missing int64
+	// earlier is what the room held before the run could read it.
+	earlier int64
 	// Submissions this broker made, by id, with the last state seen.
 	mine map[string]client.Submission
 	// Callers blocked in await, by submission id.
@@ -138,6 +147,8 @@ func Open(config Config) (*Broker, error) {
 		}
 	}
 
+	b.attach()
+
 	// Both handlers run on the goroutine that applies pushes. Neither blocks,
 	// so a container that never calls `messages` cannot stop the connection
 	// being drained, and a blocked model call cannot stop a decision arriving.
@@ -145,6 +156,25 @@ func Open(config Config) (*Broker, error) {
 	chat.SetGapHandler(b.tear)
 	chat.SetHandlers(b.wake, func(string) {})
 	return b, nil
+}
+
+// attach starts both markers on a room that may have history. The socket
+// starts at the first message the server retains, so a room past its history
+// limit or with archived messages is not a tear. stdin starts at the end: what
+// was said before the run is context the agent asks for, not news.
+func (b *Broker) attach() {
+	log := b.chat.Log(b.config.Room)
+	// Skip the client's own marker for a short backfill: it holds the
+	// sequence of a message that was never fetched.
+	for len(log) > 0 && log[0].Missing > 0 {
+		log = log[1:]
+	}
+	if len(log) == 0 {
+		return
+	}
+	b.earlier = log[0].Seq - 1
+	b.delivered = b.earlier
+	b.pushed = log[len(log)-1].Seq
 }
 
 // Stop releases the session. The container's socket is closed by its owner.
@@ -197,7 +227,7 @@ func (b *Broker) forPush() []string {
 		if message.Author == b.me || message.Kind != "text" {
 			continue
 		}
-		texts = append(texts, fmt.Sprintf("%s: %s", message.Author, message.Body))
+		texts = append(texts, fmt.Sprintf("%s: %s", message.Author, link.Line(message.Body)))
 	}
 
 	b.mutex.Lock()
@@ -213,7 +243,13 @@ func (b *Broker) forPush() []string {
 // run, and a verbose agent must not be able to leave it empty.
 func (b *Broker) relay(text string) error {
 	if len(text) > relayLimit {
-		text = text[:relayLimit-len(relayCut)] + relayCut
+		// On a character boundary: json.Marshal turns each byte of a split
+		// character into 3, and the body would pass the limit it was cut to.
+		end := relayLimit - len(relayCut)
+		for end > 0 && !utf8.RuneStart(text[end]) {
+			end--
+		}
+		text = text[:end] + relayCut
 	}
 	return b.chat.Send(b.config.Room, text)
 }
@@ -286,12 +322,20 @@ func (b *Broker) Handle(request link.Request) link.Reply {
 // worker's own messages are not delivered back to it.
 func (b *Broker) messages(request link.Request) link.Reply {
 	b.mutex.Lock()
-	since := b.delivered
+	since, delivered := b.delivered, b.delivered
 	if request.Since > 0 {
 		since = request.Since
 	}
 	torn, missing := b.torn, b.missing
 	b.mutex.Unlock()
+
+	// A re-read goes back; nothing goes forward past the marker, or delivered
+	// and then progress would record messages never handed over.
+	if since > delivered {
+		return link.Refuse("",
+			"-since %d is past what was delivered, which is %d. Use %d or less, or leave -since out.",
+			since, delivered, delivered)
+	}
 
 	log := b.chat.Log(b.config.Room)
 
@@ -404,10 +448,12 @@ func (b *Broker) await(request link.Request) link.Reply {
 
 	wait := defaultAwait
 	if request.Timeout > 0 {
-		wait = time.Duration(request.Timeout * float64(time.Second))
+		wait = time.Duration(min(request.Timeout, maxAwait.Seconds()) * float64(time.Second))
 	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
+	// A decision removes its waiters; a wait that ends otherwise removes its own.
+	defer b.unwait(request.ID, waiter)
 
 	select {
 	case submission := <-waiter:
@@ -416,6 +462,15 @@ func (b *Broker) await(request link.Request) link.Reply {
 		return link.Reply{Code: link.CodeOK, ID: request.ID, State: link.StateTimeout}
 	case <-b.stopped:
 		return link.Refuse("", "The run is ending, so %s will not be decided here.", request.ID)
+	}
+}
+
+func (b *Broker) unwait(id string, waiter chan client.Submission) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	b.waiting[id] = slices.DeleteFunc(b.waiting[id], func(w chan client.Submission) bool { return w == waiter })
+	if len(b.waiting[id]) == 0 {
+		delete(b.waiting, id)
 	}
 }
 
@@ -445,7 +500,7 @@ func (b *Broker) progress(request link.Request) link.Reply {
 
 func (b *Broker) status() link.Reply {
 	b.mutex.Lock()
-	delivered, torn := b.delivered, b.torn
+	delivered, torn, earlier := b.delivered, b.torn, b.earlier
 	b.mutex.Unlock()
 	return link.Reply{Code: link.CodeOK, Status: &link.Status{
 		Room:      b.config.Room,
@@ -453,6 +508,7 @@ func (b *Broker) status() link.Reply {
 		Window:    b.config.Window,
 		Connected: b.chat.Connected(),
 		Delivered: delivered,
+		Earlier:   earlier,
 		Torn:      torn,
 	}}
 }

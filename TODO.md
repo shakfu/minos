@@ -6,21 +6,7 @@ Items marked `R<n>` come from `REVIEW.md` (2026-09-27, at `30abc37`). See that f
 
 ## High
 
-- [ ] Verify Claude Code's stream-json interrupt frame, then give `broker.Adapter` an `Interrupt` method. Until it is verified the broker holds a mid-turn message and reports `held`; nothing cuts into a turn. The dispatcher can still interrupt by stopping the container, which is layer 4 and needs nothing here.
-
-- [ ] R1. `minosb` passes `MINOS_PASSWORD` to the run command: `exec.Command` leaves `Env` nil (`go/cmd/minosb/main.go:145`). Set `command.Env` without `MINOS_PASSWORD` and `MINOS_USER`, or read the password from a file or descriptor and unset the variable.
-
-- [ ] R7. `a` in `viewRooms`/`viewProject` with an empty composer toggles closed places and selects row 0 (`go/internal/tui/app.go:779-785`). Typing "are you there" sends "re you there" to the first room. Either bind the toggle to a non-text key (`^A`), or disable the composer in list views (also resolves R16's wrong-recipient case and R18.9).
-
-- [ ] R2. A broker attached to a room with more than 200 messages, or with archived messages, tears on the first `messages`: `delivered` starts at 0 (`broker.go:85`, `:322`). The reported missing count is off by one. `pushed` also starts at 0, so `forPush` writes the whole retained history to stdin (`broker.go:182`). Decide what a run attached to an existing room is owed; smallest rule: start both markers at the first log sequence minus 1, report earlier history in `status`. Add a test that opens a broker on a room with history.
-
-- [ ] R3. `relay` cuts at a byte offset (`broker.go:215-217`). A cut inside a multi-byte character makes `json.Marshal` insert U+FFFD, the body exceeds `BodyLimit`, and the server drops the turn. Step back with `utf8.RuneStart`. Add a test with a 3-byte character.
-
-- [ ] R4. A push ahead of the cursor is dropped when another goroutine's repair is in flight (`go/internal/client/protocol.go:680-705`). After waiting, re-evaluate the message against the cursor in `apply`.
-
-- [ ] R5. `Socket.Connect` replaces `s.ws` without closing the old connection; `closing` is per `Socket` (`transport.go:158-194`). A later close of the old connection marks the live one disconnected. Give each connection its own state, close the old one in `Connect`, ignore a close when `ws != s.ws`.
-
-- [ ] R6. A drop during the post-sync backfill leaves nothing reconnecting: `repair` discards its error and `reconnecting` is still set (`protocol.go:427-467`, `:722-725`). After `Sync`, check `socket.Connected()` under the lock that clears `reconnecting`; loop if false.
+- [ ] Decide who sends an interrupt. `claudeAdapter.Interrupt` encodes it; nothing sends it. Measured on Claude Code 2.1.284, one run per case (`scripts/probe-interrupt.sh`): the interrupted turn ends with one `result` (`error_during_execution`, `result: null`), so the relay's turn count holds. A queued user frame then runs as its own turn; with `cancel_queued` it does not, yet `cancelled` came back empty. The CLI exits 1 when its last turn was interrupted, which `minosb` reports as `exited` with code 1. `minosb` has no control input from the dispatcher, so a dispatcher-sent interrupt needs one (a signal, or a line on stdin). Until decided the broker holds and reports `held`.
 
 ## Medium
 
@@ -29,12 +15,6 @@ Items marked `R<n>` come from `REVIEW.md` (2026-09-27, at `30abc37`). See that f
 - [ ] R9. `MarkRead` stores any sequence (`timeline.go:1374`). Clamp to `high_seq` or refuse.
 
 - [ ] R10. A moderator outside a restricted channel's audience can read its queue, approve and publish (`messaging.go:1465-1472`, `:1610`, `:1686-1692`, `:1780-1790`). Decide the rule: refuse ineligible appointments and dismiss on lost eligibility, or state that appointment grants access. Write it in `chat-concepts.md` section 5; add a conformance test.
-
-- [ ] R11. The relay tracks a turn with one boolean (`relay.go:172-198`). Several held frames can each start a turn; `endTurn` writes after releasing the mutex, so a concurrent `Push` can overtake. Count frames written against `result` records; write from one goroutine.
-
-- [ ] R12. The run socket has no read deadline and no connection limit (`link.go:208-218`). Also: a timed-out wait stays in `b.waiting`; `Timeout` can overflow to a negative duration (`broker.go:401-416`). Add a 5 s `SetReadDeadline`, a semaphore in `Serve`, waiter removal on timeout, a `Timeout` ceiling.
-
-- [ ] R13. Unescaped newlines in a body forge records in the shim's text output (`go/cmd/minosa/main.go:232`) and the push lane (`broker.go:200`). Make JSON the default for `messages`, or indent continuation lines in both lanes.
 
 - [ ] R14. `markRead` sends `space.LastSeq`, not the last sequence in the local log (`app.go:2471-2473`). Send the last displayed sequence.
 
@@ -80,7 +60,7 @@ Items marked `R<n>` come from `REVIEW.md` (2026-09-27, at `30abc37`). See that f
 
 - [ ] Docs: README omits `minosb`, `minosa`, `broker`, `link`, `testserver`, `cmd/demo`; `make go` builds 4 binaries, not 2; Tab contradicts itself (lines 53, 157); "Five things" has 6 bullets.
 
-- [ ] Docs: cheatsheet lacks `/projects`, `/project new|tag|untag|file|rm`, `/close`, `/reopen`, `a`, the `[project/]` prefix of `/create`.
+- [ ] Docs: cheatsheet lacks `/projects`, `/project new|tag|untag|file|rm`, `/close`, `/reopen`, ^A, the `[project/]` prefix of `/create`.
 
 - [ ] Docs: diagrams missing. Commit the SVGs or correct `Makefile:53-55`; `agent-container-net.md:17`, `:47` embed absent images.
 

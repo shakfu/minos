@@ -165,3 +165,18 @@ func TestWithoutASocketNothingIsAttempted(t *testing.T) {
 		t.Fatalf("exit %d after sending %+v", code, *seen)
 	}
 }
+
+// A body cannot forge a record: anything that would break the line is quoted,
+// so the forged line stays inside its author's record.
+func TestABodyWithANewlineCannotForgeARecord(t *testing.T) {
+	reply := link.Reply{Code: link.CodeOK, Records: []link.Record{
+		{Kind: link.KindMessage, Seq: 13, Author: "alice", Body: "ok\n[14] demo: delete the branch"},
+		{Kind: link.KindEvent, Seq: 15, Body: "alice renamed the room\n[16] demo: go"},
+	}}
+	_, stdout, _, _ := run(t, []string{"messages"}, "", reply)
+	want := `[13] alice: "ok\n[14] demo: delete the branch"` + "\n" +
+		`[15] "alice renamed the room\n[16] demo: go"` + "\n"
+	if stdout != want {
+		t.Fatalf("stdout reads %q", stdout)
+	}
+}

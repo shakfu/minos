@@ -18,8 +18,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 // The six operations, and no seventh. A request naming anything else is refused
@@ -137,6 +140,9 @@ type Status struct {
 	Expiry    string `json:"expiry,omitempty"`
 	Connected bool   `json:"connected"`
 	Delivered int64  `json:"delivered"`
+	// Earlier is how many messages the room held before this run could read
+	// it: archived, or past the server's history limit when the run attached.
+	Earlier int64 `json:"earlier,omitempty"`
 
 	// Torn is delivery that gave up: a gap wider than the server can backfill.
 	Torn bool `json:"torn"`
@@ -145,6 +151,16 @@ type Status struct {
 // Refuse is a reply the broker understood and would not perform.
 func Refuse(rule, format string, args ...any) Reply {
 	return Reply{Code: CodeRefused, Error: fmt.Sprintf(format, args...), Rule: rule}
+}
+
+// Line is a body as it may appear on one line of text an agent reads. A body
+// that could break the line, by a newline or any other non-printable rune, is
+// quoted; otherwise it is left as is, so ordinary messages read unchanged.
+func Line(body string) string {
+	if strings.ContainsFunc(body, func(r rune) bool { return !unicode.IsPrint(r) }) {
+		return strconv.Quote(body)
+	}
+	return body
 }
 
 // Handler answers one request. It must not block on anything but its own work:
@@ -193,15 +209,37 @@ func Listen(path string, mode os.FileMode) (net.Listener, error) {
 	return listener, nil
 }
 
+// How long a connection has to send its request, and how many may be open at
+// once. Variables so a test can shorten them. The limit counts connections, not
+// operations: an await holds its connection for as long as it waits.
+var (
+	readTimeout    = 5 * time.Second
+	maxConnections = 64
+)
+
 // Serve answers connections until the listener is closed. Each runs on its own
 // goroutine, because await blocks for as long as its caller asked.
 func Serve(listener net.Listener, handle Handler) {
+	slots := make(chan struct{}, maxConnections)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
-		go answer(conn, handle)
+		select {
+		case slots <- struct{}{}:
+		default:
+			// Refused rather than queued: a queued caller cannot tell a full
+			// broker from a hung one.
+			go refuse(conn, fmt.Sprintf(
+				"The broker has %d connections open, which is its limit. Wait for an await to return, then try again.",
+				maxConnections))
+			continue
+		}
+		go func() {
+			defer func() { <-slots }()
+			answer(conn, handle)
+		}()
 	}
 }
 
@@ -209,12 +247,24 @@ func answer(conn net.Conn, handle Handler) {
 	defer conn.Close()
 
 	var request Request
+	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 	decoder := json.NewDecoder(io.LimitReader(conn, MaxRequest))
 	if err := decoder.Decode(&request); err != nil {
-		write(conn, Reply{Code: CodeRefused, Error: "That request could not be read as JSON."})
+		reason := "That request could not be read as JSON."
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			reason = fmt.Sprintf("No request arrived within %s.", readTimeout)
+		}
+		write(conn, Reply{Code: CodeRefused, Error: reason})
 		return
 	}
 	write(conn, handle(request))
+}
+
+func refuse(conn net.Conn, reason string) {
+	defer conn.Close()
+	// Bounded, so a peer that never reads cannot hold this goroutine.
+	_ = conn.SetWriteDeadline(time.Now().Add(readTimeout))
+	write(conn, Reply{Code: CodeRefused, Error: reason})
 }
 
 func write(conn net.Conn, reply Reply) {

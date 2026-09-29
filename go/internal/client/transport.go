@@ -165,8 +165,13 @@ func (s *Socket) Connect() error {
 	ws.SetReadLimit(readLimit)
 
 	s.mutex.Lock()
+	previous := s.ws
 	s.ws, s.closing = ws, false
 	s.mutex.Unlock()
+	// Left open, the old connection's later close would mark this one down.
+	if previous != nil {
+		_ = previous.CloseNow()
+	}
 	go s.read(ws)
 	return nil
 }
@@ -184,8 +189,13 @@ func (s *Socket) read(ws *websocket.Conn) {
 		s.OnFrame(frame)
 	}
 
-	// A close we asked for is not news; one we did not is.
+	// A close we asked for is not news; one we did not is. A replaced
+	// connection's close is neither: `closing` belongs to the current one.
 	s.mutex.Lock()
+	if ws != s.ws {
+		s.mutex.Unlock()
+		return
+	}
 	unexpected := !s.closing
 	s.closing = true
 	s.mutex.Unlock()

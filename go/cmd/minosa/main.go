@@ -57,7 +57,7 @@ func shim(args []string, stdin io.Reader, stdout, stderr io.Writer, do call) int
 	file := set.String("file", "", "read the body from this file")
 	fromStdin := set.Bool("stdin", false, "read the body from stdin")
 	payload := set.String("payload", "", "read a JSON payload from this file")
-	timeout := set.Float64("timeout", 0, "seconds to block in await")
+	timeout := set.Float64("timeout", 0, "seconds to block in await; default 300, at most 3600")
 
 	flags, rest := split(args[1:])
 	if err := set.Parse(flags); err != nil {
@@ -227,9 +227,9 @@ func show(stdout, stderr io.Writer, op string, reply link.Reply, asJSON bool) {
 			case link.KindGap:
 				fmt.Fprintln(stderr, record.Body)
 			case link.KindEvent:
-				fmt.Fprintf(stdout, "[%d] %s\n", record.Seq, record.Body)
+				fmt.Fprintf(stdout, "[%d] %s\n", record.Seq, link.Line(record.Body))
 			default:
-				fmt.Fprintf(stdout, "[%d] %s: %s\n", record.Seq, record.Author, record.Body)
+				fmt.Fprintf(stdout, "[%d] %s: %s\n", record.Seq, record.Author, link.Line(record.Body))
 			}
 		}
 	case link.OpSubmit:

@@ -26,6 +26,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -143,6 +145,7 @@ func run(args []string, stderr io.Writer) int {
 // start runs the agent with its stdio on the broker's pipes.
 func start(run *broker.Broker, adapter broker.Adapter, argv []string) (*exec.Cmd, error) {
 	command := exec.Command(argv[0], argv[1:]...)
+	command.Env = childEnv(os.Environ())
 	// The run command's own notes are a person's to read, not the room's.
 	command.Stderr = os.Stderr
 
@@ -166,6 +169,15 @@ func start(run *broker.Broker, adapter broker.Adapter, argv []string) (*exec.Cmd
 		}
 	}()
 	return command, nil
+}
+
+// childEnv is the broker's environment without the credential. A nil Env
+// would hand the run command the password only the broker may hold.
+func childEnv(environ []string) []string {
+	return slices.DeleteFunc(slices.Clone(environ), func(entry string) bool {
+		name, _, _ := strings.Cut(entry, "=")
+		return name == "MINOS_PASSWORD" || name == "MINOS_USER"
+	})
 }
 
 // wait reports the run command's exit the way a shell does.
