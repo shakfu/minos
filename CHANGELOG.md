@@ -12,6 +12,8 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 ### Fixed
 
+- `minosb` could lose the agent's last turn. It waited on the run command while still reading its stdout, and that wait closes the pipe, so a turn written just before exit went unread and never reached the room: 2 runs in 10 of an agent that answers and exits at once. `exited` is now reported only after stdout is read to its end and relayed.
+
 - An `opened` push for a channel item that had already been archived left a mark behind for a message no longer in the log, and nothing cleared it: `dropThrough` only removes marks at or below what it drops, and this one was already below. Opening an item is answered with a push to the opener as well as a reply, so the two can arrive in either order. The client now records the highest sequence archived out of each space and ignores a mark at or below it.
 
 - `minosb -socket` deleted whatever was at the path, not only an earlier socket: a mistyped `-socket ~/notes.txt` removed the file, and an empty directory there went too. A path holding anything but a socket is now refused.

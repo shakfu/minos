@@ -102,6 +102,8 @@ Each is required and none substitutes for another. An interrupt is not a lane: i
 
 The trace and the cost go to the run record, not the room. The room carries whole replies, which is what a person reads and what a cursor can mark.
 
+**The run command delivers the first turn.** The broker starts the run inside a turn and writes nothing to stdin until the agent's stream ends one. The run command must therefore give the agent its task as the first stdin frame, then pass the broker's stdin through. In a dispatch that command is `sanduk run`. A command that waits on stdin for its task never starts: the broker waits for a turn to end, and the agent waits for input. The README's hand-run example shows the wrapper.
+
 ## 6. Authority, in four layers
 
 Ordered by what each survives.

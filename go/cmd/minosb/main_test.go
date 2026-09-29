@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,7 +13,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"minos/internal/client"
 	"minos/internal/testserver"
 )
 
@@ -74,5 +77,56 @@ func TestTheRunCommandDoesNotInheritTheCredential(t *testing.T) {
 	want := []string{"PATH=/bin", "MINOS_SERVER=http://x", "MINOS_PASSWORD_HINT=kept"}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("the run command's environment is %q", got)
+	}
+}
+
+// An agent that ends its last turn and exits at once still has that turn
+// relayed. Wait closes the stdout pipe, so reading must finish before it.
+func TestTheLastTurnIsRelayedWhenTheAgentExitsAtOnce(t *testing.T) {
+	server := testserver.Start(t, 200)
+	_, developer, _, err := client.Connect(server.Base, "demo", "demo")
+	if err != nil {
+		t.Fatalf("the developer cannot connect: %v", err)
+	}
+	t.Cleanup(developer.Stop)
+	room, err := developer.OpenRoom([]client.Principal{{Kind: "user", ID: "bob"}}, "Run", "persisted")
+	if err != nil {
+		t.Fatalf("cannot open the run's room: %v", err)
+	}
+	t.Setenv("MINOS_PASSWORD", "bob")
+
+	// One run loses its turn about one time in five, so repeat.
+	const runs = 20
+	for n := range runs {
+		record := fmt.Sprintf(`{"type":"result","result":"final %d"}`, n)
+		var stderr bytes.Buffer
+		code := run([]string{
+			"-server", server.Base, "-user", "bob", "-room", room.ID,
+			"-socket", testserver.SocketPath(t), "--", "/bin/echo", record,
+		}, &stderr)
+		if code != 0 {
+			t.Fatalf("run %d exited %d: %s", n, code, stderr.String())
+		}
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		relayed := map[string]bool{}
+		for _, message := range developer.Log(room.ID) {
+			relayed[message.Body] = true
+		}
+		var missing []string
+		for n := range runs {
+			if body := fmt.Sprintf("final %d", n); !relayed[body] {
+				missing = append(missing, body)
+			}
+		}
+		if len(missing) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("never relayed: %v", missing)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

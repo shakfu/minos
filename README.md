@@ -136,13 +136,27 @@ The server does not need `dist/`. If it is empty, the server warns and serves th
 
 ### A container run, by hand
 
+The broker treats the run as mid-turn from the start: it pushes nothing until the agent ends a turn. So the run command must give the agent its task. In a real dispatch that command is `sanduk run`. By hand, send the task as the first stdin frame:
+
+```sh
+#!/bin/sh
+# agent.sh: the task as the first frame, then whatever the broker pushes.
+TASK='{"type":"user","message":{"role":"user","content":"Reply to each message in one sentence."}}'
+{ printf '%s\n' "$TASK"; cat; } | exec claude -p --input-format stream-json --output-format stream-json --verbose
+```
+
 ```text
-MINOS_PASSWORD=worker ./go/minosb -user worker -room <id> [-channel <id>] -socket /tmp/run/run.sock \
-    -- claude -p --input-format stream-json --output-format stream-json --verbose
+MINOS_PASSWORD=worker ./go/minosb -user worker -room <id> [-channel <id>] -socket /tmp/run/run.sock -- ./agent.sh
 MINOS_SOCKET=/tmp/run/run.sock ./go/minosa messages
 ```
 
-`demo` must first invite `worker` to the room. Without `-channel`, `submit` is refused. In a real dispatch the command after `--` is `sanduk run`.
+Before starting the broker:
+
+- `demo` must invite `worker` to the room.
+
+- Without `-channel`, `submit` is refused.
+
+- A channel with no moderators refuses submissions. Use `/channel appoint <channel> demo`.
 
 | `minosa` | Does |
 |-|-|

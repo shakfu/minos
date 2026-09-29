@@ -112,10 +112,14 @@ func run(args []string, stderr io.Writer) int {
 		if err != nil {
 			return fail(stderr, "%v", err)
 		}
-		if command, err = start(run, adapter, argv); err != nil {
+		var drained <-chan struct{}
+		if command, drained, err = start(run, adapter, argv); err != nil {
 			return fail(stderr, "%v", err)
 		}
-		go func() { done <- wait(command) }()
+		go func() {
+			<-drained
+			done <- wait(command)
+		}()
 	}
 
 	signals := make(chan os.Signal, 1)
@@ -142,8 +146,10 @@ func run(args []string, stderr io.Writer) int {
 	}
 }
 
-// start runs the agent with its stdio on the broker's pipes.
-func start(run *broker.Broker, adapter broker.Adapter, argv []string) (*exec.Cmd, error) {
+// start runs the agent with its stdio on the broker's pipes. The channel
+// closes once stdout is read and relayed; Wait closes the pipe, so it must
+// not run before then or the last turn is lost.
+func start(run *broker.Broker, adapter broker.Adapter, argv []string) (*exec.Cmd, <-chan struct{}, error) {
 	command := exec.Command(argv[0], argv[1:]...)
 	command.Env = childEnv(os.Environ())
 	// The run command's own notes are a person's to read, not the room's.
@@ -151,24 +157,26 @@ func start(run *broker.Broker, adapter broker.Adapter, argv []string) (*exec.Cmd
 
 	stdin, err := command.StdinPipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	stdout, err := command.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := command.Start(); err != nil {
-		return nil, fmt.Errorf("cannot start %s: %w", argv[0], err)
+		return nil, nil, fmt.Errorf("cannot start %s: %w", argv[0], err)
 	}
 
 	relay := broker.NewRelay(run, adapter, stdin, report)
 	go relay.Deliver()
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		if err := relay.Read(stdout); err != nil {
 			report(map[string]any{"event": "unread", "error": err.Error()})
 		}
 	}()
-	return command, nil
+	return command, drained, nil
 }
 
 // childEnv is the broker's environment without the credential. A nil Env
