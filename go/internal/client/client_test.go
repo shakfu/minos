@@ -6,6 +6,8 @@ package client
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
@@ -201,6 +203,32 @@ func TestAPushDuringAnotherBackfillIsNotLost(t *testing.T) {
 	waitFor(t, "four after the backfill", func() bool {
 		return slices.Equal(bodies(alice.Log(room.ID)), []string{"one", "two", "three", "four"})
 	})
+}
+
+// What may be marked read is what the log holds, not what the server says the
+// room reached: lastSeq can run ahead of a message not yet applied. Archived
+// messages count, as nothing can show them in the log any more.
+func TestShownThroughIsTheLogNotTheRoomsEnd(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	room := pair(t, demo)
+	send(t, demo, room.ID, "one", "two")
+	waitFor(t, "two messages", func() bool { return len(alice.Log(room.ID)) == 2 })
+	last := alice.Log(room.ID)[1].Seq
+
+	alice.mutex.Lock()
+	ahead := alice.rooms[room.ID]
+	ahead.LastSeq = last + 5
+	alice.rooms[room.ID] = ahead
+	alice.mutex.Unlock()
+	if got := alice.ShownThrough(room.ID); got != last {
+		t.Fatalf("shown through %d; the log ends at %d", got, last)
+	}
+
+	alice.dropThrough(room.ID, last)
+	if got := alice.ShownThrough(room.ID); got != last {
+		t.Fatalf("after archival, shown through %d; archived through %d", got, last)
+	}
 }
 
 // -- the model, through the client -------------------------------------------
@@ -652,5 +680,38 @@ func TestAShortfallIsReportedToAHandlerAsWellAsToTheLog(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("the shortfall was not reported to the handler")
+	}
+}
+
+// A refusal body is printed on the user's terminal, and a proxy's error page
+// can carry anything: control characters are replaced and the length capped.
+func TestAnHTTPErrorBodyIsMadeSafeToPrint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("\x1b[2Jbad gateway\r\n" + strings.Repeat("x", 1000)))
+	}))
+	defer server.Close()
+
+	_, err := NewHTTP(server.URL).Login("demo", "demo")
+	if err == nil {
+		t.Fatal("a 502 was not an error")
+	}
+	text := err.Error()
+	if strings.ContainsAny(text, "\x1b\r\n") || len(text) > 300 || !strings.Contains(text, "bad gateway") {
+		t.Fatalf("the error reads %q", text)
+	}
+}
+
+func TestLastAtIsTheNewestMessage(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo := connect(t, server.Base, "demo")
+	room := pair(t, demo)
+	if _, ok := demo.LastAt(room.ID); ok {
+		t.Fatal("an empty room has a last message")
+	}
+	send(t, demo, room.ID, "one", "two")
+	waitFor(t, "two messages", func() bool { return len(demo.Log(room.ID)) == 2 })
+	if at, ok := demo.LastAt(room.ID); !ok || at != demo.Log(room.ID)[1].At {
+		t.Fatalf("last at %v, %v", at, ok)
 	}
 }

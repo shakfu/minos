@@ -61,7 +61,7 @@ func TestEligibilityIsReReadRatherThanSnapshotted(t *testing.T) {
 	// No groups is an open channel, not a closed one.
 	reply := demo.Call("channel.revoke", "channel", systemChannel, "group", ops["id"])
 	same(t, obj(reply["channel"])["restrictedTo"], []any{})
-	same(t, sorted(obj(reply["channel"])["audience"]), []string{"alice", "bob", "demo"})
+	same(t, sorted(obj(reply["channel"])["audience"]), []string{"alice", "bob", "demo", "worker"})
 	truth(t, channelOf(bob) != nil, "bob does not see the reopened channel")
 }
 

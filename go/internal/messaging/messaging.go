@@ -23,6 +23,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"minos/internal/timeline"
 )
@@ -94,6 +95,11 @@ type Messaging struct {
 	store   *timeline.Timeline
 	deliver Deliver
 	roster  func() []string
+
+	// naming is held from checking a permanent name to writing it, so two
+	// creates cannot both find it free. A lock over a unique index, because a
+	// database that already holds duplicates would then refuse to open.
+	naming sync.Mutex
 }
 
 func New(store *timeline.Timeline, deliver Deliver, roster func() []string) *Messaging {
@@ -231,6 +237,9 @@ type EnterReply struct {
 	Ok        bool   `json:"ok"`
 	Occupancy string `json:"occupancy"`
 	Room      string `json:"room"`
+	// The user's occupancies elsewhere that entering released, for the
+	// transport's bookkeeping; not on the wire.
+	Released []string `json:"-"`
 }
 
 type ReadReply struct {
@@ -492,6 +501,8 @@ func (m *Messaging) CreateRoom(
 	if err != nil {
 		return nil, err
 	}
+	m.naming.Lock()
+	defer m.naming.Unlock()
 	if err := m.nameIsFree(title, timeline.RoomKind, filed.Project); err != nil {
 		return nil, err
 	}
@@ -793,11 +804,13 @@ func (m *Messaging) Enter(username, roomID string) (*EnterReply, error) {
 	if err != nil {
 		return nil, err
 	}
+	var released []string
 	for _, held := range m.store.OccupanciesElsewhere(username, roomID) {
 		left, err := m.store.Exit(held)
 		if err != nil {
 			return nil, err
 		}
+		released = append(released, held)
 		if left == "" {
 			continue
 		}
@@ -820,7 +833,7 @@ func (m *Messaging) Enter(username, roomID string) (*EnterReply, error) {
 		return nil, err
 	}
 	m.announceRoom(updated, nil)
-	return &EnterReply{Ok: true, Occupancy: occupancy, Room: room.ID}, nil
+	return &EnterReply{Ok: true, Occupancy: occupancy, Room: room.ID, Released: released}, nil
 }
 
 // Exit gives up a place. Starts the countdown if it was the last one.
@@ -848,6 +861,9 @@ func (m *Messaging) Sweep() ([]string, error) {
 		return nil, err
 	}
 
+	// One room's failure is reported, not a reason to leave the rest, or the
+	// archive pass, for the next sweep.
+	var failed []error
 	gone := make([]string, 0, len(expired))
 	for _, roomID := range expired {
 		var audience []string
@@ -856,7 +872,8 @@ func (m *Messaging) Sweep() ([]string, error) {
 		}
 		deleted, err := m.store.DeleteExpired(roomID)
 		if err != nil {
-			return gone, err
+			failed = append(failed, fmt.Errorf("cannot delete %s: %w", roomID, err))
+			continue
 		}
 		if !deleted {
 			continue // entered since it was listed
@@ -864,7 +881,7 @@ func (m *Messaging) Sweep() ([]string, error) {
 		m.deliver(audience, roomGoneEvent{Type: RoomGonePush, Room: roomID})
 		gone = append(gone, roomID)
 	}
-	return gone, m.archiveAged()
+	return gone, errors.Join(append(failed, m.archiveAged())...)
 }
 
 // archiveAged moves each archiving room's aged messages out, and tells its
@@ -874,21 +891,24 @@ func (m *Messaging) archiveAged() error {
 	if err != nil {
 		return err
 	}
+	var failed []error
 	for _, roomID := range archiving {
 		through, err := m.store.ArchiveAged(roomID)
 		if err != nil {
-			return err
+			failed = append(failed, fmt.Errorf("cannot archive %s: %w", roomID, err))
+			continue
 		}
 		if through == 0 {
 			continue
 		}
 		audience, err := m.store.Audience(roomID)
 		if err != nil {
-			return err
+			failed = append(failed, err)
+			continue
 		}
 		m.deliver(audience, archivedEvent{Type: ArchivedPush, Room: roomID, Through: through})
 	}
-	return nil
+	return errors.Join(failed...)
 }
 
 // -- read state --------------------------------------------------------------
@@ -901,6 +921,9 @@ func (m *Messaging) MarkRead(username, roomID string, seq int64) (*ReadReply, er
 	if room.Kind == timeline.ChannelKind {
 		// Items opened in any order are not something one cursor can record.
 		return nil, refuse("A channel's items are opened, not read")
+	}
+	if seq > room.LastSeq {
+		return nil, refuse("Message %d does not exist yet; this room ends at %d", seq, room.LastSeq)
 	}
 	if err := m.store.MarkRead(roomID, username, seq); err != nil {
 		return nil, err
@@ -1202,6 +1225,8 @@ func (m *Messaging) FileRoom(
 	}
 	// Moving it somewhere its name is taken would make two rooms answer to one
 	// qualified name.
+	m.naming.Lock()
+	defer m.naming.Unlock()
 	if room.Authority == timeline.Admin && projectID != room.Project {
 		if err := m.nameIsFree(room.Title, room.Kind, projectID); err != nil {
 			return nil, err
@@ -1330,7 +1355,13 @@ func (m *Messaging) SetState(
 		if state == timeline.StateOpen {
 			what = "reopened"
 		}
-		m.PostEventQuietly(roomID, fmt.Sprintf("%s %s this room", username, what), nil)
+		// Pushed like any message; with no audience every client would fetch
+		// it through history on seeing lastSeq move.
+		audience, err := m.store.Audience(roomID)
+		if err != nil {
+			return nil, err
+		}
+		m.PostEventQuietly(roomID, fmt.Sprintf("%s %s this room", username, what), audience)
 	}
 	updated, err := m.store.Room(roomID)
 	if err != nil {
@@ -1413,6 +1444,8 @@ func (m *Messaging) CreateChannel(
 	if err != nil {
 		return nil, err
 	}
+	m.naming.Lock()
+	defer m.naming.Unlock()
 	if err := m.nameIsFree(title, timeline.ChannelKind, filed.Project); err != nil {
 		return nil, err
 	}
@@ -1466,7 +1499,7 @@ func (m *Messaging) PublishMessage(
 		if channel == nil || len(channel.Moderators) == 0 {
 			return nil, refuse("Only an administrator may do that")
 		}
-		if requireModerator(channel, username) != nil {
+		if m.requireModerator(channel, username) != nil {
 			return nil, refuse("Only an administrator or a moderator may do that")
 		}
 	}
@@ -1610,6 +1643,15 @@ func (m *Messaging) Appoint(isAdmin bool, channelID, username string) (*ChannelR
 	if !m.known(username) {
 		return nil, refuse("No such user: %s", username)
 	}
+	// The audience rule is the channel's access control; the queue must not be
+	// a way around it.
+	eligible, err := m.store.Eligible(channelID, username)
+	if err != nil {
+		return nil, err
+	}
+	if !eligible {
+		return nil, refuse("%s is not in that channel's audience", username)
+	}
 	if _, err := m.store.Appoint(channelID, username); err != nil {
 		return nil, err
 	}
@@ -1661,7 +1703,11 @@ func (m *Messaging) Submit(username, channelID, subject, body string) (*timeline
 	if err != nil {
 		return nil, err
 	}
-	if len(channel.Moderators) == 0 {
+	moderators, err := m.moderators(channel)
+	if err != nil {
+		return nil, err
+	}
+	if len(moderators) == 0 {
 		return nil, refuse("That channel accepts no submissions")
 	}
 	subject, body, err = content(subject, body)
@@ -1677,7 +1723,7 @@ func (m *Messaging) Submit(username, channelID, subject, body string) (*timeline
 		// The last moderator was dismissed after the check above.
 		return nil, refuse("That channel accepts no submissions")
 	}
-	m.deliver(channel.Moderators, submissionEvent{Type: SubmissionPush, Submission: submission})
+	m.deliver(moderators, submissionEvent{Type: SubmissionPush, Submission: submission})
 	return submission, nil
 }
 
@@ -1687,7 +1733,7 @@ func (m *Messaging) Queue(username, channelID string) (*QueueReply, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := requireModerator(channel, username); err != nil {
+	if err := m.requireModerator(channel, username); err != nil {
 		return nil, err
 	}
 	queue, err := m.store.Queue(channelID)
@@ -1713,7 +1759,7 @@ func (m *Messaging) Approve(username, submissionID string) (*SendReply, error) {
 	}
 	m.deliver(channel.Audience, messageEvent{Type: MessagePush, Message: message})
 	submission.State = timeline.Approved
-	m.announceSubmission(submission, channel.Moderators)
+	m.announceSubmission(submission, m.moderatorsOrNone(channel))
 	return &SendReply{Ok: true, Seq: message.Seq}, nil
 }
 
@@ -1741,7 +1787,7 @@ func (m *Messaging) Reject(username, submissionID, comment string) (*Ok, error) 
 		return nil, refuse("That submission has been decided")
 	}
 	submission.State, submission.Comment = timeline.Rejected, note
-	m.announceSubmission(submission, channel.Moderators)
+	m.announceSubmission(submission, m.moderatorsOrNone(channel))
 	return &Ok{Ok: true}, nil
 }
 
@@ -1781,7 +1827,7 @@ func (m *Messaging) pendingFor(
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := requireModerator(channel, username); err != nil {
+	if err := m.requireModerator(channel, username); err != nil {
 		return nil, nil, err
 	}
 	if submission.State != timeline.Pending {
@@ -1791,15 +1837,48 @@ func (m *Messaging) pendingFor(
 }
 
 // requireModerator refuses anyone the channel has not appointed, administrators
-// included. Whether a channel takes submissions is whether it has moderators, so
-// an implicit one would make every channel take them.
-func requireModerator(channel *timeline.Room, username string) error {
+// included, and an appointee outside the audience. Whether a channel takes
+// submissions is whether it has moderators, so an implicit one would make every
+// channel take them.
+func (m *Messaging) requireModerator(channel *timeline.Room, username string) error {
+	if !slices.Contains(channel.Moderators, username) {
+		return refuse("Only a moderator may do that")
+	}
+	eligible, err := m.store.Eligible(channel.ID, username)
+	if err != nil {
+		return err
+	}
+	if !eligible {
+		return refuse("Only a moderator may do that")
+	}
+	return nil
+}
+
+// moderators is the appointees who may act now: those in the audience.
+// Eligibility is re-read here, as it is for delivery to a subscriber, so one
+// who leaves the audience keeps the appointment and regains it on return.
+func (m *Messaging) moderators(channel *timeline.Room) ([]string, error) {
+	var acting []string
 	for _, moderator := range channel.Moderators {
-		if moderator == username {
-			return nil
+		eligible, err := m.store.Eligible(channel.ID, moderator)
+		if err != nil {
+			return nil, err
+		}
+		if eligible {
+			acting = append(acting, moderator)
 		}
 	}
-	return refuse("Only a moderator may do that")
+	return acting, nil
+}
+
+// moderatorsOrNone is moderators for a push, where a failed read leaves the
+// author alone told rather than failing a decision already stored.
+func (m *Messaging) moderatorsOrNone(channel *timeline.Room) []string {
+	acting, err := m.moderators(channel)
+	if err != nil {
+		return nil
+	}
+	return acting
 }
 
 // announceSubmission tells a submission's author where it stands, and the

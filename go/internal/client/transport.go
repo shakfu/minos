@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/coder/websocket"
 )
@@ -94,9 +95,31 @@ func (h *HTTP) request(method, path string, payload any) (json.RawMessage, error
 		if json.Unmarshal(raw, &refusal) == nil && refusal.Error != "" {
 			detail = refusal.Error
 		}
-		return nil, &TransportError{fmt.Sprintf("%d: %s", response.StatusCode, detail)}
+		return nil, &TransportError{fmt.Sprintf("%d: %s", response.StatusCode, printable(detail))}
 	}
 	return raw, nil
+}
+
+// How much of an error body is worth printing.
+const detailLimit = 200
+
+// printable is a server's text as one line safe for a terminal: whatever
+// answered, a proxy included, may send control sequences.
+func printable(text string) string {
+	text = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
+			return ' '
+		case !unicode.IsPrint(r):
+			return '?'
+		}
+		return r
+	}, text)
+	text = strings.Join(strings.Fields(text), " ")
+	if runes := []rune(text); len(runes) > detailLimit {
+		text = string(runes[:detailLimit]) + "..."
+	}
+	return text
 }
 
 func (h *HTTP) Login(username, password string) (Profile, error) {

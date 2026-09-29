@@ -1419,6 +1419,30 @@ func (c *Client) Log(space string) []Message {
 	return slices.Clone(c.log[space])
 }
 
+// LastAt is when the newest message in a space's log was said, without
+// copying the log: lists ask it of every space on every draw.
+func (c *Client) LastAt(space string) (float64, bool) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	log := c.log[space]
+	if len(log) == 0 {
+		return 0, false
+	}
+	return log[len(log)-1].At, true
+}
+
+// ShownThrough is the highest sequence the log holds or archival removed from
+// it: what a reader can have seen. A room's LastSeq can be ahead of it.
+func (c *Client) ShownThrough(space string) int64 {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	through := c.archived[space]
+	if log := c.log[space]; len(log) > 0 {
+		through = max(through, log[len(log)-1].Seq)
+	}
+	return through
+}
+
 func (c *Client) ReadCursor(space string) int64 {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()

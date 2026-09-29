@@ -2,7 +2,7 @@
 
 A conversation server in Go, a terminal client, and a frozen wire contract between them.
 
-All three live in `go/`: the server `minosd`, the terminal client `minos`, and `go/conformance/`, which holds the server to [docs/wire-contract.md](docs/wire-contract.md) over HTTP and a websocket alone.
+All of it lives in `go/`: the server `minosd`, the terminal client `minos`, and `go/conformance/`, which holds the server to [docs/wire-contract.md](docs/wire-contract.md) over HTTP and a websocket alone. `minosb` and `minosa` connect an agent in a container to one room; see [Container runs](#container-runs).
 
 It started as the [OS.js](https://www.os-js.org) v3 client against a Python server that reimplements the contract OS.js expects. Both front ends and the Python server have been removed since. The server still speaks the OS.js wire format -- route shapes, `osjs/*` websocket message names, and the `osjs:` mountpoint are all kept as-is, which is what lets a front end be replaced without touching the server.
 
@@ -17,7 +17,7 @@ make tui   # the terminal client, in another shell
 
 Go 1.25 or newer builds both. There is no other toolchain.
 
-Log in as `demo` / `demo`. There are also `alice` and `bob`, with passwords to match; a conversation needs two of them, so run `make tui` again in a third shell and log in as another. `demo` is the only administrator, which is what lets it found a permanent room or manage a group.
+Log in as `demo` / `demo`. There are also `alice` and `bob`, with passwords to match, and `worker`, which container runs speak as; a conversation needs two of them, so run `make tui` again in a third shell and log in as another. `demo` is the only administrator, which is what lets it found a permanent room or manage a group.
 
 The server does not need a browser build. It warns and serves the API alone if `dist/` is empty, because the terminal client needs the routes and the websocket rather than a bundle.
 
@@ -30,8 +30,10 @@ make demo # the audience rule, narrated, against a server of its own
 It launches a server on a database of its own and drives three real websockets, so it neither needs nor disturbs anything you have running.
 
 ```text
-make test         # go test ./..., the wire contract included
+make test         # go test -race ./..., the wire contract included
 make conformance  # the wire contract alone
+make cover        # the server's coverage under the wire contract
+make container    # the shim in a real container; needs docker
 ```
 
 `go/conformance/` talks to a server over HTTP and a websocket and imports none of its code; `isolation_test.go` enforces that. `MINOS_CONFORMANCE_CMD` names the server binary to launch, and the suite builds `cmd/minosd` itself when it is unset. `MINOS_CONFORMANCE_URL` points it at a server already running.
@@ -40,21 +42,31 @@ make conformance  # the wire contract alone
 
 ```text
 make serve                                # the server
-make go                                   # build go/minosd and go/minos
+make go                                   # build go/minosd, go/minos, go/minosb, go/minosa
 ./go/minos -user alice -password alice    # a client, logged in; make tui prompts instead
 ```
 
-The accounts are `demo`, `alice` and `bob`, each with its name as the password. Only `demo` is an administrator. `<who>` is a username, or `@name` for a group.
+The accounts are `demo`, `alice`, `bob` and `worker`, each with its name as the password. `worker` is what a container run speaks as. Only `demo` is an administrator. `<who>` is a username, or `@name` for a group.
+
+| Variable | Read by | Is |
+|-|-|-|
+| `MINOS_SERVER` | `minos`, `minosb` | The server's base URL. Default `http://127.0.0.1:8000`. |
+| `MINOS_USER` | `minos`, `minosb` | The account, in place of `-user`. |
+| `MINOS_PASSWORD` | `minos`, `minosb` | The password. `minos` falls back to a prompt; `minosb` takes it from here alone. |
+| `MINOS_SOCKET` | `minosa` | The run's socket, in place of `-socket`. |
+| `MINOS_TIMELINE_DB` | `minosd` | The database file. Default `timeline.db` under `MINOS_RUN`. |
+
+The server's other settings are in [wire-contract.md](docs/wire-contract.md), section 1.
 
 ### Keys
 
 | Key | Does |
 |-|-|
-| Tab, S-Tab (or ^N, ^P) | Next or previous room, channel or person. Not while you are in a room. |
+| Tab, S-Tab (or ^N, ^P) | Next or previous tab. Not while you are in a room. |
 | Enter | Send what is typed. On a room: go in, and the screen becomes that room. On a person: raise a room with them. On a channel item, with nothing typed: open it, or close it. |
-| Up, Down | Move through a channel's items. |
+| Up, Down | Move through a list's rows, or a channel's items. |
 | PgUp, PgDn | Scroll the pane. |
-| Esc | Close help or archive results. |
+| Esc | Back one level, or close archive results. |
 | ^A | In a list of places: show or hide the closed ones. |
 | ^U | Clear the composer. |
 | ^C, or ^D on an empty line | Quit. |
@@ -65,12 +77,24 @@ The accounts are `demo`, `alice` and `bob`, each with its name as the password. 
 |-|-|
 | `/open <who>...` | Raise a room, kept. |
 | `/meet <who>...` | Raise a room that is deleted two minutes after everyone leaves. |
-| `/create <title>` | Found a permanent, named room. Admin. |
+| `/create [project/]<title>` | Found a permanent, named room, optionally under a project. Admin. |
 | `/invite <who>` | Admit a user or group. Admin only in a permanent room. |
 | `/uninvite <who>` | Withdraw that grant. |
 | `/exit` | Step out of this room, keeping your place in it. |
 | `/leave` | Give up your own place in this room. |
-| `/rooms`, `/people`, `/groups` | List what there is. |
+| `/rooms`, `/people`, `/groups`, `/projects` | List what there is. |
+| `/close [room]`, `/reopen [room]` | Say whether the work in a place is done. Whoever may invite. |
+
+A `<room>` outside the project on screen is written `project/<title>`.
+
+### Projects
+
+| Command | Does |
+|-|-|
+| `/project new <name> [#tag]...` | Found a project. Admin. |
+| `/project tag\|untag <name> <tag>` | Classify a project. Admin. |
+| `/project file <room> [name] [task]` | File a room under a project, or under none; with a task, its scope is that task. Admin. |
+| `/project rm <name>` | Dissolve a project. Its rooms survive, unfiled. Admin. |
 
 ### Channels
 
@@ -116,11 +140,12 @@ A `<channel>` is one word: its name with `_` for each space, its id, or the star
 |-|-|
 | `docs/dev/chat-concepts.md` | The model: what a room, group and channel are. Front-end independent. |
 | `docs/` | The wire contract, and development notes under `docs/dev/`. |
-| `docs/media/` | Diagrams, and the d2 sources `make diagrams` builds them from. |
+| `docs/media/` | d2 sources for two diagrams of the superseded container design. `make diagrams` renders them. |
 | `go/` | The server, the terminal client, the conformance suite and the demo. One module. |
 | `dist/` | What the `osjs:` mountpoint serves. Optional, and nothing in the tree builds it. |
 | `vfs/` | User home directories. Generated. |
 | `.run/` | The timeline database. Generated. |
+| `scripts/` | Probes run by hand: `probe-interrupt.sh` checks what Claude Code does after an interrupt. |
 | `TODO.md` | Known work not done. |
 
 ## The server
@@ -153,7 +178,7 @@ Two things worth knowing:
 | `go/internal/tui` | The interface: header bar, list screens, one conversation, composer, commands. |
 | `go/cmd/minos` | Flags, the login prompt, and handing the terminal to the interface. |
 
-Five things worth knowing:
+Six things worth knowing:
 
 - **The interface is a header bar over four tables, and Enter goes one level in.** `OVERVIEW` is where the work is: the five projects whose open places have the most said in them lately, and under that what is waiting on you. `PROJECTS` lists every project; Enter on one opens its page, which is what it holds and then its places. `ROOMS` is the same table of places over everything, for one whose project you do not know or that has none. `PEOPLE` is the roster, where Enter raises a room. Tab and Shift-Tab move between tabs, Up and Down move the cursor, Enter goes one level in and Esc one level out.
 
@@ -166,6 +191,32 @@ Five things worth knowing:
 - **A dropped connection comes back.** The client logs in again with backoff, syncs, backfills from its cursors, and enters again the room it was in.
 
 - **The socket reader never blocks.** Repairing a gap means making a request, and a request waits on the reader -- doing it there would deadlock the client against itself. Pushes go to a queue that a separate goroutine drains.
+
+## Container runs
+
+One run is an agent in a container, speaking in one room. The container holds a shim and nothing else; the credential, the conversation and the cursor stay on the host. The design is [recommended-architecture.md](docs/dev/recommended-architecture.md) and its build order is [implementation-plan.md](docs/dev/implementation-plan.md).
+
+| Path | Contents |
+|-|-|
+| `go/cmd/minosb` | One run's broker, on the host: logs in, holds the room, answers the run's socket, and owns the agent's stdin and stdout. Control events go to stdout as JSON lines. |
+| `go/cmd/minosa` | The shim in the container: six operations over the socket, one request each. Static, and imports nothing from the client. |
+| `go/internal/broker` | The six operations, delivery with its tear rule, and the relay of each turn to and from the agent's stream. |
+| `go/internal/link` | The socket: its framing, its refusals, and its limits. |
+
+```text
+MINOS_PASSWORD=worker ./go/minosb -user worker -room <id> -socket /tmp/run/run.sock -- claude -p --input-format stream-json --output-format stream-json --verbose
+MINOS_SOCKET=/tmp/run/run.sock ./go/minosa messages
+```
+
+Not built yet: grants, an author kind, a worker account and the container dispatch itself. `TODO.md` carries them.
+
+## Testing
+
+| Path | Contents |
+|-|-|
+| `go/conformance` | The wire contract, against a server process. Imports none of the server. |
+| `go/internal/testserver` | A whole server in process, for tests that need a real socket. `Restart` reopens it on the same database. |
+| `go/cmd/demo` | `make demo`: the audience rule, narrated against a server of its own. |
 
 ## API
 

@@ -10,6 +10,10 @@ the fact that forced it.
 
 Phase and item numbers match the recommendation's section 12.
 
+Status, for the items in `minos`: 1, 2 and 4 are built, and 5, 6, 7, 8 and 13 are not. Item 4's interrupt is encoded but not sent; `TODO.md` says why. Items in `pma` and `sanduk` are tracked there.
+
+A submission's third terminal state is named `expired` throughout. It is distinct from `timeout`, which `await` answers when a wait runs out and nothing was decided.
+
 ## 1. Where the work lands
 
 Three repositories, three languages. Nothing in the design is one repository's

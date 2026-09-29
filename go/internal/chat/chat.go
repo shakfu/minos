@@ -40,8 +40,9 @@ type Handler struct {
 	registry *socket.Registry
 	settings config.Config
 
-	// Connection -> the occupancies it holds. A connection can be in more than
-	// one room at once, and all of them are released together when it goes away.
+	// Connection -> the occupancies it holds, all released together when it
+	// goes away. A user is in one room at a time: entering one releases their
+	// places elsewhere, on every connection, and those are dropped here too.
 	mutex       sync.Mutex
 	occupancies map[*socket.Connection]map[string]bool
 
@@ -266,17 +267,25 @@ func (h *Handler) run(
 		return h.service.Tag(isAdmin, text(fields, "project"), text(fields, "tag"), true)
 
 	case "project.file":
+		if roomID(fields) == config.SystemChannel {
+			return nil, &messaging.Refusal{Message: "system belongs to no project"}
+		}
 		return h.service.FileRoom(isAdmin, roomID(fields), text(fields, "project"),
 			text(fields, "scope"), text(fields, "task"))
 
 	case "project.dissolve":
 		return h.service.DissolveProject(isAdmin, text(fields, "project"))
 
-	case "room.close":
-		return h.service.SetState(username, isAdmin, roomID(fields), "closed")
-
-	case "room.reopen":
-		return h.service.SetState(username, isAdmin, roomID(fields), "open")
+	case "room.close", "room.reopen":
+		// Closed, it would drop out of every list while still receiving events.
+		if roomID(fields) == config.SystemChannel {
+			return nil, &messaging.Refusal{Message: "The server keeps system open"}
+		}
+		state := "open"
+		if text(fields, "op") == "room.close" {
+			state = "closed"
+		}
+		return h.service.SetState(username, isAdmin, roomID(fields), state)
 
 	case "subscribe":
 		return h.service.Subscribe(username, text(fields, "channel"))
@@ -318,6 +327,9 @@ func (h *Handler) run(
 		return h.service.Appoint(isAdmin, text(fields, "channel"), text(fields, "username"))
 
 	case "channel.dismiss":
+		if text(fields, "channel") == config.SystemChannel {
+			return nil, &messaging.Refusal{Message: "Only the server writes to system"}
+		}
 		return h.service.Dismiss(isAdmin, text(fields, "channel"), text(fields, "username"))
 
 	case "channel.submit":
@@ -369,6 +381,11 @@ func (h *Handler) enter(connection *socket.Connection, username, room string) (a
 	}
 
 	h.mutex.Lock()
+	for _, others := range h.occupancies {
+		for _, released := range result.Released {
+			delete(others, released)
+		}
+	}
 	held, ok := h.occupancies[connection]
 	if !ok {
 		held = map[string]bool{}
@@ -384,10 +401,15 @@ func (h *Handler) exit(connection *socket.Connection, occupancy string) (any, er
 	h.mutex.Lock()
 	held := h.occupancies[connection]
 	if !held[occupancy] {
-		h.mutex.Unlock()
-		// Not this connection's to release. Releasing another's would let one
-		// client end a room somebody else is sitting in.
-		return nil, &messaging.Refusal{Message: "Not in that room"}
+		for other, theirs := range h.occupancies {
+			if other != connection && theirs[occupancy] {
+				h.mutex.Unlock()
+				// Releasing another connection's would let one client end a
+				// room somebody else is sitting in.
+				return nil, &messaging.Refusal{Message: "Not in that room"}
+			}
+		}
+		// Held by nobody: already released, which exit answers as done.
 	}
 	delete(held, occupancy)
 	h.mutex.Unlock()

@@ -2,6 +2,8 @@
 
 The model of conversation for minos, defined before and independently of any way of reaching it. Nothing here is about windows, panes, tabs or terminals. If a concept in this document can only be explained by describing a gesture, it is not yet a concept.
 
+Status: current. Sections 2, 4 and 5 are built; section 7 says where the code stands.
+
 The document is in two halves, because the model has two halves.
 
 **Sections 2 and 3 are the core**: users, groups, rooms, admission, messages. Everything here is structural — remove any of it and something else stops being definable. This is what a first implementation builds, and what any front end needs in order to exist at all.
@@ -87,7 +89,7 @@ Retention is chosen when the room is raised and never again; the reasons are und
 
 Authority decides something else that is easy to miss: whether a room's title is a **name** or a **description**.
 
-An admin-created room is named. The title is institutional, chosen deliberately, and exists to be referred to -- "post it in Engineering" only means something if that resolves to one room. **So the name is unique among admin-created rooms, and compared without case.** A second room by that name is refused, and in practice the duplicate is nearly always an accident rather than an intent.
+An admin-created room is named. The title is institutional, chosen deliberately, and exists to be referred to -- "post it in Engineering" only means something if that resolves to one room. **So the name is unique among the admin-created rooms of its project, and compared without case.** Rooms under no project are a project of their own for this purpose (2.7). A second room by that name is refused, and in practice the duplicate is nearly always an accident rather than an intent.
 
 A user-created room is described. Its title renders who is in it, and **it need not be unique.** Two ad-hoc rooms holding the same people are two different conversations -- a different afternoon, a different subject -- and requiring their titles to differ would be membership-as-identity returning by the back door. They are told apart by when they began, which is how anybody would distinguish them out loud.
 
@@ -218,6 +220,14 @@ A transient room needs no read state, since nothing survives to be unread.
 | New participant sees | — | all history held | all history held | all history held |
 | Survives being empty | yes | yes | persisted: yes; transient: **no** | yes |
 
+#### 2.7 Project, scope and state
+
+A **project** groups places; a group groups people. It is created by the chat admin, holds rooms and channels but no projects, has no message log and decides no access. A place belongs to at most one project. Tags classify projects and mean nothing to the server. The reasons are in [design.md](design.md) 7.2.
+
+A room under a project has a **scope**: the project as a whole, or one task, whose label the server stores and never reads. A room under no project has no scope.
+
+A room or channel has a **state**, open or closed. Closing says the work in a place is done. It is not deletion and not archival: the audience is unchanged and still reads it. Whoever may invite may close. A transient room is never closed, because emptying already ends it.
+
 ### 3. Open questions in the core
 
 1. **Who may delete a room, and can one be handed over?** Nothing yet says whether an admin may delete a user's persisted room, whether a creator may delete one others are actively using, or whether the role transfers when its creator leaves the organisation. Until this is answered, **creator confers no authority** and is only a recorded fact.
@@ -248,7 +258,7 @@ Neither section below is needed for a working system. Both are specified because
 
 **An admin may set an archival period on a room they create, and on a channel.** A message older than the period, counted from its publication, is archived and leaves the live room. It is archived whether or not anyone opened or read it. Keeping it until opened would let one absent subscriber hold a channel's history live indefinitely. A room or channel with no period keeps everything, which is what every one does in the core.
 
-**A change of period applies at once.** Shortening it archives everything already past the new limit. Lengthening it restores nothing.
+**A change of period applies at the next sweep.** Shortening it archives everything already past the new limit then. Lengthening it restores nothing.
 
 The essential property: **archival bounds what exists, not what a newcomer may see.** A participant admitted yesterday and one admitted five years ago see the same messages — the ones not yet archived. The period counts from publication rather than from each subscriber's opening for this reason: retention stays uniform across participants, and this adds no per-user history rules to section 2.3.
 
@@ -328,6 +338,8 @@ Read-only is not what decides this. Every channel is read-only to its audience, 
 
 **A rejected submission is deleted once its author has acknowledged it.** It never held a sequence number, so nothing is left behind for a subscriber to re-request. Deleting it at the moment of rejection would make "the author always learns the outcome" true only for an author who was connected then. Kept until acknowledged, it reaches a returning author on their next sync, and its text is still theirs to revise and resubmit. The cost is the rows of authors who never come back.
 
+**A moderator is in the channel's audience.** The audience rule is a channel's only access control, and the queue holds what that audience submitted, so appointing someone outside it would let them read around it. Appointing an ineligible user is refused. Eligibility is re-read at each use, as it is for delivery to a subscriber (2.4): a moderator who leaves the audience keeps the appointment and cannot act on it until they return. The alternative was to dismiss them on the spot, which would couple every change to a group or an audience to the moderator list. If every moderator is outside the audience, the channel accepts no submissions, and what is already queued waits for one of them to return rather than being rejected.
+
 **Dismissing the last moderator rejects the queue.** The channel then accepts no submissions, and whatever was queued has nobody left who may decide it. Each author is told, with that reason, rather than left waiting on a queue nobody can see.
 
 ### 6. Deliberately excluded
@@ -349,6 +361,10 @@ What the core *is* on the wire, as opposed to what it means, is written down in 
 #### The channel feed and archival are in the server
 
 Subjects, the opened set and the pending stack (2.4, 2.5), and archival by age with its search (section 4), are in `go/` and checked by `go/conformance/`. The terminal client reads a channel item by item, and sets, reads and searches the archive by command.
+
+#### Projects, scope and state are built
+
+Section 2.7, in `go/` and wire-contract sections 12 and 13.
 
 #### Section 5 is built
 

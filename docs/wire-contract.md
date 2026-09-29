@@ -233,7 +233,7 @@ therefore time out rather than wait forever.
 | `history` | `room`, `since` | `{room, since, lastSeq, messages}` |
 | `send` | `room`, `body` | `{ok: true, seq}` |
 | `open` | `invite`, `title`, `retention` | a room |
-| `create` | `title`, `invite` | a room |
+| `create` | `title`, `invite`, `project`, `scope`, `task` | a room |
 | `invite` | `room`, `principal` | `{ok: true, room}` |
 | `uninvite` | `room`, `principal` | `{ok: true, room}` |
 | `leave` | `room` | `{ok: true}` |
@@ -245,7 +245,7 @@ therefore time out rather than wait forever.
 | `group.unassign` | `group`, `username` | a group |
 | `subscribe` | `channel` | a channel |
 | `unsubscribe` | `channel` | `{ok: true}` |
-| `channel.create` | `title`, `groups` | a channel |
+| `channel.create` | `title`, `groups`, `project` | a channel |
 | `channel.publish` | `channel`, `body` | `{ok: true, seq}` |
 | `channel.admit` | `channel`, `group` | `{ok: true, channel}` |
 | `channel.revoke` | `channel`, `group` | `{ok: true, channel}` |
@@ -348,8 +348,9 @@ from `read`, and section 12 adds `projects`.
   `submission.reject` comment.
 - A title given to `open`, `create` or `channel.create`, and a group's name, is at
   most 200 characters, refused with `A name is at most 200 characters`.
-- `exit` may only release an occupancy the same connection took. Another
-  connection's is refused with `Not in that room`.
+- `exit` may only release an occupancy the same connection took. One another
+  connection holds is refused with `Not in that room`; one nobody holds, such
+  as one already released, answers `{ok: true}`.
 - A user occupies at most one room. `enter` first releases every occupancy the
   user holds in another room, on any connection: each room left is announced
   with a `room` push, and the user is sent `exited` for each occupancy
@@ -358,6 +359,7 @@ from `read`, and section 12 adds `projects`.
 - `enter` records a visit. The room stays in the caller's `visited` from then
   on, whatever becomes of their access.
 - `read` never moves a cursor backwards.
+- `read` past the room's last sequence is refused with `Message <seq> does not exist yet; this room ends at <last>`.
 - An unparseable `since` or `seq` means zero rather than an error.
 - A room id that is not a string is "no such room", not a type error.
 
@@ -371,9 +373,13 @@ from `read`, and section 12 adds `projects`.
 - A transient room that nobody has entered is deleted `MINOS_ROOM_UNENTERED`
   seconds after it was raised, and its audience is told the same way.
 - The `system` channel exists at start-up, titled `System`, with every account
-  subscribed. The server is its only producer. `channel.publish` and
-  `channel.appoint` on it are refused with `Only the server writes to system`,
-  and `unsubscribe` with `Every account receives system`.
+  subscribed. The server is its only producer. `channel.publish`,
+  `channel.appoint` and `channel.dismiss` on it are refused with `Only the
+  server writes to system`, `unsubscribe` with `Every account receives system`,
+  `room.close` and `room.reopen` with `The server keeps system open`, and
+  `project.file` with `system belongs to no project`. `archive.set` is
+  permitted: system grows with every VFS mutation, and its retention is an
+  administrator's choice.
 - A successful VFS mutation posts an event to `system`:
   `<user> wrote|created|deleted|touched|renamed|copied <path>`, with each control
   character in the path replaced by `?`. A failure to
@@ -479,6 +485,11 @@ push, because approval turns a submission into a message and deletes it.
   is refused with `That channel accepts no submissions`.
 - `channel.appoint` and `channel.dismiss` are administrators only, and each
   announces the channel with a `room` push. Appointing names a user that exists.
+- Appointing a user outside a restricted channel's audience is refused with
+  `<username> is not in that channel's audience`. A moderator who leaves the
+  audience keeps the appointment but is treated as no moderator until they
+  return: refused as above, and sent no `submission` push. A channel whose
+  moderators are all outside its audience accepts no submissions.
 - `channel.queue`, `submission.approve` and `submission.reject` are the channel's
   moderators only, refused with `Only a moderator may do that`. An administrator
   is not implicitly a moderator and may appoint themselves.

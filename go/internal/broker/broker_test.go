@@ -22,6 +22,7 @@ import (
 
 // run is one dispatch: a developer, a worker, a room and a decision channel.
 type run struct {
+	server    *testserver.Server
 	developer *client.Client
 	worker    *Broker
 	room      string
@@ -62,7 +63,7 @@ func dispatch(t *testing.T, historyLimit int, withChannel bool) *run {
 	}
 	t.Cleanup(worker.Stop)
 
-	return &run{developer: developer, worker: worker, room: room.ID, channel: channel.ID}
+	return &run{server: server, developer: developer, worker: worker, room: room.ID, channel: channel.ID}
 }
 
 // drain waits for the broker to deliver `want` records, and returns them.
@@ -258,8 +259,8 @@ func TestProgressNeverPassesWhatWasDelivered(t *testing.T) {
 // it raised the delivered marker past the room's end and progress followed.
 func TestSinceCannotSkipPastWhatWasDelivered(t *testing.T) {
 	run := dispatch(t, config.HistoryLimit, false)
-	say(t, run.developer, run.room, "one")
-	run.drain(t, 1)
+	say(t, run.developer, run.room, "one", "two")
+	run.drain(t, 2)
 	delivered := run.worker.Handle(link.Request{Op: link.OpStatus}).Status.Delivered
 
 	if reply := run.worker.Handle(link.Request{Op: link.OpMessages, Since: delivered + 1000}); reply.Code != link.CodeRefused {
@@ -269,10 +270,40 @@ func TestSinceCannotSkipPastWhatWasDelivered(t *testing.T) {
 		t.Fatalf("delivered moved from %d to %d", delivered, got)
 	}
 
-	// Re-reading from before the marker still works.
+	// Re-reading from before the marker still works. Since 0 means "absent".
 	reply := run.worker.Handle(link.Request{Op: link.OpMessages, Since: delivered - 1})
-	if reply.Code != link.CodeOK || len(reply.Records) != 1 || reply.Records[0].Body != "one" {
+	if reply.Code != link.CodeOK || len(reply.Records) != 1 || reply.Records[0].Body != "two" {
 		t.Fatalf("a re-read answered %+v", reply)
+	}
+}
+
+// A restart drops every connection and forgets every session. The broker logs
+// in again, and what was said while it was away is delivered, once, with no gap.
+func TestARunSurvivesAServerRestartWithoutLosingAMessage(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	say(t, run.developer, run.room, "before")
+	run.drain(t, 1)
+
+	run.server.Restart(t)
+	// Said inside the broker's reconnect backoff, by a session of its own.
+	_, fresh, _, err := client.Connect(run.server.Base, "demo", "demo")
+	if err != nil {
+		t.Fatalf("cannot connect after the restart: %v", err)
+	}
+	t.Cleanup(fresh.Stop)
+	say(t, fresh, run.room, "while you were away")
+	waitFor(t, "the broker to reconnect", run.worker.Chat().Connected)
+	say(t, fresh, run.room, "after")
+
+	var got []string
+	for _, record := range run.drain(t, 2) {
+		got = append(got, record.Body)
+	}
+	if strings.Join(got, "|") != "while you were away|after" {
+		t.Fatalf("delivered %q", got)
+	}
+	if status := run.worker.Handle(link.Request{Op: link.OpStatus}).Status; status.Torn || !status.Connected {
+		t.Fatalf("status after the restart: %+v", status)
 	}
 }
 
@@ -378,6 +409,52 @@ func TestAnOversizedTimeoutIsCappedRatherThanEndingAtOnce(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("await never returned")
+	}
+}
+
+// A decision pushed before submit's reply returns is kept: the reply's pending
+// state must not overwrite it, or await blocks on something already decided.
+func TestADecisionPushedBeforeTheSubmitReplyIsKept(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, true)
+	approved := client.Submission{ID: "s1", Channel: run.channel, Author: "bob", State: link.StateApproved}
+	run.worker.decided(approved)
+	run.worker.claim(client.Submission{ID: "s1", Channel: run.channel, Author: "bob", State: link.StatePending})
+
+	reply := run.worker.Handle(link.Request{Op: link.OpAwait, ID: "s1", Timeout: 0.1})
+	if reply.State != link.StateApproved {
+		t.Fatalf("await answered %+v", reply)
+	}
+}
+
+// Two runs share an account in phase 0, and may share a channel. Neither may
+// wait on the other's submission.
+func TestARunCannotAwaitASiblingsSubmission(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, true)
+	sibling, err := Open(Config{
+		Server: run.server.Base, User: "bob", Password: "bob",
+		Room: run.room, Channel: run.channel,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sibling.Stop)
+
+	theirs := sibling.Handle(link.Request{Op: link.OpSubmit, Subject: "theirs", Body: "x"})
+	if theirs.Code != link.CodeOK {
+		t.Fatalf("the sibling's submit answered %+v", theirs)
+	}
+	// The decision is pushed to the author, which is every session of bob's.
+	waitFor(t, "the developer to see it", func() bool {
+		_, queued := run.developer.Queued()[theirs.ID]
+		return queued
+	})
+	if err := run.developer.Approve(theirs.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Time for the approval push to reach this run's session as well.
+	time.Sleep(200 * time.Millisecond)
+	if reply := run.worker.Handle(link.Request{Op: link.OpAwait, ID: theirs.ID, Timeout: 0.1}); reply.Code != link.CodeRefused {
+		t.Fatalf("a run awaited its sibling's submission: %+v", reply)
 	}
 }
 

@@ -1,6 +1,8 @@
 # Agent design
 
-How AI agents use minos. 2026-09-19. Nothing here is built.
+How AI agents use minos. 2026-09-19.
+
+Status: 7.2 is built, as projects, scope and state; nothing else here is. How a container reaches the conversation is settled by [recommended-architecture.md](recommended-architecture.md), which builds on the wire changes in section 8.
 
 This supersedes `agents.md`, `minos_agent_reqs.md` and `spaces.md`. It states decisions and the reasoning that survives them; the option enumeration those documents carried is gone. The model it changes is [chat-concepts.md](chat-concepts.md). The wire it changes is [wire-contract.md](../wire-contract.md). How to build it is `architecture.md`, which does not exist yet and should not until this is reviewed.
 
@@ -74,7 +76,7 @@ No room holds two concurrent workers. That is a grant policy, not a protocol lim
 
 ### Workflows
 
-A workflow is a sequence of stages. Each stage is an agent and model pair with an approval mode, consuming artifacts and producing them. It is `pma` policy: minos does not know what a workflow is and carries only its id. `route.rs` already holds the per-stage half in `Route {agent, model, approval, escalate}`; a workflow is a sequence of those with artifact edges, which `pma` does not have yet.
+A workflow is a graph of nodes, consuming artifacts and producing them ([`pma/docs/dev/workflows.md`](https://github.com/shakfu/pma/blob/main/docs/dev/workflows.md)). A node names no agent: `pma`'s routing policy matches a route on the node and its lap, and the route sets the agent, the model and the approval mode (W12 there). It is `pma` policy: minos does not know what a workflow is and carries only its id. In this document a *stage* is one node's run in a workflow room.
 
 `REVIEW-FIX-TOP-FINDINGS`, project scope, as a worked example:
 
@@ -233,6 +235,8 @@ A grant carries an explicit capability set and anything absent is refused with t
 
 `pma-agent` differs from a worker in room scope and window alone. It is not a separate class.
 
+**The grant has no role in it.** A grant lists the rooms a run may read, the rooms it may send to, and the rooms it may submit to, plus `since` and an expiry. The table above is two grants of that shape. Which grant a run gets is `pma`'s decision: the route that picks a node's agent, model and approval mode should pick its grant too. Routing does not do this yet. The agent and model pair is not the key, because two nodes routed to the same pair can need different grants. `pma-agent` is not a node, so its grant comes from wherever `pma` assigns that role. Settled 2026-09-29; section 13, question 2.
+
 ### 8.3 Denials
 
 Three are not capabilities but blanket refusals, because the surface behind each is too large to scope.
@@ -267,7 +271,7 @@ Three are not capabilities but blanket refusals, because the surface behind each
 
 - `space` on a room and on a channel: an id or null (7.2).
 
-- A deadline on a submission. Past it the server decides it `timed_out` and pushes that to the author, a third terminal state beside approved and rejected. An agent blocked on a decision nobody makes otherwise burns its run timeout and dies with the work half done, and it cannot be trusted to time itself out.
+- A deadline on a submission. Past it the server decides it `expired` and pushes that to the author, a third terminal state beside approved and rejected. An agent blocked on a decision nobody makes otherwise burns its run timeout and dies with the work half done, and it cannot be trusted to time itself out.
 
 - A structured payload alongside `body`, passed through unread (D18). A worker's request has fields: what permission, the projected cost, the path, the command. An instruction to a worker has a verb: continue, interrupt, stop, abandon. Without it a harness must interrupt on every message, which makes a status note destructive, or on none, which makes correction impossible. This is the case chat-concepts open question 3 in [channels.md](channels.md) anticipates.
 
@@ -374,7 +378,7 @@ D5 reduces the pressure without closing the hole. Room count tracks workflows di
 
 1. Does `minosd` run as a container `pma` starts, or as an operator's service `pma` finds? The second is cleaner and means `pma` must degrade to a bind-mount mailbox when it is absent.
 
-2. Is the capability set (8.2) general, or a single `agent` role with a room list? General costs more now and avoids a second special case later.
+2. ~~Is the capability set (8.2) general, or a single `agent` role with a room list?~~ Settled: neither as posed. A grant lists the rooms a run may read, send to and submit to, with `since` and an expiry, and names no role. Roles are `pma`'s, assigned by its routing (8.2). A single room list cannot express the 8.2 table: a worker reads `control` but may not submit to it.
 
 3. Does `archive.search` span a space? "Search every workflow room in `cynn`" is the obvious want, and it is the pressure that breaks D7: a space-wide search must resolve to the union of rooms the caller may reach, and a careless version resolves to the space's audience, which a space does not have. Answer before building search, not after.
 

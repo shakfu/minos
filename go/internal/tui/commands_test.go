@@ -60,6 +60,7 @@ func (u *Ui) showTabRooms(id string) {
 	u.showTab(tabRooms)
 	rows := u.roomRows()
 	u.cursor = max(0, slices.IndexFunc(rows, func(r client.Room) bool { return r.ID == id }))
+	u.pin()
 	u.followCursor()
 }
 
@@ -987,5 +988,103 @@ func TestAPlaceIsNamedByItsProjectFromOutside(t *testing.T) {
 	if err := ui.cmdCreate([]string{"design"}); err == nil ||
 		!strings.Contains(err.Error(), "already exists in "+cynn.name) {
 		t.Fatalf("a duplicate in the same project gave %v", err)
+	}
+}
+
+// The cursor holds a row, not a position: a room arriving above the one
+// highlighted must not move the highlight, or what is typed goes elsewhere.
+func TestARoomArrivingAboveTheCursorDoesNotMoveTheSelection(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	if _, err := demo.CreateRoom("Bravo", nil, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	delta, err := demo.CreateRoom("Delta", nil, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := headless(demo)
+	ui.showTabRooms(delta.ID)
+	ui.ensureSelection()
+
+	if _, err := alice.OpenRoom([]client.Principal{{Kind: "user", ID: "demo"}}, "Alpha", "persisted"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "Alpha in the list", func() bool {
+		return slices.ContainsFunc(ui.roomRows(), func(r client.Room) bool { return r.Title == "Alpha" })
+	})
+	ui.ensureSelection()
+	if ui.selected != delta.ID || ui.roomRows()[ui.cursor].ID != delta.ID {
+		t.Fatalf("the selection moved to %q, cursor %d", ui.selected, ui.cursor)
+	}
+}
+
+// The same for a channel's items: a new one arrives at the top of the pending
+// stack, and Enter must still open the one that was highlighted.
+func TestAnItemArrivingAboveTheCursorDoesNotMoveIt(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	founded, err := demo.CreateChannel("News", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := alice.Subscribe(founded.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, subject := range []string{"First", "Second"} {
+		if err := demo.Publish(founded.ID, subject, "about "+subject); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor(t, "both items", func() bool { return len(alice.Log(founded.ID)) == 2 })
+	ui := headless(alice)
+	ui.show(founded.ID)
+	ui.move(1) // on First, seq 1: newest first
+	ui.ensureSelection()
+
+	if err := demo.Publish(founded.ID, "Third", "about Third"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the third item", func() bool { return len(alice.Log(founded.ID)) == 3 })
+	ui.ensureSelection()
+	ui.compose("")
+	if ui.expanded != 1 {
+		t.Fatalf("Enter opened item %d, not the highlighted 1", ui.expanded)
+	}
+}
+
+// Subscribing shows the channel, so the composer's target is on screen; leaving
+// it or a room goes back to the list rather than to an empty space.
+func TestSubscribingShowsTheChannelAndLeavingReturnsToTheList(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
+	founded, err := demo.CreateChannel("Bulletin", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := headless(alice)
+	if ui.view != viewOverview {
+		t.Fatalf("a session opens on view %v", ui.view)
+	}
+	// A channel alice is not in is known from its announcement in system.
+	waitFor(t, "the announcement", func() bool { id, _ := ui.channelID("Bulletin"); return id == founded.ID })
+	ui.command("/subscribe Bulletin")
+	if ui.view != viewSpace || ui.selected != founded.ID {
+		t.Fatalf("after /subscribe: view %v, selected %q, notices %q", ui.view, ui.selected, ui.recentNotices(5))
+	}
+	ui.command("/unsubscribe")
+	if ui.view == viewSpace {
+		t.Fatalf("after /unsubscribe the view is still a space, selected %q", ui.selected)
+	}
+
+	room, err := demo.OpenRoom([]client.Principal{{Kind: "user", ID: "alice"}}, "Pair", "persisted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the room", func() bool { _, ok := alice.Space(room.ID); return ok })
+	ui.show(room.ID)
+	ui.command("/leave")
+	if ui.view == viewSpace {
+		t.Fatalf("after /leave the view is still a space, selected %q", ui.selected)
 	}
 }

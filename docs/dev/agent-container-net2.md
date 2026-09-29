@@ -2,6 +2,8 @@
 
 2026-09-21
 
+Status: a proposal. Its option 5, a broker on the host, is what [recommended-architecture.md](recommended-architecture.md) adopts. The edits in section 7 were not applied: that document supersedes agent-container-net.md, and carries the design.md points on revocation (section 12, item 5), payload validation (7.4) and decision scope (7.3). The rule that no agent-writable file may decide what the agent may do is carried by neither.
+
 [contagent](https://github.com/kanaka/contagent) solves a neighbouring problem and ships. This reads it at `53e4a99` (2026-08-27) against [agent-container-net.md](agent-container-net.md) and [design.md](design.md), takes what transfers, names what does not, and proposes a fifth option those documents do not score.
 
 Citations of the form `file:line` are contagent's tree. Citations of the form "design.md 8.3" are ours.

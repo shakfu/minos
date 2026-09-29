@@ -1,6 +1,6 @@
 MEDIA := docs/media
 
-.PHONY: go serve tui user-demo user-alice demo test conformance diagrams clean-diagrams clean
+.PHONY: go serve tui user-demo user-alice demo test conformance cover container diagrams clean-diagrams clean
 
 GO_SOURCES := $(shell find go -name '*.go' 2>/dev/null) go/go.mod go/go.sum
 
@@ -41,18 +41,34 @@ demo: go/minosd
 	@cd go && MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd go run ./cmd/demo
 
 ## Unit tests, then the wire contract against the built server. -count=1
-## because go test cannot see that the binary under test changed.
+## because go test cannot see that the binary under test changed. -race covers
+## the test binaries, not go/minosd itself; it costs about 10 s of 50.
 test: go/minosd
-	@cd go && MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd go test -count=1 ./...
+	@cd go && MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd go test -race -count=1 ./...
 
 ## The wire contract alone. MINOS_CONFORMANCE_URL points it at a server that is
 ## already running. See docs/dev/conformance-plan.md.
 conformance: go/minosd
 	@cd go && MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd go test -count=1 ./conformance
 
+## The shim in a real container, through a bind-mounted socket. Needs docker;
+## builds a scratch image holding only minosa, and removes it afterwards.
+container:
+	@cd go && MINOS_CONTAINER=1 go test -count=1 -run InsideAContainer ./internal/broker
+
+## The server's coverage under the wire contract. GOCOVERDIR must be absolute:
+## the server runs in go/conformance, where a relative one names no directory,
+## and the runtime then writes nothing and says nothing.
+COVER := $(CURDIR)/.cache/cover
+cover:
+	@rm -rf $(COVER) && mkdir -p $(COVER)
+	@cd go && go build -cover -o $(CURDIR)/.cache/minosd-cover ./cmd/minosd
+	@cd go && GOCOVERDIR=$(COVER) MINOS_CONFORMANCE_CMD=$(CURDIR)/.cache/minosd-cover go test -count=1 ./conformance
+	@cd go && go tool covdata percent -i=$(COVER)
+
 ## The diagrams in $(MEDIA), from their d2 sources. The only target that
-## needs a toolchain other than Go, and nothing else depends on it: the SVGs
-## are committed, so a tree without d2 builds, tests and reads the docs.
+## needs a toolchain other than Go, and nothing else depends on it. The
+## renderings are not committed; the docs link the sources.
 diagrams: $(MEDIA)/architecture.svg $(MEDIA)/network.svg $(MEDIA)/architecture.pdf $(MEDIA)/network.pdf
 
 clean-diagrams:

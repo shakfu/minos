@@ -381,3 +381,38 @@ func TestADatabaseWrittenByTheOtherServerIsAccepted(t *testing.T) {
 	}
 	store.Close()
 }
+
+// Dissolving a project is one change: if its last step fails, its rooms are
+// still filed under it rather than unfiled from a project that remains.
+func TestDissolvingAProjectIsAllOrNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "timeline.db")
+	store, err := open(t, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	project, err := store.CreateProject("cynn", "", []string{"infra"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	room, err := store.CreateRoom("task/1", "demo", RoomKind, Admin, Persisted, "",
+		[]Principal{{Kind: PrincipalUser, ID: "demo"}}, Filing{Project: project.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw(t, path).Exec(
+		"CREATE TRIGGER stuck BEFORE DELETE ON projects BEGIN SELECT RAISE(ABORT, 'stuck'); END"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.DeleteProject(project.ID); err == nil {
+		t.Fatal("the failed delete was not reported")
+	}
+	after, err := store.Room(room.ID)
+	if err != nil || after.Project != project.ID {
+		t.Fatalf("the room was unfiled from a project that remains: %+v, %v", after, err)
+	}
+	if kept, err := store.Project(project.ID); err != nil || len(kept.Tags) != 1 {
+		t.Fatalf("the project lost its tags: %+v, %v", kept, err)
+	}
+}

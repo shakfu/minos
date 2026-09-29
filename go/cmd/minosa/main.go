@@ -32,6 +32,7 @@ const usage = `minosa reaches this run's conversation. Six operations:
   minosa status                          the room, the window and the connection
 
   -payload F   a JSON file to carry beside the text of say or submit
+  --           everything after is text, even if it starts with a dash
   -socket P    the run's socket; MINOS_SOCKET is the default
 `
 
@@ -59,7 +60,7 @@ func shim(args []string, stdin io.Reader, stdout, stderr io.Writer, do call) int
 	payload := set.String("payload", "", "read a JSON payload from this file")
 	timeout := set.Float64("timeout", 0, "seconds to block in await; default 300, at most 3600")
 
-	flags, rest := split(args[1:])
+	flags, rest := split(set, args[1:])
 	if err := set.Parse(flags); err != nil {
 		return link.CodeLocal
 	}
@@ -77,7 +78,12 @@ func shim(args []string, stdin io.Reader, stdout, stderr io.Writer, do call) int
 	deadline := 30 * time.Second
 
 	switch args[0] {
-	case link.OpMessages:
+	case link.OpMessages, link.OpStatus:
+		// Refused rather than ignored: a mistyped flag arrives here as text.
+		if len(rest) > 0 {
+			fmt.Fprintf(stderr, "minosa: %s takes no text, and %q is not one of its flags.\n", args[0], rest[0])
+			return link.CodeLocal
+		}
 		request.Since = *since
 
 	case link.OpSay, link.OpSubmit:
@@ -130,8 +136,6 @@ func shim(args []string, stdin io.Reader, stdout, stderr io.Writer, do call) int
 		}
 		request.Seq = seq
 
-	case link.OpStatus:
-
 	default:
 		fmt.Fprint(stderr, usage)
 		return link.CodeLocal
@@ -156,16 +160,23 @@ var takesValue = map[string]bool{
 // split separates flags from positional arguments, in any order. The flag
 // package stops at the first non-flag, and `minosa await ID -timeout 30` is
 // what a model writes: refusing it teaches nothing and costs a turn.
-func split(args []string) (flags, rest []string) {
+//
+// A dashed argument is a flag only if it names one: `minosa say "- done"` is
+// text. Everything after `--` is text.
+func split(set *flag.FlagSet, args []string) (flags, rest []string) {
 	for index := 0; index < len(args); index++ {
 		argument := args[index]
-		if !strings.HasPrefix(argument, "-") || argument == "-" {
+		if argument == "--" {
+			return flags, append(rest, args[index+1:]...)
+		}
+		name, _, joined := strings.Cut(strings.TrimLeft(argument, "-"), "=")
+		isFlag := strings.HasPrefix(argument, "-") &&
+			(set.Lookup(name) != nil || name == "h" || name == "help")
+		if !isFlag {
 			rest = append(rest, argument)
 			continue
 		}
 		flags = append(flags, argument)
-
-		name, _, joined := strings.Cut(strings.TrimLeft(argument, "-"), "=")
 		if takesValue[name] && !joined && index+1 < len(args) {
 			index++
 			flags = append(flags, args[index])

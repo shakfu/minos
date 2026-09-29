@@ -251,3 +251,69 @@ func TestSubmittingNeedsTheChannelAndSomethingToSay(t *testing.T) {
 		fmt.Sprintf("No such room: %v", room["id"]))
 	same(t, alice.Refuse("submission.approve", "submission", "absent"), "No such submission: absent")
 }
+
+// -- a moderator is in the audience -------------------------------------------
+
+const outsideAudience = "alice is not in that channel's audience"
+
+// The audience rule is a channel's only access control, and appointment would
+// otherwise read around it: the queue holds what the audience may not see.
+func TestAModeratorMustBeInTheChannelsAudience(t *testing.T) {
+	demo := connect(t, admin)
+	ops := demo.Call("group.create", "name", unique("Ops"), "members", []string{"bob"})
+	channel := demo.Call("channel.create", "title", unique("Restricted"), "groups", []string{str(ops["id"])})
+
+	same(t, demo.Refuse("channel.appoint", "channel", channel["id"], "username", "alice"), outsideAudience)
+	same(t, obj(demo.Call("channel.appoint", "channel", channel["id"], "username", "bob")["channel"])["moderators"],
+		[]string{"bob"})
+}
+
+// Eligibility is re-read at each use, as it is for a subscriber: a moderator
+// who leaves the audience keeps the appointment and loses its powers until
+// they return.
+func TestAModeratorOutsideTheAudienceCannotModerate(t *testing.T) {
+	demo, alice, bob := connect(t, admin), connect(t, "alice"), connect(t, "bob")
+	ops := demo.Call("group.create", "name", unique("Ops"), "members", []string{"demo", "alice", "bob"})
+	channel := demo.Call("channel.create", "title", unique("Restricted"), "groups", []string{str(ops["id"])})["id"]
+	demo.Call("channel.appoint", "channel", channel, "username", "alice")
+	demo.Call("channel.appoint", "channel", channel, "username", "demo")
+	bob.Call("subscribe", "channel", channel)
+	first := bob.Call("channel.submit", "channel", channel, "body", "first")
+	alice.ExpectPush(submissionPush("pending", first["id"]))
+
+	demo.Call("group.unassign", "group", ops["id"], "username", "alice")
+	alice.ExpectPush(func(e Obj) bool { return e["type"] == "group" })
+	alice.Drain()
+
+	same(t, alice.Refuse("channel.queue", "channel", channel), moderatorsOnly)
+	same(t, alice.Refuse("submission.approve", "submission", first["id"]), moderatorsOnly)
+	same(t, alice.Refuse("submission.reject", "submission", first["id"]), moderatorsOnly)
+	same(t, alice.Refuse("channel.publish", "channel", channel, "body", "from outside"),
+		"Only an administrator or a moderator may do that")
+
+	// Nor is she sent what the queue holds while outside it.
+	second := bob.Call("channel.submit", "channel", channel, "body", "second")
+	demo.ExpectPush(submissionPush("pending", second["id"]))
+	demo.Call("submission.approve", "submission", second["id"])
+	demo.Call("group.assign", "group", ops["id"], "username", "alice")
+	_, before := alice.CollectPush(func(e Obj) bool { return e["type"] == "group" })
+	for _, push := range before {
+		truth(t, obj(push)["type"] != "submission", "alice was pushed a submission from outside the audience")
+	}
+
+	// Back in the audience, back in the queue.
+	same(t, queueOf(alice, channel), []any{first["id"]})
+}
+
+// With every moderator outside the audience nobody can decide a submission, so
+// the channel takes none, as with no moderator at all.
+func TestAChannelWhoseModeratorsAreAllOutsideItsAudienceTakesNoSubmissions(t *testing.T) {
+	demo, bob := connect(t, admin), connect(t, "bob")
+	ops := demo.Call("group.create", "name", unique("Ops"), "members", []string{"alice", "bob"})
+	channel := demo.Call("channel.create", "title", unique("Restricted"), "groups", []string{str(ops["id"])})["id"]
+	demo.Call("channel.appoint", "channel", channel, "username", "alice")
+	bob.Call("subscribe", "channel", channel)
+
+	demo.Call("group.unassign", "group", ops["id"], "username", "alice")
+	same(t, bob.Refuse("channel.submit", "channel", channel, "body", "anyone?"), noSubmissions)
+}

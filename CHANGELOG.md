@@ -1,6 +1,6 @@
 # Changelog
 
-Notable changes to minos. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing is released yet, so everything so far sits under Unreleased.
+Notable changes to minos. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing is released yet. Unreleased holds the Go-only tree; entries written before it are in the last section.
 
 ## [Unreleased]
 
@@ -9,22 +9,6 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 ### Removed
 
 - The Python tree: `server/`, `messaging/`, `tui/`, the pytest suite, `pyproject.toml`, the uv venv, and the `install`, `serve-go` and `conformance-go` make targets. A second implementation of the core cost about 55% more code per feature, and it described behaviour `go/` already had. Three parts were ported rather than dropped: the conformance suite, the only black-box test of the server; the terminal client, its only client; and the audience demo.
-
-- `client/`, the web desktop, and the last JavaScript in the tree with it: Vite, Vitest, TypeScript, `client/node_modules`, and the `client` and `dev` make targets. It spoke the retired conversation model -- rooms as sets of people, `merge`, membership edited by dragging -- so it had not connected to this server since the model changed. Removed rather than ported, because `tui/` already reaches every operation and a second front end is a second thing to keep in step with the model.
-
-  Its 115 tests went too, and no coverage did: they drove a mocked socket, so they passed against a server they could not talk to, and the routes `client/tests/api.test.ts` pinned are pinned against a running server by `tests/conformance/test_http.py`. Nothing builds `dist/` any more; both servers already served the API alone when it is empty.
-
-- The OS.js v3 reference client and the whole `src/` tree: the bootstrap and config under `src/client/`, the CLI config under `src/cli/`, and the `MonoBlueTheme` package. It built to `dist/osjs.html`, which is now a 404.
-
-- Its build: `webpack.config.js`, the root `package.json` and `package-lock.json`, and with them every `@osjs/*` dependency.
-
-- The `osjs` and `lint` make targets. `lint` ran stylelint over the OS.js theme CSS and had nothing else to cover; there is no stylelint config any more.
-
-- `DistWatcher` and its polling thread. It pushed `osjs/dist:changed` and `osjs/packages:metadata:changed`, both of which had lost their consumer: the manifest was written by `osjs-cli package:discover`, and the new client logs any frame it does not handle. Vite emits fingerprinted files under `dist/assets/` while the watcher only scanned the top level, so it could no longer fire at all.
-
-- `WATCH_DIST` and `WATCH_INTERVAL` from `server/config.py`, so the `MINOS_WATCH_DIST` environment variable is no longer read.
-
-- `tests/test_theme_package.py` (guards on the MonoBlueTheme package contract) and `tests/test_watcher.py`.
 
 ### Fixed
 
@@ -52,9 +36,81 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 - A message body could forge a record from someone else: a newline in it started a new `[seq] author: body` line in `minosa messages` and a new `author: body` line on the agent's stdin. A body that holds a newline or another non-printable character is now quoted in both lanes; other bodies print unchanged. Quoting over indenting continuation lines, because a model still reads an indented line as a record.
 
+- `messages -since N` accepted any `N`, raised the broker's delivered marker to it, and let `progress` record a read of messages never delivered. A `since` past the marker is now refused. The server also stored any `read` sequence, so a cursor could sit past the end of a room and mark the next message read on arrival; `read` past the room's last sequence is now refused.
+
+- A moderator outside a restricted channel's audience could read its queue, approve, reject and publish: moderation checked the moderator list and never the audience. Appointing an ineligible user is now refused, and a moderator who leaves the audience cannot act until they return. Re-checked at each use rather than dismissed on the spot, as a subscriber's eligibility already is. The rule is in `chat-concepts.md` section 5.
+
+- The terminal client marked a room read through the room's `lastSeq`, which a `room` push can carry ahead of the messages applied, so a message never drawn counted as read. It now marks through the last message in the log, or through what archival removed from it.
+
+- A paste was typed key by key: a pasted newline submitted, a pasted `/` line ran, a pasted ^C quit and a pasted `y` answered a confirmation. The client now enables bracketed paste and takes everything between the brackets as text, newlines included.
+
+- List cursors were row indexes, so a room, project or channel item arriving above the cursor moved the highlight, and what was typed or opened next went to a different row. The cursor now holds its row by id, and a channel item by sequence.
+
+- A key whose request waited on the server blocked the event loop for up to 10 s, and ^C with it. Each key now runs on its own goroutine while the loop keeps reading; ^C quits at once, and other keys wait their turn. The screen still does not redraw until the request returns; that needs the handlers themselves to stop blocking.
+
+- Two runs sharing an account and a decision channel could `await` each other's submissions: the broker adopted any decision pushed for its author and channel. And a decision pushed before `submit`'s reply returned was overwritten by the reply's `pending`, so `await` waited out its timeout on something already decided. Pushed states for ids a run has not claimed are now kept aside, and `submit` claims its own, the newer state winning.
+
+- `minosa say "- done"` exited 2: any argument starting with a dash went to the flag parser. A dashed argument is now a flag only if it names one, and `--` ends the flags. `messages` and `status` refuse stray text, so a mistyped flag is not silently dropped.
+
+- The run socket was created with the process umask's mode and then changed to `-mode`, leaving a window in which it had the wider one. It is now created with its mode.
+
+- `Sweep` stopped at the first transient room it could not delete, leaving the rest and the archive pass for the next sweep. It now carries on and reports every failure.
+
+- Dissolving a project ran three statements outside a transaction, so a failure part way left rooms unfiled from a project that remained. Concurrent creates of one permanent name could each find it free: 20 concurrent creates made 9 rooms. The first is now one transaction, and the second holds a lock from the check to the write. A lock over a unique index, because a database that already holds duplicates would then refuse to open.
+
+- An administrator could close or reopen `system`, file it under a project, or dismiss a moderator on it. Each is now refused. `archive.set` stays permitted: `system` grows with every VFS mutation.
+
+- Closing or reopening a room stored its event but pushed it to nobody, so every client fetched it through `history` on seeing `lastSeq` move. It is now pushed to the audience.
+
+- The server kept each occupancy that `enter` released on another connection until that connection closed. They are now dropped when released. `exit` of an occupancy nobody holds answers `ok`, as the contract says of one already released; it had been answered from the stale record.
+
+- In the terminal client, `/leave` and `/unsubscribe` left an empty space on screen, and `/subscribe` from a list that did not show the channel aimed the composer at it off screen. The first two now return to the list, and `/subscribe` opens the channel.
+
+- The terminal client printed an HTTP error body as received, so a proxy's error page could write terminal control sequences. It is now one line, control characters replaced, capped at 200 characters. `-user` and `-password` fall back to `MINOS_USER` and `MINOS_PASSWORD`, and plain `http` to a host other than this one draws a warning that the password crosses the network unencrypted.
+
+- Every list draw copied each room's whole log, up to 1,000 messages, to read its last timestamp: 23 us and 96 KB per room per call, several calls per draw. It now reads the timestamp in place.
+
 - A drop during the backfills after a reconnect's `sync` left the client disconnected with nothing retrying: the drop found a reconnect in progress, and that reconnect then finished. It now checks the socket before it finishes.
 
+- `copy` onto the same file emptied it, because the destination was truncated before the source was read. `copy` of a directory into its own subtree nested about 2,000 levels before failing on path length. Both now answer 400. The check compares files rather than names, so a hard link to the source is refused too.
+
+- The VFS followed a symlink out of its mountpoint: the prefix check was lexical, and `os.Open` resolves links. Every operation now runs through an `os.Root`, over resolving paths with `EvalSymlinks` first, which would leave a gap between the check and the use. `unlink` and `rename` of a mountpoint's root are refused with 403; `unlink home:/` used to delete the home directory.
+
+- Closing one of a user's two connections announced them offline to everyone. Presence is now announced on the first connection and after the last.
+
+- `uninvite` left the room in the removed user's client and kept their place in it, so a removed user could hold a transient room open. Losing access by `leave`, `uninvite` or `group.unassign` now releases the user's places and sends `roomGone`.
+
+- A transient room that nobody entered was never deleted until the server restarted: the grace period counts from emptying, and such a room never empties. It is now deleted 15 minutes after it was raised, set by `MINOS_ROOM_UNENTERED`. A separate period rather than the grace period, because two minutes is too short for invitees to arrive.
+
+- A transient room could be deleted with someone in it. `Exit` decided the room was empty, released its lock, then stamped `empty_since`; an entry between the two left an occupied room counting down. The sweep had the same gap between listing expired rooms and deleting them. Both now happen under the occupancy lock, and the delete checks expiry again.
+
+- A session used at least every 12 hours never expired and never lost its admin role, and `/logout` only cleared the caller's cookie. A session now ends 7 days after login. Logout revokes it on the server and closes its sockets. Revocations are kept in memory, so a restart forgets them; the 7-day limit still applies.
+
+- The websocket skipped its `Origin` check, on the mistaken premise that an upgrade carries none. Browsers always send one, and `SameSite=Lax` does not separate ports on one host. An upgrade naming another origin is now refused with 403, and a JSON POST without `Content-Type: application/json` with 415.
+
+- The terminal client never reconnected, though the server hangs up on a client 256 frames behind on the understanding that it would. It now logs in again with backoff, syncs, and enters again the room it was in.
+
+- The terminal client marked messages read with a blocking request from inside `draw`, and kept its local cursor when the server refused. The request no longer blocks the screen, and a refused read puts the cursor back.
+
+- `system` accepted `channel.publish` and `channel.appoint` from an administrator, and an `unsubscribe` from it was undone at every start. All three are refused.
+
+- A file named `x opened the channel Ops (id)` made the terminal client resolve `Ops` to an id of the uploader's choosing. Only a `system` event with a one-word founder counts now, and a control character in an announced path is replaced by `?`.
+
+- The terminal client drew one cell per character, so CJK text and most emoji overlapped. It measures cells, and draws bidi controls as `?`.
+
+- Subscribing to a channel showed none of what it already held. The client fetches history only at sync or when an arriving message reveals a gap, and nothing is pushed to someone outside the audience, so a new subscriber saw the channel's past only after its next post. It now backfills on subscribing, and on any `room` push whose `lastSeq` is ahead. Found by driving the real client in a pseudo-terminal; every earlier test subscribed before publishing.
+
+- `/help` showed only its last six entries, the key hints, because it wrote a notice per entry and the notice area keeps six lines. It now fills the pane like archive results, and a test fails if a command is missing from it.
+
 ### Added
+
+- A `worker` account, which a container run speaks as. A run posted under a person's name before, `bob` in every example; the room could not tell the agent's work from theirs. Grants replace it (implementation-plan item 5).
+
+- `make container` runs the shim in a real container against a broker on the host: all six operations over a bind-mounted socket, with no network and a read-only root, on the host's uid. A container on another uid is refused by the socket's mode alone. Opt-in, because it needs docker.
+
+- `make cover` reports the server's statement coverage under the conformance suite. It passes an absolute `GOCOVERDIR`: a relative one resolves against `go/conformance`, where the server runs, and the runtime then writes no data and reports no error. That is why earlier attempts found none.
+
+- A broker test restarts the server under a run and checks that a message said while the broker was reconnecting is delivered once, with no tear. `testserver.Restart` reopens the same database on the same address.
 
 - `minosb`, one run's broker on the host, and `minosa`, the shim its container carries. The broker holds the session, the room's cursor and the run's unix socket; the container reaches six operations -- `messages`, `say`, `submit`, `await`, `progress`, `status` -- and no seventh, so it cannot reach a file write or a settings replacement at any credential. On the host rather than in the container: a client inside would speak the whole wire, which answers a 100 MiB `writefile` on the same connection as chat, and would have to be cut back by a capability system that does not exist yet. See [docs/dev/recommended-architecture.md](docs/dev/recommended-architecture.md) and [docs/dev/implementation-plan.md](docs/dev/implementation-plan.md).
 
@@ -103,6 +159,44 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 - `go/cmd/minos`, the terminal client, on tcell; `make tui` runs it with `-server`, `-user` and `-password`. It behaves like `tui/`, with two exceptions. Control characters show as `?` rather than `^[`. Wrapping collapses runs of spaces.
 
 - Rooms can be raised without knowing a command. Tab walks on from the channels to the people in the sidebar, and Enter on one raises a room with them, sending anything typed first as its first message. A user with no rooms is told so at start-up, and the hint line in a room names `/invite`. Before this, `system` was always selected, so the one hint that named `/open` never showed.
+
+### Changed
+
+- `design.md` answers section 13 question 2: what a grant contains. A grant lists the rooms a run may read, the rooms it may send to, and the rooms it may submit to, plus `since` and an expiry. It names no role. Roles stay in `pma`, whose routing already picks the agent and model for each workflow node; the same routing should also pick the grant. The workflow section now describes `pma`'s graph of nodes instead of a list of stages.
+
+- Size limits: a request body is at most 1 MiB and an upload 100 MiB, answered 413 above that. A socket frame is at most 1 MiB, closed with 1009. A message body or rejection comment is at most 64 KiB, and a title or group name 200 characters, each refused with a readable error. Before, only the library's 32 KiB frame limit applied, and it closed the socket.
+
+- A room whose last grant is withdrawn is deleted if ad-hoc. For a permanent room, withdrawing the last grant is refused. A room with no grants was reachable by nobody and was never deleted, and a permanent one still held its name.
+
+- Room lists read each room's latest message by key instead of scanning all of its messages on every `sync`.
+
+- `/logout` without a session answers 403, as the contract says of every route but `/`, `/ping` and `/login`. `/ping` refreshes a session it is given. The socket is served at `/` only. A missing room id is quoted as `null` rather than `None`. The server warns at start when `MINOS_SECRET` is unset.
+
+- `chat-concepts.md`, now at `docs/dev/`, specifies the channel feed and archival by age. Every channel message has a subject and a body, and each subscriber opens items individually. The admin sets an archival period per channel and per admin-created room, and whether its archive can be searched. `docs/wire-contract.md` sections 10 and 11 give the operations, fields and pushes.
+
+## Before the Go-only tree
+
+Entries written before `03a2262` (2026-09-11), when the Python server and both web front ends were removed. Kept as written: they describe that tree, not this one.
+
+### Removed
+
+- `client/`, the web desktop, and the last JavaScript in the tree with it: Vite, Vitest, TypeScript, `client/node_modules`, and the `client` and `dev` make targets. It spoke the retired conversation model -- rooms as sets of people, `merge`, membership edited by dragging -- so it had not connected to this server since the model changed. Removed rather than ported, because `tui/` already reaches every operation and a second front end is a second thing to keep in step with the model.
+
+  Its 115 tests went too, and no coverage did: they drove a mocked socket, so they passed against a server they could not talk to, and the routes `client/tests/api.test.ts` pinned are pinned against a running server by `tests/conformance/test_http.py`. Nothing builds `dist/` any more; both servers already served the API alone when it is empty.
+
+- The OS.js v3 reference client and the whole `src/` tree: the bootstrap and config under `src/client/`, the CLI config under `src/cli/`, and the `MonoBlueTheme` package. It built to `dist/osjs.html`, which is now a 404.
+
+- Its build: `webpack.config.js`, the root `package.json` and `package-lock.json`, and with them every `@osjs/*` dependency.
+
+- The `osjs` and `lint` make targets. `lint` ran stylelint over the OS.js theme CSS and had nothing else to cover; there is no stylelint config any more.
+
+- `DistWatcher` and its polling thread. It pushed `osjs/dist:changed` and `osjs/packages:metadata:changed`, both of which had lost their consumer: the manifest was written by `osjs-cli package:discover`, and the new client logs any frame it does not handle. Vite emits fingerprinted files under `dist/assets/` while the watcher only scanned the top level, so it could no longer fire at all.
+
+- `WATCH_DIST` and `WATCH_INTERVAL` from `server/config.py`, so the `MINOS_WATCH_DIST` environment variable is no longer read.
+
+- `tests/test_theme_package.py` (guards on the MonoBlueTheme package contract) and `tests/test_watcher.py`.
+
+### Added
 
 - Submissions and moderation (`chat-concepts.md` 5), in `go/` only. An administrator appoints moderators with `channel.appoint` and `channel.dismiss`. A channel with moderators takes `channel.submit` from its subscribers, and a moderator decides with `submission.approve` or `submission.reject` and may publish directly. Approval appends the text under its author's name with the next `seq`; submitting and rejecting issue none, so the sequence stays contiguous. A rejection is kept, and reported in `sync`, until its author sends `submission.acknowledge`. The operations are `docs/wire-contract.md` section 9.
 
@@ -159,36 +253,6 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 ### Fixed
 
-- `copy` onto the same file emptied it, because the destination was truncated before the source was read. `copy` of a directory into its own subtree nested about 2,000 levels before failing on path length. Both now answer 400. The check compares files rather than names, so a hard link to the source is refused too.
-
-- The VFS followed a symlink out of its mountpoint: the prefix check was lexical, and `os.Open` resolves links. Every operation now runs through an `os.Root`, over resolving paths with `EvalSymlinks` first, which would leave a gap between the check and the use. `unlink` and `rename` of a mountpoint's root are refused with 403; `unlink home:/` used to delete the home directory.
-
-- Closing one of a user's two connections announced them offline to everyone. Presence is now announced on the first connection and after the last.
-
-- `uninvite` left the room in the removed user's client and kept their place in it, so a removed user could hold a transient room open. Losing access by `leave`, `uninvite` or `group.unassign` now releases the user's places and sends `roomGone`.
-
-- A transient room that nobody entered was never deleted until the server restarted: the grace period counts from emptying, and such a room never empties. It is now deleted 15 minutes after it was raised, set by `MINOS_ROOM_UNENTERED`. A separate period rather than the grace period, because two minutes is too short for invitees to arrive.
-
-- A transient room could be deleted with someone in it. `Exit` decided the room was empty, released its lock, then stamped `empty_since`; an entry between the two left an occupied room counting down. The sweep had the same gap between listing expired rooms and deleting them. Both now happen under the occupancy lock, and the delete checks expiry again.
-
-- A session used at least every 12 hours never expired and never lost its admin role, and `/logout` only cleared the caller's cookie. A session now ends 7 days after login. Logout revokes it on the server and closes its sockets. Revocations are kept in memory, so a restart forgets them; the 7-day limit still applies.
-
-- The websocket skipped its `Origin` check, on the mistaken premise that an upgrade carries none. Browsers always send one, and `SameSite=Lax` does not separate ports on one host. An upgrade naming another origin is now refused with 403, and a JSON POST without `Content-Type: application/json` with 415.
-
-- The terminal client never reconnected, though the server hangs up on a client 256 frames behind on the understanding that it would. It now logs in again with backoff, syncs, and enters again the room it was in.
-
-- The terminal client marked messages read with a blocking request from inside `draw`, and kept its local cursor when the server refused. The request no longer blocks the screen, and a refused read puts the cursor back.
-
-- `system` accepted `channel.publish` and `channel.appoint` from an administrator, and an `unsubscribe` from it was undone at every start. All three are refused.
-
-- A file named `x opened the channel Ops (id)` made the terminal client resolve `Ops` to an id of the uploader's choosing. Only a `system` event with a one-word founder counts now, and a control character in an announced path is replaced by `?`.
-
-- The terminal client drew one cell per character, so CJK text and most emoji overlapped. It measures cells, and draws bidi controls as `?`.
-
-- Subscribing to a channel showed none of what it already held. The client fetches history only at sync or when an arriving message reveals a gap, and nothing is pushed to someone outside the audience, so a new subscriber saw the channel's past only after its next post. It now backfills on subscribing, and on any `room` push whose `lastSeq` is ahead. Found by driving the real client in a pseudo-terminal; every earlier test subscribed before publishing.
-
-- `/help` showed only its last six entries, the key hints, because it wrote a notice per entry and the notice area keeps six lines. It now fills the pane like archive results, and a test fails if a command is missing from it.
-
 - A client that subscribed to a channel created after it connected received nothing published to it. `Messaging.subscribe` never watched the channel's topic, so the Python server's process sat in the audience of a channel it was not listening to, and only a reconnect repaired it. Unreachable until now, because every channel existed before every connection.
 
 - The bus lost a message published just after a subscription. A subscription has to reach every publisher before it matches anything, and `open` followed by `send` is one round trip -- so the first message in a new room was dropped, and a client cannot repair a gap it has no way to know is there. The proxy now subscribes to everything, and which topics a process wants is a dict it tests when the message lands rather than a filter that has to travel. A subscription holds the moment it is asked for; the cost is that every process reads every message. `test_a_message_is_stored_before_it_is_published` failed every run against `server/`, and the two delivery tests failed intermittently.
@@ -200,16 +264,6 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 - `tests/conformance/wire.py` provokes a reply when the handshake does not arrive promptly. `simple_websocket`'s client blocks on the socket before draining what its parser already holds, so a server fast enough to put the first frame in the same TCP segment as the 101 response leaves that frame stranded until unrelated traffic appears. The Go server is fast enough and Werkzeug usually is not, which is why this surfaced only after the port. The assertion is unchanged: `osjs/core:connected` must still be the first control frame on the connection.
 
 ### Changed
-
-- Size limits: a request body is at most 1 MiB and an upload 100 MiB, answered 413 above that. A socket frame is at most 1 MiB, closed with 1009. A message body or rejection comment is at most 64 KiB, and a title or group name 200 characters, each refused with a readable error. Before, only the library's 32 KiB frame limit applied, and it closed the socket.
-
-- A room whose last grant is withdrawn is deleted if ad-hoc. For a permanent room, withdrawing the last grant is refused. A room with no grants was reachable by nobody and was never deleted, and a permanent one still held its name.
-
-- Room lists read each room's latest message by key instead of scanning all of its messages on every `sync`.
-
-- `/logout` without a session answers 403, as the contract says of every route but `/`, `/ping` and `/login`. `/ping` refreshes a session it is given. The socket is served at `/` only. A missing room id is quoted as `null` rather than `None`. The server warns at start when `MINOS_SECRET` is unset.
-
-- `chat-concepts.md`, now at `docs/dev/`, specifies the channel feed and archival by age. Every channel message has a subject and a body, and each subscriber opens items individually. The admin sets an archival period per channel and per admin-created room, and whether its archive can be searched. `docs/wire-contract.md` sections 10 and 11 give the operations, fields and pushes.
 
 - A `presence` push no longer reaches the person it is about. It is a fact about a user rather than a connection, and the client it would go back to is the one that caused it. It also made a client's own arrival race the connection that provoked it, which is what the conformance suite kept catching.
 

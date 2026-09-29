@@ -174,10 +174,7 @@ func run(state string) {
 	step(7, "the rule can be withdrawn: no groups is open, not closed")
 	channel = demo.Call("channel.revoke", "channel", system, "group", group["id"])["channel"].(obj)
 	say("   /channel revoke system Ops")
-	audience := []any{}
-	for _, name := range channel["audience"].([]any) {
-		audience = append(audience, name)
-	}
+	audience := append([]any{}, channel["audience"].([]any)...)
 	slices.SortFunc(audience, func(a, b any) int { return strings.Compare(a.(string), b.(string)) })
 	say(fmt.Sprintf("   restrictedTo %s   audience %s", repr(channel["restrictedTo"]), repr(audience)))
 	report("bob", bob)

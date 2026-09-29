@@ -53,6 +53,20 @@ func TestClosingPostsAnEventAndIsIdempotent(t *testing.T) {
 
 // Its grace period already decides when a transient room ends; closing would
 // name a second, contradictory end.
+// The event is pushed to the audience like any message, so no client has to
+// ask history for what the server already knew to send.
+func TestTheClosingEventIsPushedToTheAudience(t *testing.T) {
+	demo, alice := connect(t, admin), connect(t, "alice")
+	room := demo.Call("create", "title", unique("task"), "invite", []string{"alice"})
+	alice.ExpectPush(PushOf("room"))
+	alice.Drain()
+
+	demo.Call("room.close", "room", room["id"])
+	alice.ExpectPush(func(e Obj) bool {
+		return e["type"] == "message" && e["room"] == room["id"] && e["body"] == "demo closed this room"
+	})
+}
+
 func TestATransientRoomIsNotClosed(t *testing.T) {
 	demo := connect(t, admin)
 	meeting := demo.Call("open", "invite", []string{"alice"}, "title", "", "retention", "transient")

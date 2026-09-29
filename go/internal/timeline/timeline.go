@@ -760,16 +760,30 @@ func (t *Timeline) SetState(roomID, state string) (bool, error) {
 
 // DeleteProject dissolves a project, leaving its rooms filed under none.
 func (t *Timeline) DeleteProject(projectID string) (bool, error) {
+	transaction, err := t.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer transaction.Rollback()
+
 	// A scope is a position within a project, so it goes with the project.
-	if _, err := t.db.Exec(
+	if _, err := transaction.Exec(
 		"UPDATE rooms SET project = NULL, scope = '', task = '' WHERE project = ?", projectID,
 	); err != nil {
 		return false, err
 	}
-	if _, err := t.db.Exec("DELETE FROM project_tags WHERE project_id = ?", projectID); err != nil {
+	if _, err := transaction.Exec("DELETE FROM project_tags WHERE project_id = ?", projectID); err != nil {
 		return false, err
 	}
-	return t.changed("DELETE FROM projects WHERE id = ?", projectID)
+	result, err := transaction.Exec("DELETE FROM projects WHERE id = ?", projectID)
+	if err != nil {
+		return false, err
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return deleted > 0, transaction.Commit()
 }
 
 // -- rooms -------------------------------------------------------------------

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -227,5 +228,27 @@ func TestALineIsQuotedOnlyWhenItCouldBreak(t *testing.T) {
 		if got := Line(body); got != want {
 			t.Errorf("Line(%q) = %q, want %q", body, got, want)
 		}
+	}
+}
+
+// The socket is born with its mode, and the process's umask is left as found.
+func TestListenBindsWithTheModeAndRestoresTheUmask(t *testing.T) {
+	was := syscall.Umask(0o022)
+	defer syscall.Umask(was)
+	path := testserver.SocketPath(t)
+	listener, err := Listen(path, 0o660)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if now := syscall.Umask(0o022); now != 0o022 {
+		t.Fatalf("Listen left the umask at %o", now)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o660 {
+		t.Fatalf("the socket's mode is %o", mode)
 	}
 }

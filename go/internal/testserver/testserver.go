@@ -3,9 +3,11 @@
 package testserver
 
 import (
+	"net"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"minos/internal/chat"
@@ -20,6 +22,10 @@ import (
 type Server struct {
 	Base  string
 	Store *timeline.Timeline
+
+	settings     config.Config
+	historyLimit int
+	stop         func()
 }
 
 // Start launches a server with its state under the test's temporary directory,
@@ -41,7 +47,34 @@ func Start(t testing.TB, historyLimit int) *Server {
 		t.Fatalf("cannot write the index: %v", err)
 	}
 
-	store, err := timeline.Open(filepath.Join(settings.RunDir, "timeline.db"), historyLimit, settings.Grace, settings.Unentered)
+	s := &Server{settings: settings, historyLimit: historyLimit}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("cannot listen: %v", err)
+	}
+	s.start(t, listener)
+	t.Cleanup(func() { s.stop() })
+	return s
+}
+
+// Restart stops the server and starts it again on the same address and the
+// same database, as a process restart would: every connection is dropped and
+// every session forgotten.
+func (s *Server) Restart(t testing.TB) {
+	t.Helper()
+	address := strings.TrimPrefix(s.Base, "http://")
+	s.stop()
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatalf("cannot listen on %s again: %v", address, err)
+	}
+	s.start(t, listener)
+}
+
+func (s *Server) start(t testing.TB, listener net.Listener) {
+	t.Helper()
+	settings := s.settings
+	store, err := timeline.Open(filepath.Join(settings.RunDir, "timeline.db"), s.historyLimit, settings.Grace, settings.Unentered)
 	if err != nil {
 		t.Fatalf("cannot open the timeline: %v", err)
 	}
@@ -53,14 +86,18 @@ func Start(t testing.TB, historyLimit int) *Server {
 	handler.StartSweeper()
 
 	api := httpapi.New(settings, vfs.New(settings), registry, handler)
-	server := httptest.NewServer(api.Handler())
-	t.Cleanup(func() {
+	server := httptest.NewUnstartedServer(api.Handler())
+	server.Listener.Close()
+	server.Listener = listener
+	server.Start()
+	s.Base, s.Store = server.URL, store
+	s.stop = func() {
 		api.Close()
+		server.CloseClientConnections()
 		server.Close()
 		handler.Close()
 		store.Close()
-	})
-	return &Server{Base: server.URL, Store: store}
+	}
 }
 
 // SocketPath is a path to bind a unix socket at, removed when the test ends.

@@ -125,7 +125,7 @@ var help = [][2]string{
 	{"/close  /reopen [room]", "say whether the work in a place is done"},
 	{"Tab / S-Tab", "next or previous tab, outside a room"},
 	{"Up / Down", "move through the list, or a channel's items"},
-	{"a", "in a list of places, show the closed ones too"},
+	{"^A", "in a list of places, show the closed ones too"},
 	{"Enter on a project", "open its page: what it holds, and its places"},
 	{"Enter on a room", "go in: the screen is that room until you step out"},
 	{"Enter on a person", "raise a room with them"},
@@ -141,7 +141,9 @@ type Ui struct {
 	client  *client.Client
 	profile client.Profile
 
-	input     []rune
+	input []rune
+	// Between the terminal's paste brackets, keys are text and nothing else.
+	pasting   bool
 	scroll    int
 	selected  string
 	person    string // selected in PEOPLE instead of a space; selected is then ""
@@ -157,16 +159,19 @@ type Ui struct {
 	scope  string
 	scoped bool
 
-	// The row under the cursor in whichever list is shown.
-	cursor int
+	// The row under the cursor in whichever list is shown, and its id. The id
+	// is what holds the cursor: rows arriving above it change the index.
+	cursor   int
+	cursorID string
 
 	// Whether a list of places shows the closed ones too. Off on every move to
 	// a tab or a project, because what is active is what a list is for.
 	showClosed bool
 
-	// In a channel: the item under the cursor, as an index into feedOrder, and
-	// the one whose body is shown, by seq.
+	// In a channel: the item under the cursor, as an index into feedOrder and
+	// by seq, which holds it as cursorID does; and the one whose body is shown.
 	item     int
+	itemSeq  int64
 	expanded int64
 
 	// Archive output, shown in place of the conversation until Esc or a move
@@ -189,6 +194,9 @@ type Ui struct {
 
 	// now is the clock the activity window is measured against; tests replace it.
 	now func() time.Time
+	// keyHandler handles one key, off the loop; tests replace it to hold a key
+	// the way a slow request does.
+	keyHandler func(*tcell.EventKey)
 
 	// Notices arrive from the client's applier as well as from commands.
 	mutex   sync.Mutex
@@ -205,6 +213,7 @@ func Run(c *client.Client, profile client.Profile) error {
 		return err
 	}
 	defer screen.Fini()
+	screen.EnablePaste()
 	newUi(screen, c, profile).loop()
 	return nil
 }
@@ -215,6 +224,7 @@ func newUi(screen tcell.Screen, c *client.Client, profile client.Profile) *Ui {
 		screen: screen, client: c, profile: profile, running: true,
 		colours: map[string]tcell.Color{}, now: time.Now,
 	}
+	u.keyHandler = u.key
 	if screen != nil {
 		if screen.Colors() > 0 {
 			// The ANSI colours curses calls blue, cyan, yellow, red and green.
@@ -350,10 +360,62 @@ func (u *Ui) ensureSelection() {
 		u.scoped, u.scope, u.cursor = false, "", 0
 		u.view = viewProjects
 	}
+	if at := slices.Index(u.rowIDs(), u.cursorID); u.cursorID != "" && at >= 0 {
+		u.cursor = at
+	}
 	u.cursor = max(0, min(u.cursor, u.rowCount()-1))
+	u.pin()
 	if u.view == viewRooms || u.view == viewProject {
 		u.followCursor()
 	}
+	if space, ok := u.client.Space(u.selected); u.view == viewSpace && ok && isFeed(space) {
+		order := u.feedOrder(space)
+		if at := slices.IndexFunc(order, func(m client.Message) bool { return m.Seq == u.itemSeq }); at >= 0 {
+			u.item = at
+		}
+		u.pinItem(order)
+	}
+}
+
+// pin records the row under the cursor by id. Called wherever the cursor is
+// moved on purpose, after the view it indexes is set.
+func (u *Ui) pin() {
+	ids := u.rowIDs()
+	u.cursorID = ""
+	if u.cursor >= 0 && u.cursor < len(ids) {
+		u.cursorID = ids[u.cursor]
+	}
+}
+
+// pinItem does the same for a channel's item under the cursor.
+func (u *Ui) pinItem(order []client.Message) {
+	u.item = max(0, min(u.item, len(order)-1))
+	u.itemSeq = 0
+	if u.item < len(order) {
+		u.itemSeq = order[u.item].Seq
+	}
+}
+
+// rowIDs is the ids of the rows the cursor indexes, in the order drawn.
+func (u *Ui) rowIDs() []string {
+	var ids []string
+	switch u.view {
+	case viewOverview:
+		for _, row := range u.overviewRows() {
+			ids = append(ids, row.id)
+		}
+	case viewProjects:
+		for _, row := range u.projectRows() {
+			ids = append(ids, row.id)
+		}
+	case viewProject, viewRooms:
+		for _, row := range u.roomRows() {
+			ids = append(ids, row.ID)
+		}
+	case viewPeople:
+		ids = u.people()
+	}
+	return ids
 }
 
 // project is one project by id, or nil.
@@ -418,6 +480,7 @@ func (u *Ui) showTab(next tab) {
 		u.selectSpace("")
 		u.person = ""
 	}
+	u.pin()
 }
 
 // enterRow goes one level in from the list on screen.
@@ -458,6 +521,7 @@ func (u *Ui) openProject(id string) {
 	u.scope, u.scoped, u.cursor = id, true, 0
 	u.showClosed = false
 	u.view = viewProject
+	u.pin()
 	u.followCursor()
 }
 
@@ -466,7 +530,7 @@ func (u *Ui) openProject(id string) {
 func (u *Ui) openSpace(space client.Room) {
 	u.selectSpace(space.ID)
 	u.view = viewSpace
-	u.scroll, u.item, u.expanded = 0, 0, 0
+	u.scroll, u.item, u.itemSeq, u.expanded = 0, 0, 0, 0
 	if space.Kind == "room" {
 		u.enterRoom(space.ID)
 	}
@@ -499,11 +563,13 @@ func (u *Ui) back() {
 			u.view = viewOverview
 			rows := u.overviewRows()
 			u.cursor = max(0, slices.IndexFunc(rows, func(r projectRow) bool { return r.id == opened }))
+			u.pin()
 			return
 		}
 		u.view = viewProjects
 		rows := u.projectRows()
 		u.cursor = max(0, slices.IndexFunc(rows, func(r projectRow) bool { return r.id == opened }))
+		u.pin()
 	}
 }
 
@@ -516,7 +582,7 @@ func (u *Ui) selectSpace(id string) {
 	u.release()
 
 	u.selected, u.person = id, ""
-	u.scroll, u.item, u.expanded, u.results = 0, 0, 0, nil
+	u.scroll, u.item, u.itemSeq, u.expanded, u.results = 0, 0, 0, 0, nil
 }
 
 // enterRoom goes into a room, and the screen is that room until the user steps
@@ -550,7 +616,7 @@ func (u *Ui) release() {
 func (u *Ui) selectPerson(name string) {
 	u.release()
 	u.selected, u.person, u.scroll = "", name, 0
-	u.item, u.expanded, u.results = 0, 0, nil
+	u.item, u.itemSeq, u.expanded, u.results = 0, 0, 0, nil
 }
 
 // people is every other account, in the roster's order.
@@ -672,9 +738,8 @@ func (u *Ui) overviewRows() []projectRow {
 
 // lastAt is when a space was last spoken in, or when it was founded.
 func (u *Ui) lastAt(space client.Room) float64 {
-	log := u.client.Log(space.ID)
-	if len(log) > 0 {
-		return log[len(log)-1].At
+	if at, ok := u.client.LastAt(space.ID); ok {
+		return at
 	}
 	return space.CreatedAt
 }
@@ -723,23 +788,82 @@ func (u *Ui) closedCount() int {
 // -- the loop ----------------------------------------------------------------
 
 func (u *Ui) loop() {
+	// What arrived while a key was being handled, to be handled next.
+	var backlog []tcell.Event
 	for u.running {
 		u.ensureSelection()
 		u.watch()
 		u.draw()
-		switch event := u.screen.PollEvent().(type) {
+		var next tcell.Event
+		if len(backlog) > 0 {
+			next, backlog = backlog[0], backlog[1:]
+		} else {
+			next = u.screen.PollEvent()
+		}
+		switch event := next.(type) {
 		case nil:
 			u.running = false // the screen was finalised under us
 		case *tcell.EventResize:
 			u.screen.Sync()
+		case *tcell.EventPaste:
+			u.pasting = event.Start()
 		case *tcell.EventKey:
-			u.key(event)
+			later, quit := u.dispatch(event)
+			if quit {
+				// Not released: the key's request may still hold the UI's
+				// state, and the server releases a closed connection's places.
+				return
+			}
+			backlog = append(backlog, later...)
 		}
 	}
 	u.release()
 }
 
+// dispatch handles one key on its own goroutine and reads events until it
+// returns, so ^C quits while a request waits on the server. Anything else is
+// returned unhandled, in order. The loop touches no UI state meanwhile; the
+// screen is not redrawn until the key returns.
+func (u *Ui) dispatch(event *tcell.EventKey) (later []tcell.Event, quit bool) {
+	done := make(chan struct{})
+	go func() {
+		defer func() {
+			close(done)
+			_ = u.screen.PostEvent(tcell.NewEventInterrupt(nil)) // wakes PollEvent
+		}()
+		u.keyHandler(event)
+	}()
+	pasting := u.pasting
+	for {
+		select {
+		case <-done:
+			return later, false
+		default:
+		}
+		switch polled := u.screen.PollEvent().(type) {
+		case nil:
+			return later, true
+		case *tcell.EventInterrupt:
+			// A wake-up; the redraw after the key covers it.
+		case *tcell.EventPaste:
+			pasting = polled.Start()
+			later = append(later, polled)
+		case *tcell.EventKey:
+			if polled.Key() == tcell.KeyCtrlC && !pasting {
+				return later, true
+			}
+			later = append(later, polled)
+		default:
+			later = append(later, polled)
+		}
+	}
+}
+
 func (u *Ui) key(event *tcell.EventKey) {
+	if u.pasting {
+		u.pasted(event)
+		return
+	}
 	if u.pending != "" && event.Key() != tcell.KeyCtrlC {
 		u.answer(event)
 		return
@@ -779,8 +903,28 @@ func (u *Ui) key(event *tcell.EventKey) {
 		if u.view == viewProject || u.view == viewRooms {
 			u.showClosed = !u.showClosed
 			u.cursor = 0
+			u.pin()
 			u.followCursor()
 		}
+	case tcell.KeyRune:
+		if unicode.IsPrint(event.Rune()) {
+			u.input = append(u.input, event.Rune())
+		}
+	}
+}
+
+// pasted takes one key from inside a paste as text: a pasted newline does not
+// submit, a pasted ^C does not quit, and nothing pasted answers a confirmation.
+// A pasted `/` line waits in the composer until Enter is pressed.
+func (u *Ui) pasted(event *tcell.EventKey) {
+	if u.pending != "" {
+		return
+	}
+	switch event.Key() {
+	case tcell.KeyEnter, tcell.KeyCtrlJ:
+		u.input = append(u.input, '\n')
+	case tcell.KeyTab:
+		u.input = append(u.input, '\t')
 	case tcell.KeyRune:
 		if unicode.IsPrint(event.Rune()) {
 			u.input = append(u.input, event.Rune())
@@ -890,10 +1034,12 @@ func (u *Ui) move(step int) {
 		if !ok || !isFeed(space) {
 			return
 		}
-		u.item = max(0, min(u.item+step, len(u.feedOrder(space))-1))
+		u.item += step
+		u.pinItem(u.feedOrder(space))
 		return
 	}
 	u.cursor = max(0, min(u.cursor+step, u.rowCount()-1))
+	u.pin()
 	switch u.view {
 	case viewProject, viewRooms:
 		u.followCursor()
@@ -924,7 +1070,7 @@ func (u *Ui) toggle(space client.Room) {
 		u.notice(err.Error())
 		return
 	}
-	u.item = slices.IndexFunc(u.feedOrder(space), func(m client.Message) bool { return m.Seq == message.Seq })
+	u.item, u.itemSeq = slices.IndexFunc(u.feedOrder(space), func(m client.Message) bool { return m.Seq == message.Seq }), message.Seq
 }
 
 func subjectOf(message client.Message) string {
@@ -1208,7 +1354,8 @@ func (u *Ui) cmdLeave([]string) error {
 	if err := u.client.Leave(leaving); err != nil {
 		return err
 	}
-	u.selected = ""
+	// Back to the list, as /exit goes: the space shown is no longer there.
+	u.exited()
 	return nil
 }
 
@@ -1648,7 +1795,9 @@ func (u *Ui) cmdSubscribe(args []string) error {
 	if err != nil {
 		return err
 	}
-	u.selectSpace(channel.ID)
+	// Shown, not only selected: from a list that does not hold it, a selection
+	// would aim the composer at something off screen.
+	u.openSpace(channel)
 	return nil
 }
 
@@ -1661,7 +1810,7 @@ func (u *Ui) cmdUnsubscribe([]string) error {
 	if err := u.client.Unsubscribe(leaving); err != nil {
 		return err
 	}
-	u.selected = ""
+	u.exited()
 	return nil
 }
 
@@ -2599,9 +2748,12 @@ func (u *Ui) drawResults(top, width, bottom int) {
 
 // markRead moves the read cursor when the newest message is on screen. Seen, as
 // opposed to received, and kept by the server because it is the same from every
-// device. It runs while drawing, so the server is told without waiting.
+// device. It runs while drawing, so the server is told without waiting. Through
+// what the log holds, not LastSeq, which can be ahead of what was drawn.
 func (u *Ui) markRead(space client.Room) {
-	u.client.MarkReadLater(space.ID, space.LastSeq)
+	if through := u.client.ShownThrough(space.ID); through > 0 {
+		u.client.MarkReadLater(space.ID, through)
+	}
 }
 
 func (u *Ui) drawComposer(height, width int) {

@@ -2,6 +2,8 @@
 
 2026-09-21. A review of [design.md](design.md) and [agent-container-net.md](agent-container-net.md), read against [contagent](https://github.com/kanaka/contagent) at `53e4a99`, the `sanduk` tree at v0.3.1, and [sanduk_feedback.md](sanduk_feedback.md) and [pma_feedback.md](pma_feedback.md).
 
+Status: a review, as of that date. Its findings fed [recommended-architecture.md](recommended-architecture.md); it is not updated.
+
 Claims about contagent were checked against its tree and are cited by file. Claims about the minos Go tree are taken from the two documents and from the two prior reviews; they were not re-verified here. Everything else is argument.
 
 ## Verdict

@@ -10,70 +10,18 @@ Items marked `R<n>` come from `REVIEW.md` (2026-09-27, at `30abc37`). See that f
 
 ## Medium
 
-- [ ] R8. `messages -since N` raises `delivered` to `N` past the room's end; `progress` follows (`broker.go:289-291`, `:343-347`). Refuse a `since` above `delivered`.
-
-- [ ] R9. `MarkRead` stores any sequence (`timeline.go:1374`). Clamp to `high_seq` or refuse.
-
-- [ ] R10. A moderator outside a restricted channel's audience can read its queue, approve and publish (`messaging.go:1465-1472`, `:1610`, `:1686-1692`, `:1780-1790`). Decide the rule: refuse ineligible appointments and dismiss on lost eligibility, or state that appointment grants access. Write it in `chat-concepts.md` section 5; add a conformance test.
-
-- [ ] R14. `markRead` sends `space.LastSeq`, not the last sequence in the local log (`app.go:2471-2473`). Send the last displayed sequence.
-
-- [ ] R15. No bracketed paste: a pasted newline submits, a pasted `/` line runs, a pasted character answers a pending confirmation. Call `screen.EnablePaste()`; treat text between paste events as input only.
-
-- [ ] R16. List cursors are row indexes (`app.go:160-170`); a push above the cursor moves the selection. Hold the selection by id.
-
-- [ ] R17. `Enter`, `Exit`, `Send`, `Open` and commands block the key loop for up to 10 s (`app.go:532`, `:542`, `:837`, `:924`; `protocol.go:36`). `^C` is not processed meanwhile.
-
-- [ ] Tests: add `-race` to `make test`. Add a server-restart-under-broker test (`implementation-plan.md:150`). Find why `GOCOVERDIR` coverage of the conformance binary writes no data (candidates: env handling, `SIGTERM` then `Kill` in `go/conformance/harness.go:154-158`).
-
 ## Low
 
-- [ ] R18.1. `room.close`, `project.file`, `archive.set`, `channel.dismiss` on `system` are unguarded in `chat` (`chat.go:275-340`); `messaging` has no guard of its own.
+- [ ] The terminal client does not redraw while a key's request is outstanding (up to 10 s). ^C works (R17), but the handlers still block: moving the requests off the handlers, with results applied back on the loop, is the remaining refactor.
 
-- [ ] R18.2. `SetState` posts its event with a nil audience (`messaging.go:1333`); each client pays one `history` request per close.
+- [ ] If the agent stops reading stdin, the relay's write blocks `Deliver`, and `held` events stop. A write deadline is not the fix: a frame can exceed the 64 KiB pipe buffer, so a timed-out write leaves half a JSON line and every later frame is malformed; the only safe response is closing stdin, which ends the run. `minosb` exits without waiting on `Deliver`, so today the cost is the missing `held` events alone.
 
-- [ ] R18.3. `chat` keeps occupancy ids after `enter` releases them in `timeline` (`chat.go:371-378`). Comment at `chat.go:43` is stale.
+- [ ] Sync cost, measured: `RoomsFor` takes about 100 us per room (10 ms at 100 rooms, 72 ms at 1,000), from `describeAll`'s 4-5 queries per room on one connection (`timeline.go:1108`, `:453`). Not worth a change for a local server; it matters after a restart, when every client syncs at once.
 
-- [ ] R18.4. `DeleteProject` runs 3 statements outside a transaction (`timeline.go:762-773`). `CreateRoom` checks then inserts with no unique index (`messaging.go:495-505`).
+- [ ] Gap: no real agent has run in a container. `make container` proves the socket path: the shim, a bind mount, the host uid. Not yet: `sanduk` running the container with the worktree mounted and its uid dropped (implementation-plan item 3), and an agent CLI driving the shim.
 
-- [ ] R18.5. `Sweep` stops at the first failed delete and skips the archive pass (`messaging.go:857-860`).
+- [ ] Gap: `Window` is reported by `status` and enforced by nothing (`broker.go`, `Config.Window`). Grants make it a rule (implementation-plan item 5).
 
-- [ ] R18.6. `minosa say "- done"` exits 2: `split` passes the body to the flag parser (`go/cmd/minosa/main.go:162`).
+- [ ] Gap: every phase 0 run speaks as the one `worker` account (implementation-plan 2.4). A room cannot tell two runs apart; the broker tells its submissions apart by id alone.
 
-- [ ] R18.7. `submit` stores the pending submission after the request returns (`broker.go:378-380`); an earlier decision push is overwritten.
-
-- [ ] R18.8. `decided` adopts any same-author submission in the same channel (`broker.go:239-243`); two runs sharing a channel can `await` each other's.
-
-- [ ] R18.9. `/leave`, `/unsubscribe` keep `viewSpace` with no selection; `/subscribe` from `OVERVIEW` targets an off-screen channel (`app.go:1212`, `:1652`, `:1665`).
-
-- [ ] R18.10. `Listen` sets the socket mode after binding (`link.go:185-189`); the comment says before.
-
-- [ ] R18.11. 13 of 14 `link.Refuse` calls pass an empty rule; `Status.Expiry` is never set. `implementation-plan.md:147`, `:161` promise both.
-
-- [ ] R18.12. Terminal client: `-password` has no env or file alternative (`go/cmd/minos/main.go:29`); `http://` accepted without warning; raw HTTP error body printed unsanitized (`transport.go:89`, `main.go:47`).
-
-- [ ] R18.13. `lastAt` clones up to 1,000 messages per room several times per frame (`app.go:674`). Measure.
-
-- [ ] `describeAll` runs 4-5 queries per room on one connection during sync (`timeline.go:1108`, `:453`). Measure.
-
-- [ ] `staticcheck` S1011 at `go/cmd/demo/main.go:178`.
-
-- [ ] Docs: README omits `minosb`, `minosa`, `broker`, `link`, `testserver`, `cmd/demo`; `make go` builds 4 binaries, not 2; Tab contradicts itself (lines 53, 157); "Five things" has 6 bullets.
-
-- [ ] Docs: cheatsheet lacks `/projects`, `/project new|tag|untag|file|rm`, `/close`, `/reopen`, ^A, the `[project/]` prefix of `/create`.
-
-- [ ] Docs: diagrams missing. Commit the SVGs or correct `Makefile:53-55`; `agent-container-net.md:17`, `:47` embed absent images.
-
-- [ ] Docs: document `MINOS_TIMELINE_DB`, `MINOS_USER`, `MINOS_PASSWORD`, `MINOS_SOCKET`, `MINOS_SERVER`.
-
-- [ ] Docs: `wire-contract.md` request table omits `project`, `scope`, `task` on `create`, and `project` on `channel.create`.
-
-- [ ] Docs: `chat-concepts.md` has no project, scope or state; permanent-name uniqueness is per project, not global (`:90`); period change applies at the next sweep (`:251`, cf. `wire-contract.md:586`).
-
-- [ ] Docs: add a status line to each `docs/dev/` file. `agent-container-net.md` recommends the design `recommended-architecture.md:160` rejects; `design.md:3` contradicts its line 198; the 13 edits in `agent-container-net2.md` section 7 are unapplied; pick one name for a submission's final state (`timed_out`, `expired`, `timeout`).
-
-- [ ] Docs: mark `implementation-plan.md` status. Built: 1, 2, 4. Not built: 5 (grants), 6 (author kind), 7 (deadline), 8 (rate and quota), 13 (`minosa mcp`).
-
-- [ ] Docs: move admitted gaps here: no container run yet (`CHANGELOG.md:47`); read `Window` enforced by nothing (`broker.go:62`); workers share one account; in-memory revocations; no `worker` account.
-
-- [ ] CHANGELOG: *Unreleased* describes Python paths, removed make targets and a removed sidebar as current; it has two `### Fixed` headings.
+- [ ] Gap: session revocations are kept in memory, so a server restart forgets a logout. The 7-day session limit still applies.

@@ -24,7 +24,7 @@ func TestSyncDescribesTheWholeOfWhatAClientNeeds(t *testing.T) {
 
 func TestSyncListsEveryAccountSorted(t *testing.T) {
 	users := connect(t, "alice").Call("sync")["users"]
-	same(t, pluck(users, "username"), []string{"alice", "bob", "demo"})
+	same(t, pluck(users, "username"), []string{"alice", "bob", "demo", "worker"})
 	for _, user := range list(users) {
 		keySet(t, obj(user), "username", "online")
 	}
@@ -470,6 +470,18 @@ func TestAReadCursorNeverMovesBackwards(t *testing.T) {
 	same(t, obj(alice.Call("sync")["read"])[str(room["id"])], 3)
 }
 
+// A cursor past the room's end would mark messages read before they exist.
+func TestAReadCursorPastTheEndIsRefused(t *testing.T) {
+	alice := connect(t, "alice")
+	room := alice.Call("open", "invite", []string{}, "title", unique("Ahead"))
+	alice.Call("send", "room", room["id"], "body", "one")
+
+	same(t, alice.Refuse("read", "room", room["id"], "seq", 5000),
+		"Message 5000 does not exist yet; this room ends at 1")
+	_, listed := obj(alice.Call("sync")["read"])[str(room["id"])]
+	truth(t, !listed, "a refused read recorded a cursor")
+}
+
 func TestAReadCursorIsTheSameFactFromEveryConnection(t *testing.T) {
 	alice := connect(t, "alice")
 	room := alice.Call("open", "invite", []string{}, "title", unique("Devices"))
@@ -657,6 +669,21 @@ func TestSystemIsTheServers(t *testing.T) {
 	same(t, demo.Refuse("channel.publish", "channel", systemChannel, "body", "hi"), "Only the server writes to system")
 	same(t, demo.Refuse("channel.appoint", "channel", systemChannel, "username", "bob"), "Only the server writes to system")
 	same(t, bob.Refuse("channel.submit", "channel", systemChannel, "body", "hi"), "That channel accepts no submissions")
+}
+
+// Nor may an administrator close it, file it under a project, or dismiss a
+// moderator it cannot have. A fresh server: before the guard, these succeed.
+func TestSystemCannotBeClosedFiledOrModerated(t *testing.T) {
+	server := freshServer(t, nil)
+	demo := attach(t, server, "demo")
+	project := demo.Call("project.create", "name", unique("Ops"), "tags", []string{})
+
+	same(t, demo.Refuse("room.close", "room", systemChannel), "The server keeps system open")
+	same(t, demo.Refuse("room.reopen", "room", systemChannel), "The server keeps system open")
+	same(t, demo.Refuse("project.file", "room", systemChannel, "project", project["id"]),
+		"system belongs to no project")
+	same(t, demo.Refuse("channel.dismiss", "channel", systemChannel, "username", "bob"),
+		"Only the server writes to system")
 }
 
 func TestARoomIsNotAChannelToSubscribeTo(t *testing.T) {

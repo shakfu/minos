@@ -180,3 +180,30 @@ func TestABodyWithANewlineCannotForgeARecord(t *testing.T) {
 		t.Fatalf("stdout reads %q", stdout)
 	}
 }
+
+// Text that starts with a dash is text unless it names a flag the shim has,
+// and everything after `--` is text.
+func TestABodyStartingWithADashIsText(t *testing.T) {
+	for args, want := range map[string]string{
+		"say|- done":            "- done",
+		"say|-5 degrees":        "-5 degrees",
+		"say|--|-json":          "-json",
+		"say|-json|- all green": "- all green",
+	} {
+		code, _, stderr, seen := run(t, strings.Split(args, "|"), "", link.Reply{Code: link.CodeOK})
+		if code != link.CodeOK || seen.Body != want {
+			t.Errorf("%q: exit %d, body %q, stderr %q", args, code, seen.Body, stderr)
+		}
+	}
+}
+
+// A mistyped flag becomes text, so an operation that takes none says so rather
+// than running without it.
+func TestAMistypedFlagIsNotIgnored(t *testing.T) {
+	for _, args := range [][]string{{"messages", "-sinc", "5"}, {"status", "-jsn"}} {
+		code, _, stderr, seen := run(t, args, "", link.Reply{Code: link.CodeOK})
+		if code != link.CodeLocal || seen.Op != "" || !strings.Contains(stderr, args[1]) {
+			t.Errorf("%q: exit %d, sent %+v, stderr %q", args, code, seen, stderr)
+		}
+	}
+}

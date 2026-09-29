@@ -98,6 +98,9 @@ type Broker struct {
 	earlier int64
 	// Submissions this broker made, by id, with the last state seen.
 	mine map[string]client.Submission
+	// States pushed for ids this run has not claimed: a sibling run's, under
+	// the shared account, or this run's own before submit's reply returned.
+	unclaimed map[string]client.Submission
 	// Callers blocked in await, by submission id.
 	waiting map[string][]chan client.Submission
 
@@ -121,14 +124,15 @@ func Open(config Config) (*Broker, error) {
 	}
 
 	b := &Broker{
-		session: session,
-		chat:    chat,
-		config:  config,
-		me:      profile.Username,
-		mine:    map[string]client.Submission{},
-		waiting: map[string][]chan client.Submission{},
-		changed: make(chan struct{}, 1),
-		stopped: make(chan struct{}),
+		session:   session,
+		chat:      chat,
+		config:    config,
+		me:        profile.Username,
+		mine:      map[string]client.Submission{},
+		unclaimed: map[string]client.Submission{},
+		waiting:   map[string][]chan client.Submission{},
+		changed:   make(chan struct{}, 1),
+		stopped:   make(chan struct{}),
 	}
 
 	if _, ok := chat.Space(config.Room); !ok {
@@ -265,14 +269,15 @@ func (b *Broker) tear(room string, missing int64) {
 }
 
 func (b *Broker) decided(submission client.Submission) {
-	// The author alone is not enough to tell one run from another: in phase 0
-	// every worker shares an account, so a sibling run's submission arrives here
-	// too. The channel is what makes it this run's.
+	// Neither the author nor the channel tells one run from another: in phase 0
+	// every worker shares an account, and runs may share a channel. The id this
+	// run's submit returned is what makes a submission its own.
 	if submission.Author != b.me || submission.Channel != b.config.Channel {
 		return
 	}
 	b.mutex.Lock()
-	if _, ours := b.mine[submission.ID]; !ours && submission.State == "" {
+	if _, ours := b.mine[submission.ID]; !ours {
+		b.unclaimed[submission.ID] = submission
 		b.mutex.Unlock()
 		return
 	}
@@ -419,10 +424,20 @@ func (b *Broker) submit(request link.Request) link.Reply {
 	if err != nil {
 		return link.Refuse("", "%s", sentence(err))
 	}
-	b.mutex.Lock()
-	b.mine[submission.ID] = submission
-	b.mutex.Unlock()
+	b.claim(submission)
 	return link.Reply{Code: link.CodeOK, ID: submission.ID, State: link.StatePending}
+}
+
+// claim makes a submission this run's. A state pushed before the reply
+// returned is newer than the reply's pending, so it wins.
+func (b *Broker) claim(submission client.Submission) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	if pushed, ok := b.unclaimed[submission.ID]; ok {
+		submission = pushed
+		delete(b.unclaimed, submission.ID)
+	}
+	b.mine[submission.ID] = submission
 }
 
 // await blocks until the submission is decided or the wait runs out. A wait

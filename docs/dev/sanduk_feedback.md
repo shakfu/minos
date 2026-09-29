@@ -2,6 +2,8 @@
 
 Read 2026-09-19 against the minos tree, the `sanduk` tree at v0.3.1, and the documents design.md cites. Verdict first, then what does not hold, ordered by consequence. Nits last.
 
+Status: a review of design.md as of that date; not updated.
+
 ## Verdict
 
 The trust argument is sound and is the part worth keeping. Section 3's rule, its transitivity, D2, D6, D9 and the ordering in section 9 (build layers 3 and 4 first) all survive scrutiny. Section 10 is accurate about what minos already gives.

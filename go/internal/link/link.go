@@ -83,7 +83,9 @@ type Reply struct {
 
 	// Error is a sentence, always, and never an error table: a model changes
 	// course on a sentence. Rule names the rule that would permit the request,
-	// so a worker can propose a policy line rather than guess.
+	// so a worker can propose a policy line rather than guess. It is empty
+	// where no grant could permit it: a malformed request, the run's own
+	// state, a size limit, or the server's refusal relayed.
 	Error string `json:"error,omitempty"`
 	Rule  string `json:"rule,omitempty"`
 
@@ -134,9 +136,10 @@ const (
 
 // Status is what the grant permits and whether the broker is holding it.
 type Status struct {
-	Room      string `json:"room"`
-	Channel   string `json:"channel,omitempty"`
-	Window    string `json:"window"`
+	Room    string `json:"room"`
+	Channel string `json:"channel,omitempty"`
+	Window  string `json:"window"`
+	// Expiry is the grant's. Unset until grants exist (implementation-plan 5).
 	Expiry    string `json:"expiry,omitempty"`
 	Connected bool   `json:"connected"`
 	Delivered int64  `json:"delivered"`
@@ -186,8 +189,9 @@ func CheckPath(path string) error {
 }
 
 // Listen creates the run's socket. The directory is created, an earlier socket
-// at the same path is removed (anything else there is refused), and the mode is applied before anything can
-// connect: the socket is the credential in this design, so its mode is the gate.
+// at the same path is removed (anything else there is refused), and the socket
+// is born with its mode: the socket is the credential in this design, so its
+// mode is the gate, and a chmod after binding leaves a window.
 func Listen(path string, mode os.FileMode) (net.Listener, error) {
 	if err := CheckPath(path); err != nil {
 		return nil, err
@@ -198,12 +202,12 @@ func Listen(path string, mode os.FileMode) (net.Listener, error) {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	// The umask is process-wide, so this is for startup, before anything else
+	// creates files.
+	previous := syscall.Umask(0o777 &^ int(mode.Perm()))
 	listener, err := net.Listen("unix", path)
+	syscall.Umask(previous)
 	if err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(path, mode); err != nil {
-		listener.Close()
 		return nil, err
 	}
 	return listener, nil

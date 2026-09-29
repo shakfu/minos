@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -439,5 +440,124 @@ func TestTheHeaderBarCarriesTheNameAndTheOverviewOpensFirst(t *testing.T) {
 	if drawn := contents(screen); !strings.Contains(drawn, "closed") ||
 		!strings.Contains(drawn, "task/31") {
 		t.Errorf("^A did not bring the closed place back:\n%s", drawn)
+	}
+}
+
+// Inside a paste, keys are text: Enter does not submit, a `/` line does not
+// run, ^C does not quit, and nothing answers a pending confirmation.
+func TestAPasteIsTextAndNothingElse(t *testing.T) {
+	demo := connect(t, testserver.Start(t, config.HistoryLimit).Base, "demo")
+	screen := simulated(t, 80, 24)
+	ui := newUi(screen, demo, client.Profile{Username: "demo"})
+	ui.command("/open alice")
+	room := ui.selected
+
+	var events []tcell.Event
+	key := func(k tcell.Key, r rune) tcell.Event { return tcell.NewEventKey(k, r, tcell.ModNone) }
+	events = append(events, tcell.NewEventPaste(true))
+	for _, r := range "/leave" {
+		events = append(events, key(tcell.KeyRune, r))
+	}
+	events = append(events, key(tcell.KeyEnter, 0), key(tcell.KeyRune, 'x'), key(tcell.KeyCtrlC, 0),
+		key(tcell.KeyTab, 0), tcell.NewEventPaste(false), key(tcell.KeyF1, 0))
+	quitOnF1(ui)
+	// The queue is short, so the events go in while the loop drains them.
+	go func() {
+		for _, event := range events {
+			screen.PostEventWait(event)
+		}
+	}()
+	ui.loop()
+
+	if got := string(ui.input); got != "/leave\nx\t" {
+		t.Fatalf("the composer holds %q", got)
+	}
+	if _, ok := demo.Space(room); !ok {
+		t.Fatal("the pasted /leave ran")
+	}
+	if len(demo.Log(room)) != 0 {
+		t.Fatalf("the paste was sent: %v", demo.Log(room))
+	}
+
+	ui.pending, ui.pasting, ui.input = "/leave", true, nil
+	ui.key(tcell.NewEventKey(tcell.KeyRune, 'y', tcell.ModNone))
+	if ui.pending == "" || len(ui.input) != 0 {
+		t.Fatalf("a pasted y answered the confirmation, or was typed: pending %q, input %q", ui.pending, string(ui.input))
+	}
+}
+
+// A key that waits on the server must not stop ^C: the loop keeps reading
+// while it runs, and quits at once.
+func TestCtrlCQuitsWhileAKeyWaitsOnTheServer(t *testing.T) {
+	demo := connect(t, testserver.Start(t, config.HistoryLimit).Base, "demo")
+	screen := simulated(t, 80, 24)
+	ui := newUi(screen, demo, client.Profile{Username: "demo"})
+	blocked, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	ui.keyHandler = func(event *tcell.EventKey) {
+		close(blocked)
+		<-release // a request that does not return
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		ui.loop()
+		close(returned)
+	}()
+	screen.PostEventWait(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	<-blocked
+	screen.PostEventWait(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModCtrl))
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("^C did not quit while a key was waiting")
+	}
+}
+
+// What is typed while a key waits is kept, and handled in order after it.
+func TestKeysTypedWhileAKeyWaitsAreHandledInOrderAfter(t *testing.T) {
+	demo := connect(t, testserver.Start(t, config.HistoryLimit).Base, "demo")
+	screen := simulated(t, 80, 24)
+	ui := newUi(screen, demo, client.Profile{Username: "demo"})
+	blocked, release := make(chan struct{}), make(chan struct{})
+	quitOnF1(ui)
+	handle := ui.keyHandler
+	ui.keyHandler = func(event *tcell.EventKey) {
+		if event.Key() == tcell.KeyEnter {
+			close(blocked)
+			<-release
+			return
+		}
+		handle(event)
+	}
+
+	go func() {
+		screen.PostEventWait(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+		<-blocked
+		for _, r := range "hi" {
+			screen.PostEventWait(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+		}
+		// Let the loop read both while Enter is still waiting.
+		time.Sleep(100 * time.Millisecond)
+		close(release)
+		screen.PostEventWait(tcell.NewEventKey(tcell.KeyF1, 0, tcell.ModNone))
+	}()
+	ui.loop()
+	if got := string(ui.input); got != "hi" {
+		t.Fatalf("the composer holds %q", got)
+	}
+}
+
+// quitOnF1 makes F1 end the loop the way /quit does: in turn, after every key
+// before it. ^C ends it at once, even mid-key, so a test that reads the UI
+// afterwards ends with F1.
+func quitOnF1(ui *Ui) {
+	handle := ui.keyHandler
+	ui.keyHandler = func(event *tcell.EventKey) {
+		if event.Key() == tcell.KeyF1 {
+			ui.running = false
+			return
+		}
+		handle(event)
 	}
 }

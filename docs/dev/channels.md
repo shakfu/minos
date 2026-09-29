@@ -1,6 +1,8 @@
 # Typed channels
 
-An exploration of channels that carry typed data, and of views that render it. Nothing here is built. The channel as it stands is [chat-concepts.md](chat-concepts.md) 2.4 and sections 4-5; its wire shape is [wire-contract.md](../wire-contract.md) 6 and 9-11.
+Status: an exploration. Nothing here is built.
+
+An exploration of channels that carry typed data, and of views that render it. The channel as it stands is [chat-concepts.md](chat-concepts.md) 2.4 and sections 4-5; its wire shape is [wire-contract.md](../wire-contract.md) 6 and 9-11.
 
 Today every channel message is a `subject` and a text `body`. The proposal: a message also carries a **type**, such as `stock-quote`, and a front end chooses a **view** for that type, such as a table or a chart.
 

@@ -2,6 +2,8 @@
 
 2026-09-21. A recommendation, for approval before an implementation plan is written.
 
+Status: the basis of [implementation-plan.md](implementation-plan.md), which tracks what is built.
+
 `pma` ranks outstanding work across many repositories and dispatches each task to a model in a container. `minosd` carries the conversation: the supervising model instructs the worker, the developer reads and intervenes, the worker asks for what it may not decide. This document states how the container reaches that conversation, what it may do when it gets there, and in what order to build it.
 
 ## 1. The four requirements

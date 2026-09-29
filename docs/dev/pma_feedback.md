@@ -2,6 +2,8 @@
 
 From `pma`'s side, 2026-09-19. Read against [design.md](design.md), [chat-concepts.md](chat-concepts.md), [wire-contract.md](../wire-contract.md), the Go tree, and `pma`'s own [using-containers.md](https://github.com/shakfu/pma/blob/main/docs/dev/using-containers.md). Claims below marked *verified* were checked against the cited file; the rest are argument.
 
+Status: a review of design.md as of that date; not updated.
+
 ## Verdict
 
 The trust reasoning is the strongest part and it holds. Section 3's rule, its transitivity, and D2 are correct and worth keeping unchanged.

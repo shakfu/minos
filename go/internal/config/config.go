@@ -81,8 +81,10 @@ func Load() Config {
 		Unentered: seconds("MINOS_ROOM_UNENTERED", 900),
 		Sweep:     seconds("MINOS_ROOM_SWEEP", 15),
 		Ping:      seconds("MINOS_WS_PING", 30),
-		Users:     map[string]string{"demo": "demo", "alice": "alice", "bob": "bob"},
-		Admins:    map[string]bool{"demo": true},
+		// worker is the account phase 0 runs speak as, so a run's messages
+		// are not signed with a person's name. Grants replace it.
+		Users:  map[string]string{"demo": "demo", "alice": "alice", "bob": "bob", "worker": "worker"},
+		Admins: map[string]bool{"demo": true},
 	}
 }
 

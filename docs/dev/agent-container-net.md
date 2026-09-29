@@ -2,7 +2,9 @@
 
 2026-09-20
 
-How an agent inside a sealed container reaches `minosd`, what its client holds, and how the model drives it. Nothing here is built.
+How an agent inside a sealed container reaches `minosd`, what its client holds, and how the model drives it.
+
+Status: superseded by [recommended-architecture.md](recommended-architecture.md). Its recommendation, option 3, a full client in the container over a bind-mounted socket, is the first design that document rejects (its section 11). Kept for its reasoning.
 
 [design.md](design.md) decides trust, grants, capabilities and stopping. This document decides nothing it decided. It answers the three questions design.md leaves as "a static binary that is more than a client" (design.md 11):
 
@@ -14,9 +16,7 @@ How an agent inside a sealed container reaches `minosd`, what its client holds, 
 
 Vocabulary is [chat-concepts.md](chat-concepts.md) and [wire-contract.md](../wire-contract.md).
 
-![architecture](../media/architecture.svg)
-
-Who talks to whom. Sources are `docs/media/*.d2`; regenerate with the command at the head of each.
+Who talks to whom: [architecture.d2](../media/architecture.d2). `make diagrams` renders it; the rendering is not committed.
 
 ## 1. The constraint stack
 
@@ -44,9 +44,7 @@ The last one bounds everything: until grants exist, whatever is built here is an
 
 **Recommendation: 3, with 4 as the alternative framing in section 7.**
 
-![reach](../media/network.svg)
-
-What can reach what, once option 3 is taken. The agent's two pipes are in it because they are a reach fact: they do not cross the container boundary, and nothing outside addresses the agent process.
+What can reach what, once option 3 is taken: [network.d2](../media/network.d2). The agent's two pipes are in it because they are a reach fact: they do not cross the container boundary, and nothing outside addresses the agent process.
 
 **Why not 1.** design.md 8.6 calls separable listeners "the one mitigation" for a dual-homed `minosd`. A listener on the internal network is reachable by every container on it, so the mitigation is partial: it separates administrative operations from agent ones and leaves every agent reachable by every other. A socket file is reachable by the containers it is mounted into and nothing else.
 
@@ -130,7 +128,7 @@ The agent client serves MCP on stdio and the agent calls in. Five tools, each a 
 | `messages(since?)` | the local queue, plus `history` on a gap | author, author kind, seq, subject, body, payload |
 | `say(body, payload?)` | `send` | ok, or the server's refusal string |
 | `submit(subject, body, payload?)` | `channel.submit` | the submission id |
-| `await(submission, timeout)` | the `submission` push | `approved`, `rejected` with the comment, or `timed_out` |
+| `await(submission, timeout)` | the `submission` push | `approved`, `rejected` with the comment, or `expired` |
 | `progress(seq)` | `read` | ok |
 
 Four notes on the table:
@@ -139,7 +137,7 @@ Four notes on the table:
 
 - **`payload` is opaque.** The server stores and returns it unread (D18). Its schema is `pma` policy: a verb for an instruction, a permission request and its cost for a worker.
 
-- **`await` needs a server-side deadline.** design.md 8.5 adds one, with `timed_out` as a third terminal state. Without it an agent blocked on a decision nobody makes burns its run timeout and dies with the work half done.
+- **`await` needs a server-side deadline.** design.md 8.5 adds one, with `expired` as a third terminal state. Without it an agent blocked on a decision nobody makes burns its run timeout and dies with the work half done.
 
 - **`messages` and the push lane are the same queue.** The tool drains it when the agent asks; the push lane writes the head of it into the agent's stdin when the agent has not asked for a while, or when the message's payload carries a verb that says not to wait (D18). One queue, one cursor, so a message delivered by push is not delivered again by the tool.
 
