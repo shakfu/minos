@@ -6,8 +6,6 @@ Items marked `R<n>` come from `REVIEW.md` (2026-09-27, at `30abc37`). See that f
 
 ## High
 
-- [ ] Decide who sends an interrupt. `claudeAdapter.Interrupt` encodes it; nothing sends it. Measured on Claude Code 2.1.284, one run per case (`scripts/probe-interrupt.sh`): the interrupted turn ends with one `result` (`error_during_execution`, `result: null`), so the relay's turn count holds. A queued user frame then runs as its own turn; with `cancel_queued` it does not, yet `cancelled` came back empty. The CLI exits 1 when its last turn was interrupted, which `minosb` reports as `exited` with code 1. `minosb` has no control input from the dispatcher, so a dispatcher-sent interrupt needs one (a signal, or a line on stdin). Until decided the broker holds and reports `held`.
-
 ## Medium
 
 ## Low

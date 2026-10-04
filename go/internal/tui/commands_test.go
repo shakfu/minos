@@ -1088,3 +1088,24 @@ func TestSubscribingShowsTheChannelAndLeavingReturnsToTheList(t *testing.T) {
 		t.Fatalf("after /leave the view is still a space, selected %q", ui.selected)
 	}
 }
+
+// /interrupt is sent as the room's spelling of one, the correction after it.
+// Outside a room there is no run to stop.
+func TestInterruptIsSentToTheRoomWithItsCorrection(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo := connect(t, server.Base, "demo")
+	room, err := demo.OpenRoom([]client.Principal{{Kind: "user", ID: "bob"}}, "Run", "persisted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := headless(demo)
+	ui.command("/interrupt")
+	ui.mustSay(t, "inside a run's room")
+
+	ui.show(room.ID)
+	ui.compose("/interrupt use   vfs.go")
+	waitFor(t, "the interrupt in the room", func() bool {
+		log := demo.Log(room.ID)
+		return len(log) > 0 && log[len(log)-1].Body == "/interrupt use vfs.go"
+	})
+}

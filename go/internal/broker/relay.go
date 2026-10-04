@@ -8,11 +8,16 @@ package broker
 // is the third lane and is the agent's own, in broker.go.
 //
 // A message is pushed at the end of the turn, not into the middle of one, and
-// everything held during a turn goes as one frame, so one turn answers it. An
-// interrupt is a separate act and is the dispatcher's: it owns the container,
-// and this process must not be in the path of stopping a run. What the broker
-// owes the dispatcher is the fact and its order, which is the `held` control
-// event, emitted when a message arrives mid-turn and before it is delivered.
+// everything held during a turn goes as one frame, so one turn answers it. The
+// broker owes the dispatcher the fact and its order, which is the `held`
+// control event, emitted when a message arrives mid-turn.
+//
+// Stopping a turn is not stopping a run. A run is stopped through the
+// container engine, by the dispatcher, never through this process. A turn is
+// stopped by a frame on the agent's stdin, which only the relay writes, so
+// every interrupt goes through it: the dispatcher's, and a listed author's
+// `/interrupt` in the room. A correction sent with it is held like any other
+// message and pushed when the stopped turn ends.
 
 import (
 	"bufio"
@@ -85,7 +90,8 @@ func (claudeAdapter) Turn(line []byte) (string, bool) {
 // Interrupt is the control request the Agent SDK's `interrupt()` sends. On
 // Claude Code 2.1.284 the interrupted turn ends with one `result`, subtype
 // `error_during_execution`, and a user frame queued behind it runs as its own
-// turn (scripts/probe-interrupt.sh). Nothing sends it yet.
+// turn (scripts/probe-interrupt.sh). The relay never queues a frame behind a
+// running turn, so `cancel_queued` has nothing to cancel and is not sent.
 func (claudeAdapter) Interrupt(id string) ([]byte, error) {
 	frame := map[string]any{
 		"type":       "control_request",
@@ -113,6 +119,10 @@ func AdapterFor(name string) (Adapter, error) {
 	return nil, fmt.Errorf("no adapter for %q; there is: %s", name, strings.Join(known, ", "))
 }
 
+// Ask is a request to stop the current turn: who asked, and the id they know
+// it by, which the `interrupt` control event echoes.
+type Ask struct{ By, ID string }
+
 // Relay owns the agent's pipes: what is pushed into a turn, and what the turn
 // said. One owner, because a message pushed into the turn and a message handed
 // over the socket are the same message.
@@ -133,6 +143,12 @@ type Relay struct {
 	// suffices because only Deliver writes, one frame per turn, between turns.
 	inTurn bool
 	held   []string
+	// asks wait for Deliver to act on them. interrupting is set once a
+	// turn's interrupt is written, so a second ask for that turn is merged.
+	asks         []Ask
+	interrupting bool
+	// frames numbers the interrupts written, for the agent's request ids.
+	frames int
 }
 
 // NewRelay wires the broker to one agent's stdin. control reports to the
@@ -188,18 +204,36 @@ func (r *Relay) Deliver() {
 	}
 }
 
+// Interrupt asks for the current turn to stop. It returns at once; the
+// outcome is reported as an `interrupt` control event.
+func (r *Relay) Interrupt(ask Ask) {
+	r.mutex.Lock()
+	r.asks = append(r.asks, ask)
+	r.mutex.Unlock()
+	r.broker.wake()
+}
+
 // deliver holds what arrived mid-turn, and between turns writes everything
-// held as one frame. Held rather than interrupted: an interrupt is the
-// dispatcher's act, not this process's.
+// held as one frame. An ask stops a running turn; between turns it does
+// nothing, and its correction starts the next one.
 func (r *Relay) deliver(ended bool) {
-	arrived := r.broker.forPush()
+	arrived, asked := r.broker.forPush()
 
 	r.mutex.Lock()
 	if ended {
-		r.inTurn = false
+		r.inTurn, r.interrupting = false, false
 	}
 	r.held = append(r.held, arrived...)
+	asks := append(r.asks, asked...)
+	r.asks = nil
 	depth, inTurn := len(r.held), r.inTurn
+	send := inTurn && !r.interrupting && len(asks) > 0
+	var id string
+	if send {
+		r.interrupting = true
+		r.frames++
+		id = fmt.Sprintf("minos-%d", r.frames)
+	}
 	var batch []string
 	if !inTurn && depth > 0 {
 		batch, r.held, r.inTurn = r.held, nil, true
@@ -210,13 +244,46 @@ func (r *Relay) deliver(ended bool) {
 		for i := range arrived {
 			r.control(map[string]any{"event": "held", "waiting": depth - len(arrived) + i + 1})
 		}
+		r.interrupt(asks, send, id)
 		return
+	}
+	for _, ask := range asks {
+		r.control(map[string]any{"event": "interrupt", "by": ask.By, "id": ask.ID, "outcome": "idle"})
 	}
 	if ended {
 		r.control(map[string]any{"event": "turn", "delivering": len(batch)})
 	}
 	if len(batch) > 0 {
 		r.write(batch)
+	}
+}
+
+// interrupt writes one interrupt for the running turn when send is set, and
+// reports every ask: the first as sent and the rest as merged into it, or all
+// as failed if the write failed.
+func (r *Relay) interrupt(asks []Ask, send bool, id string) {
+	var failure error
+	if send {
+		frame, err := r.adapter.Interrupt(id)
+		if err == nil {
+			_, err = r.stdin.Write(frame)
+		}
+		if failure = err; failure != nil {
+			// Nothing reached the agent, so a later ask may try again.
+			r.mutex.Lock()
+			r.interrupting = false
+			r.mutex.Unlock()
+		}
+	}
+	for i, ask := range asks {
+		event := map[string]any{"event": "interrupt", "by": ask.By, "id": ask.ID, "outcome": "merged"}
+		switch {
+		case failure != nil:
+			event["outcome"], event["error"] = "failed", failure.Error()
+		case send && i == 0:
+			event["outcome"] = "sent"
+		}
+		r.control(event)
 	}
 }
 

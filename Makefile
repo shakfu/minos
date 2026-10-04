@@ -1,6 +1,6 @@
 MEDIA := docs/media
 
-.PHONY: go serve tui user-demo user-alice demo test conformance cover container diagrams clean-diagrams clean
+.PHONY: go serve tui user-demo user-alice demo host-run test conformance cover container diagrams clean-diagrams clean
 
 GO_SOURCES := $(shell find go -name '*.go' 2>/dev/null) go/go.mod go/go.sum
 
@@ -39,6 +39,11 @@ user-alice: go/minos
 ## A narrated run of the channel audience rule against a server of its own.
 demo: go/minosd
 	@cd go && MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd go run ./cmd/demo
+
+## One real claude under go/minosb on the host, no container: relay, held
+## messages, both interrupt lanes, the shim. Spends turns on your account.
+host-run: go
+	@cd go && go run ./cmd/hostrun
 
 ## Unit tests, then the wire contract against the built server. -count=1
 ## because go test cannot see that the binary under test changed. -race covers

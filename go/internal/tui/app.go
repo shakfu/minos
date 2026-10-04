@@ -123,6 +123,7 @@ var help = [][2]string{
 	{"/project file <room> [name] [task]", "file a room under a project, or under none (admin)"},
 	{"/project rm <name>", "dissolve a project; its rooms survive (admin)"},
 	{"/close  /reopen [room]", "say whether the work in a place is done"},
+	{"/interrupt [correction]", "stop the turn of the run in this room, then tell it the correction"},
 	{"Tab / S-Tab", "next or previous tab, outside a room"},
 	{"Up / Down", "move through the list, or a channel's items"},
 	{"^A", "in a list of places, show the closed ones too"},
@@ -1146,7 +1147,7 @@ func (u *Ui) commands() map[string]func([]string) error {
 		"open":     u.cmdOpen, "meet": u.cmdMeet, "create": u.cmdCreate,
 		"invite": u.cmdInvite, "uninvite": u.cmdUninvite, "leave": u.cmdLeave, "exit": u.cmdExit,
 		"group": u.cmdGroup, "channel": u.cmdChannel, "project": u.cmdProject,
-		"close": u.cmdClose, "reopen": u.cmdReopen,
+		"close": u.cmdClose, "reopen": u.cmdReopen, "interrupt": u.cmdInterrupt,
 		"subscribe": u.cmdSubscribe, "unsubscribe": u.cmdUnsubscribe,
 		"queue": u.cmdQueue, "approve": u.cmdApprove, "reject": u.cmdReject,
 		"submissions": u.cmdSubmissions, "ack": u.cmdAck,
@@ -1523,6 +1524,19 @@ func (u *Ui) describePlace(space client.Room) string {
 
 // cmdClose and cmdReopen say whether the work in a place is done. Naming no
 // place means the one on screen.
+// cmdInterrupt sends the room's spelling of an interrupt. A run's broker acts on
+// it only from an author it lists; for anyone else it is text.
+func (u *Ui) cmdInterrupt(args []string) error {
+	if space, ok := u.client.Space(u.selected); !ok || space.Kind == "channel" {
+		return refusal("Interrupt from inside a run's room")
+	}
+	u.enterRoom(u.selected)
+	if u.occupancy == "" {
+		return nil
+	}
+	return u.client.Send(u.selected, strings.TrimSpace("/interrupt "+strings.Join(args, " ")))
+}
+
 func (u *Ui) cmdClose(args []string) error  { return u.setState(args, false) }
 func (u *Ui) cmdReopen(args []string) error { return u.setState(args, true) }
 

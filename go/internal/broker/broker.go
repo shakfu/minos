@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"minos/internal/client"
@@ -55,6 +56,10 @@ const relayCut = "\n\n[cut: the rest is in the run record]"
 // readable: a person sees the text and a folded block.
 const payloadFence = "minos-payload"
 
+// The room's spelling of an interrupt. What follows it is the correction,
+// pushed once the stopped turn ends.
+const interruptCommand = "/interrupt"
+
 // Config is one run, as the dispatcher describes it.
 type Config struct {
 	Server   string
@@ -70,6 +75,10 @@ type Config struct {
 	// is reported by `status` and enforced by nothing. Phase 1 item 5 is what
 	// makes it a rule.
 	Window string
+
+	// Interrupters may stop a turn from the room with `/interrupt`. Anyone
+	// else's `/interrupt` is pushed as text.
+	Interrupters []string
 }
 
 // Broker is one run's conversation, its cursor and its socket.
@@ -135,6 +144,11 @@ func Open(config Config) (*Broker, error) {
 		stopped:   make(chan struct{}),
 	}
 
+	if slices.Contains(config.Interrupters, profile.Username) {
+		// The run's own relayed turn would stop the turn after it.
+		chat.Stop()
+		return nil, fmt.Errorf("%s cannot be an interrupter of its own run", profile.Username)
+	}
 	if _, ok := chat.Space(config.Room); !ok {
 		chat.Stop()
 		return nil, fmt.Errorf("%s cannot read room %s", profile.Username, config.Room)
@@ -210,18 +224,19 @@ func (b *Broker) wake() {
 	}
 }
 
-// forPush is what the agent has not been told over its stdin. Text from
-// others only: a room event is the server's bookkeeping, and the worker's own
-// messages are not news to it.
-func (b *Broker) forPush() []string {
+// forPush is what the agent has not been told over its stdin, and the
+// interrupts asked for in the room since. Text from others only: a room event
+// is the server's bookkeeping, and the worker's own messages are not news to it.
+func (b *Broker) forPush() ([]string, []Ask) {
 	b.mutex.Lock()
 	since, torn := b.pushed, b.torn
 	b.mutex.Unlock()
 	if torn {
-		return nil
+		return nil, nil
 	}
 
 	var texts []string
+	var asks []Ask
 	last := since
 	for _, message := range b.chat.Log(b.config.Room) {
 		if message.Seq <= since {
@@ -231,7 +246,15 @@ func (b *Broker) forPush() []string {
 		if message.Author == b.me || message.Kind != "text" {
 			continue
 		}
-		texts = append(texts, fmt.Sprintf("%s: %s", message.Author, link.Line(message.Body)))
+		body := message.Body
+		if correction, ok := interruptBody(body); ok && slices.Contains(b.config.Interrupters, message.Author) {
+			asks = append(asks, Ask{By: message.Author, ID: fmt.Sprintf("seq-%d", message.Seq)})
+			if correction == "" {
+				continue
+			}
+			body = correction
+		}
+		texts = append(texts, fmt.Sprintf("%s: %s", message.Author, link.Line(body)))
 	}
 
 	b.mutex.Lock()
@@ -239,7 +262,17 @@ func (b *Broker) forPush() []string {
 		b.pushed = last
 	}
 	b.mutex.Unlock()
-	return texts
+	return texts, asks
+}
+
+// interruptBody is the correction an `/interrupt` carries, and whether body
+// is one.
+func interruptBody(body string) (string, bool) {
+	rest, ok := strings.CutPrefix(body, interruptCommand)
+	if !ok || (rest != "" && !unicode.IsSpace(rune(rest[0]))) {
+		return "", false
+	}
+	return strings.TrimSpace(rest), true
 }
 
 // relay posts a turn's final message to the room under the worker's name. Cut

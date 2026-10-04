@@ -16,6 +16,7 @@ import (
 	"minos/internal/config"
 	"minos/internal/link"
 	"minos/internal/messaging"
+	"minos/internal/testserver"
 )
 
 // agent is a fake worker on the other end of the broker's pipes.
@@ -207,8 +208,8 @@ func TestWhatTheRoomSaysReachesTheAgentWithoutItAsking(t *testing.T) {
 	}
 }
 
-// A message that arrives mid-turn waits for the turn to end. Interrupting is a
-// separate act and the dispatcher's, so what the broker owes is the fact.
+// A message that arrives mid-turn waits for the turn to end. Only an
+// interrupt stops a turn early, and an ordinary message is not one.
 func TestAMessageArrivingMidTurnIsHeldAndReportedBeforeItIsDelivered(t *testing.T) {
 	run := dispatch(t, config.HistoryLimit, false)
 	worker, events := scripted(t, run)
@@ -322,8 +323,168 @@ func TestATornRunPushesNothingMore(t *testing.T) {
 	run.worker.tear(run.room, 3)
 
 	say(t, run.developer, run.room, "this must not arrive")
-	if pushed := run.worker.forPush(); pushed != nil {
+	if pushed, _ := run.worker.forPush(); pushed != nil {
 		t.Fatalf("a torn run offered %v", pushed)
+	}
+}
+
+// -- interrupts --------------------------------------------------------------
+
+// kind is a pushed frame's type: `user` for messages, `control_request` for an
+// interrupt.
+func kind(frame map[string]any) string {
+	kind, _ := frame["type"].(string)
+	return kind
+}
+
+// endInterrupted is the agent ending a turn the way an interrupted one ends.
+func (a *agent) endInterrupted(t *testing.T) {
+	t.Helper()
+	record := `{"type":"result","subtype":"error_during_execution","is_error":true,"result":null}` + "\n"
+	if _, err := a.stdout.Write([]byte(record)); err != nil {
+		t.Fatalf("the agent cannot write: %v", err)
+	}
+}
+
+// outcomes is each `interrupt` event's outcome, in order.
+func (c *control) outcomes() []string {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	var found []string
+	for _, event := range c.events {
+		if event["event"] == "interrupt" {
+			found = append(found, event["outcome"].(string))
+		}
+	}
+	return found
+}
+
+// The developer stops the turn from the room, and the correction is pushed
+// once the stopped turn ends: interrupt first, then the push that corrects.
+func TestAnInterruptFromTheRoomStopsTheTurnAndItsCorrectionFollows(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false, "demo")
+	worker, events := scripted(t, run)
+
+	say(t, run.developer, run.room, "/interrupt use vfs.go, not vfs_test.go")
+	if frame := worker.read(t); kind(frame) != "control_request" {
+		t.Fatalf("the agent was pushed %v before the interrupt", frame)
+	}
+	waitFor(t, "the report", func() bool { return len(events.outcomes()) == 1 })
+	if got := events.outcomes(); len(got) != 1 || got[0] != "sent" {
+		t.Fatalf("the interrupt was reported as %v", got)
+	}
+
+	worker.endInterrupted(t)
+	got := texts(t, worker.read(t))
+	if len(got) != 1 || got[0] != "demo: use vfs.go, not vfs_test.go" {
+		t.Fatalf("the correction arrived as %q", got)
+	}
+}
+
+// The dispatcher's interrupt reaches the turn without the room.
+func TestTheDispatcherInterruptsThroughTheRelay(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	worker, events := scripted(t, run)
+
+	worker.relay.Interrupt(Ask{By: "dispatcher", ID: "p1"})
+	frame := worker.read(t)
+	request, _ := frame["request"].(map[string]any)
+	if kind(frame) != "control_request" || request["subtype"] != "interrupt" {
+		t.Fatalf("the agent was pushed %v", frame)
+	}
+	waitFor(t, "the report", func() bool { return len(events.outcomes()) == 1 })
+	events.mutex.Lock()
+	event := events.events[len(events.events)-1]
+	events.mutex.Unlock()
+	if event["by"] != "dispatcher" || event["id"] != "p1" || event["outcome"] != "sent" {
+		t.Fatalf("the interrupt was reported as %v", event)
+	}
+}
+
+// Between turns there is nothing to stop. Writing an interrupt anyway would
+// reach the next turn, which nobody asked to stop.
+func TestAnInterruptBetweenTurnsWritesNothing(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	worker, events := scripted(t, run)
+	worker.endTurn(t, "waiting")
+	waitFor(t, "the turn's end", func() bool { return events.seen("turn") == 1 })
+
+	worker.relay.Interrupt(Ask{By: "dispatcher", ID: "p1"})
+	waitFor(t, "the report", func() bool { return len(events.outcomes()) == 1 })
+	if got := events.outcomes(); got[0] != "idle" {
+		t.Fatalf("the interrupt was reported as %v", got)
+	}
+	say(t, run.developer, run.room, "next")
+	if frame := worker.read(t); kind(frame) != "user" {
+		t.Fatalf("the agent was pushed %v", frame)
+	}
+}
+
+// Two senders stopping one turn write one interrupt. The next turn can be
+// stopped again.
+func TestInterruptsForOneTurnAreMergedAndTheNextTurnCanBeStopped(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false, "demo")
+	worker, events := scripted(t, run)
+
+	worker.relay.Interrupt(Ask{By: "dispatcher", ID: "p1"})
+	say(t, run.developer, run.room, "/interrupt stop")
+	if frame := worker.read(t); kind(frame) != "control_request" {
+		t.Fatalf("the agent was pushed %v", frame)
+	}
+	waitFor(t, "both reports", func() bool { return len(events.outcomes()) == 2 })
+	if got := events.outcomes(); slices.Compare(got, []string{"sent", "merged"}) != 0 {
+		t.Fatalf("the interrupts were reported as %v", got)
+	}
+
+	// The correction starts the next turn, so nothing came between.
+	worker.endInterrupted(t)
+	if got := texts(t, worker.read(t)); len(got) != 1 || got[0] != "demo: stop" {
+		t.Fatalf("after the interrupt the agent was pushed %q", got)
+	}
+	worker.relay.Interrupt(Ask{By: "dispatcher", ID: "p2"})
+	if frame := worker.read(t); kind(frame) != "control_request" {
+		t.Fatalf("the second turn's interrupt arrived as %v", frame)
+	}
+}
+
+// Only a listed author interrupts. Anyone else's `/interrupt` is text.
+func TestAnUnlistedAuthorsInterruptIsPushedAsText(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false, "alice")
+	worker, events := scripted(t, run)
+	worker.endTurn(t, "waiting")
+
+	say(t, run.developer, run.room, "/interrupt now")
+	if got := text(t, worker.read(t)); got != "demo: /interrupt now" {
+		t.Fatalf("the agent was pushed %q", got)
+	}
+	if got := events.outcomes(); len(got) != 0 {
+		t.Fatalf("an unlisted author was reported as %v", got)
+	}
+}
+
+// The run's own relayed turn must not stop the next one.
+func TestARunCannotBeItsOwnInterrupter(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	_, err := Open(Config{Server: server.Base, User: "bob", Password: "bob", Room: "r", Interrupters: []string{"bob"}})
+	if err == nil || !strings.Contains(err.Error(), "own run") {
+		t.Fatalf("Open answered %v", err)
+	}
+}
+
+func TestOnlyTheCommandWordIsAnInterrupt(t *testing.T) {
+	for body, want := range map[string]string{
+		"/interrupt":            "",
+		"/interrupt  use b.go ": "use b.go",
+		"/interrupt\nuse b.go":  "use b.go",
+	} {
+		if got, ok := interruptBody(body); !ok || got != want {
+			t.Errorf("%q answered %q, %v", body, got, ok)
+		}
+	}
+	for _, body := range []string{"/interrupted", "please /interrupt", " /interrupt", "/Interrupt"} {
+		if _, ok := interruptBody(body); ok {
+			t.Errorf("%q was an interrupt", body)
+		}
 	}
 }
 

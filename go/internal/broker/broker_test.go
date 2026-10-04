@@ -29,7 +29,7 @@ type run struct {
 	channel   string
 }
 
-func dispatch(t *testing.T, historyLimit int, withChannel bool) *run {
+func dispatch(t *testing.T, historyLimit int, withChannel bool, interrupters ...string) *run {
 	t.Helper()
 	server := testserver.Start(t, historyLimit)
 
@@ -56,7 +56,7 @@ func dispatch(t *testing.T, historyLimit int, withChannel bool) *run {
 
 	worker, err := Open(Config{
 		Server: server.Base, User: "bob", Password: "bob",
-		Room: room.ID, Channel: channel.ID,
+		Room: room.ID, Channel: channel.ID, Interrupters: interrupters,
 	})
 	if err != nil {
 		t.Fatalf("the broker cannot open: %v", err)
@@ -218,7 +218,7 @@ func TestARunAttachedToARoomWithHistoryStartsAtWhatIsRetained(t *testing.T) {
 	}
 	t.Cleanup(worker.Stop)
 
-	if pushed := worker.forPush(); len(pushed) != 0 {
+	if pushed, _ := worker.forPush(); len(pushed) != 0 {
 		t.Fatalf("history went to stdin: %q", pushed)
 	}
 	reply := worker.Handle(link.Request{Op: link.OpMessages})
@@ -235,7 +235,7 @@ func TestARunAttachedToARoomWithHistoryStartsAtWhatIsRetained(t *testing.T) {
 
 	say(t, developer, room.ID, "now this")
 	waitFor(t, "the new message on stdin", func() bool {
-		pushed := worker.forPush()
+		pushed, _ := worker.forPush()
 		return len(pushed) == 1 && pushed[0] == "demo: now this"
 	})
 }

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"minos/internal/broker"
 	"minos/internal/client"
 	"minos/internal/testserver"
 )
@@ -128,5 +129,44 @@ func TestTheLastTurnIsRelayedWhenTheAgentExitsAtOnce(t *testing.T) {
 			t.Fatalf("never relayed: %v", missing)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// The dispatcher's control lane: an interrupt with an id reaches the relay,
+// and anything else is refused with a reason rather than dropped.
+func TestTheControlLaneTakesInterruptsAndRefusesTheRest(t *testing.T) {
+	input := strings.Join([]string{
+		`{"op":"interrupt","id":"p1"}`,
+		``,
+		`{"op":"interrupt"}`,
+		`{"op":"stop","id":"p2"}`,
+		`interrupt`,
+	}, "\n")
+	var asks []broker.Ask
+	var refusals []string
+	control(strings.NewReader(input),
+		func(ask broker.Ask) { asks = append(asks, ask) },
+		func(event map[string]any) { refusals = append(refusals, event["error"].(string)) })
+
+	if len(asks) != 1 || asks[0] != (broker.Ask{By: "dispatcher", ID: "p1"}) {
+		t.Fatalf("the relay was asked %v", asks)
+	}
+	want := []string{"needs an id", `no op "stop"`, "not a JSON object"}
+	if len(refusals) != len(want) {
+		t.Fatalf("refused %q", refusals)
+	}
+	for i, fragment := range want {
+		if !strings.Contains(refusals[i], fragment) {
+			t.Errorf("refusal %d reads %q, want %q", i, refusals[i], fragment)
+		}
+	}
+}
+
+func TestInterruptersAreACommaSeparatedList(t *testing.T) {
+	if got := names(" demo, ,alice,"); strings.Join(got, "|") != "demo|alice" {
+		t.Fatalf("names answered %q", got)
+	}
+	if got := names(""); got != nil {
+		t.Fatalf("an empty list answered %q", got)
 	}
 }

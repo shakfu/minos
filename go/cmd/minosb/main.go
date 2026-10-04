@@ -6,18 +6,24 @@
 //
 // Control output is one JSON object per line on stdout, for the dispatcher to
 // read: `ready` once the socket is answering, `held` and `turn` as the push
-// lane fills and drains, `torn` when delivery gives up, `exited` when the run
-// command ends, `stopped` on the way out. Anything a person should read goes
-// to stderr.
+// lane fills and drains, `interrupt` with each request's outcome, `torn` when
+// delivery gives up, `exited` when the run command ends, `stopped` on the way
+// out. Anything a person should read goes to stderr.
+//
+// Control input is one JSON object per line on stdin, read only when there is
+// a run command: `{"op":"interrupt","id":"..."}` stops the current turn. A
+// line that is not one is answered with `refused`. End of input ends nothing.
 //
 // Everything after `--` is the run command, which is `sanduk run` in a real
 // dispatch. The broker owns its stdin and stdout: stdin is the only lane that
 // reaches a model that never calls the shim, and stdout is the broker's only
 // view of the work. It does not own the container. Stopping a run goes to the
-// engine directly, so it never goes through this process.
+// engine directly, so it never goes through this process; stopping a turn is
+// a frame on the agent's stdin, so it always does.
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -57,6 +63,7 @@ func run(args []string, stderr io.Writer) int {
 	socket := flags.String("socket", "", "the unix socket the container reaches, outside the work mount")
 	mode := flags.Uint("mode", 0o600, "the socket's file mode; the socket is the credential")
 	agent := flags.String("agent", "claude", "whose stream the run command speaks")
+	interrupters := flags.String("interrupters", "", "comma-separated users whose /interrupt in the room stops a turn")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -84,6 +91,7 @@ func run(args []string, stderr io.Writer) int {
 	run, err := broker.Open(broker.Config{
 		Server: *server, User: *user, Password: password,
 		Room: *room, Channel: *channel, Window: *window,
+		Interrupters: names(*interrupters),
 	})
 	if err != nil {
 		return fail(stderr, "%v", err)
@@ -113,9 +121,11 @@ func run(args []string, stderr io.Writer) int {
 			return fail(stderr, "%v", err)
 		}
 		var drained <-chan struct{}
-		if command, drained, err = start(run, adapter, argv); err != nil {
+		var relay *broker.Relay
+		if command, relay, drained, err = start(run, adapter, argv); err != nil {
 			return fail(stderr, "%v", err)
 		}
+		go control(os.Stdin, relay.Interrupt, report)
 		go func() {
 			<-drained
 			done <- wait(command)
@@ -149,7 +159,7 @@ func run(args []string, stderr io.Writer) int {
 // start runs the agent with its stdio on the broker's pipes. The channel
 // closes once stdout is read and relayed; Wait closes the pipe, so it must
 // not run before then or the last turn is lost.
-func start(run *broker.Broker, adapter broker.Adapter, argv []string) (*exec.Cmd, <-chan struct{}, error) {
+func start(run *broker.Broker, adapter broker.Adapter, argv []string) (*exec.Cmd, *broker.Relay, <-chan struct{}, error) {
 	command := exec.Command(argv[0], argv[1:]...)
 	command.Env = childEnv(os.Environ())
 	// The run command's own notes are a person's to read, not the room's.
@@ -157,14 +167,14 @@ func start(run *broker.Broker, adapter broker.Adapter, argv []string) (*exec.Cmd
 
 	stdin, err := command.StdinPipe()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	stdout, err := command.StdoutPipe()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := command.Start(); err != nil {
-		return nil, nil, fmt.Errorf("cannot start %s: %w", argv[0], err)
+		return nil, nil, nil, fmt.Errorf("cannot start %s: %w", argv[0], err)
 	}
 
 	relay := broker.NewRelay(run, adapter, stdin, report)
@@ -176,7 +186,50 @@ func start(run *broker.Broker, adapter broker.Adapter, argv []string) (*exec.Cmd
 			report(map[string]any{"event": "unread", "error": err.Error()})
 		}
 	}()
-	return command, drained, nil
+	return command, relay, drained, nil
+}
+
+// control reads the dispatcher's requests until its input ends. The ids are
+// the dispatcher's own, echoed in the `interrupt` event.
+func control(input io.Reader, interrupt func(broker.Ask), report func(map[string]any)) {
+	scanner := bufio.NewScanner(input)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var request struct {
+			Op string `json:"op"`
+			ID string `json:"id"`
+		}
+		var refusal string
+		switch err := json.Unmarshal([]byte(line), &request); {
+		case err != nil:
+			refusal = "not a JSON object: " + err.Error()
+		case request.Op != "interrupt":
+			refusal = fmt.Sprintf("no op %q; there is: interrupt", request.Op)
+		case request.ID == "":
+			refusal = "an interrupt needs an id"
+		default:
+			interrupt(broker.Ask{By: "dispatcher", ID: request.ID})
+			continue
+		}
+		report(map[string]any{"event": "refused", "error": refusal})
+	}
+	if err := scanner.Err(); err != nil {
+		report(map[string]any{"event": "refused", "error": "control input: " + err.Error()})
+	}
+}
+
+// names splits a comma-separated list, dropping blanks.
+func names(list string) []string {
+	var found []string
+	for _, name := range strings.Split(list, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			found = append(found, name)
+		}
+	}
+	return found
 }
 
 // childEnv is the broker's environment without the credential. A nil Env

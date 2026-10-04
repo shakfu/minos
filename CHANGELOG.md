@@ -106,6 +106,10 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 ### Added
 
+- `make host-run` drives one real `claude` under `minosb` on the host and reports 14 checks: relay, a held message answered after its turn, both interrupt lanes, and whether the agent calls `minosa`. No container, so it runs where docker does not. It is a probe, not a test: a model is never in a test path. So far it has passed against a scripted agent only; the first real run is still to do.
+
+- Interrupting a turn. `pma`, and its agent through `pma`'s tools, write `{"op":"interrupt","id":"..."}` to `minosb`'s stdin. A user named in `-interrupters` types `/interrupt [correction]` in the room; anyone else's `/interrupt` reaches the agent as text. Each request is reported as an `interrupt` event: `sent`, `merged` into one already sent for the turn, `idle` between turns, or `failed`. A malformed control line is answered with `refused`. The correction is pushed as soon as the stopped turn ends. A message convention over a wire operation, because without grants or author kinds the server could check nothing the broker does not; it moves to the wire with author kind (implementation-plan item 6).
+
 - A `worker` account, which a container run speaks as. A run posted under a person's name before, `bob` in every example; the room could not tell the agent's work from theirs. Grants replace it (implementation-plan item 5).
 
 - `make container` runs the shim in a real container against a broker on the host: all six operations over a bind-mounted socket, with no network and a read-only root, on the host's uid. A container on another uid is refused by the socket's mode alone. Opt-in, because it needs docker.

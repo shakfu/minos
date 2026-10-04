@@ -37,7 +37,9 @@ The design is in [design.md](docs/dev/design.md) and [recommended-architecture.m
 
 - **Tears stop the run.** If the broker falls further behind than the history limit, it reports `torn` and exits rather than skip messages.
 
-- **Control events for the dispatcher.** `minosb` writes `ready`, `held`, `turn`, `torn`, `exited` and `stopped` to stdout as JSON lines.
+- **Control events for the dispatcher.** `minosb` writes `ready`, `held`, `turn`, `interrupt`, `refused`, `torn`, `exited` and `stopped` to stdout as JSON lines.
+
+- **Interrupts.** A turn stops on `{"op":"interrupt","id":"..."}` on `minosb`'s stdin, or on `/interrupt [correction]` in the room from a user named in `-interrupters`. The correction is pushed when the stopped turn ends.
 
 - **Socket hardening.** The socket is created with its final mode, refuses a path holding anything else, has a 5 s request deadline and admits 64 connections.
 
@@ -101,8 +103,6 @@ Phase 0 of [implementation-plan.md](docs/dev/implementation-plan.md) is built on
 
 - **Submission deadlines, send rates and quotas.**
 
-- **Interrupts.** The Claude adapter encodes one; nothing sends it.
-
 - **An end-to-end run.** No real agent has run in a container. `pma` does not yet dispatch through `sanduk`.
 
 - **`minosa mcp`.**
@@ -126,6 +126,7 @@ The server does not need `dist/`. If it is empty, the server warns and serves th
 |-|-|
 | `make go` | Build `go/minosd`, `go/minos`, `go/minosb` and `go/minosa`. |
 | `make demo` | Narrate the channel audience rule, against a server and database of its own. |
+| `make host-run` | Drive one real `claude` under `minosb` on the host, and check relay, held messages, both interrupt lanes and the shim. Spends turns on your account; the agent is unsandboxed. |
 | `make test` | `go test -race ./...`, the wire contract included. |
 | `make conformance` | The wire contract alone. |
 | `make cover` | The server's coverage under the wire contract. |
@@ -146,7 +147,7 @@ TASK='{"type":"user","message":{"role":"user","content":"Reply to each message i
 ```
 
 ```text
-MINOS_PASSWORD=worker ./go/minosb -user worker -room <id> [-channel <id>] -socket /tmp/run/run.sock -- ./agent.sh
+MINOS_PASSWORD=worker ./go/minosb -user worker -room <id> [-channel <id>] [-interrupters demo] -socket /tmp/run/run.sock -- ./agent.sh
 MINOS_SOCKET=/tmp/run/run.sock ./go/minosa messages
 ```
 
