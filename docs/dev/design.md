@@ -360,7 +360,7 @@ D5 reduces the pressure without closing the hole. Room count tracks workflows di
 
 ## 12. Out of scope
 
-- **Agent discovery.** `pma` starts every agent and knows what each is for. [A2A](https://a2a-protocol.org/latest/specification) AgentCards answer capability discovery across organisations. One host, one dispatcher.
+- **Agent discovery.** `pma` starts every agent and knows what each is for. [A2A](https://a2a-protocol.org/latest/specification) AgentCards answer capability discovery across organisations. One host, one dispatcher. An A2A gateway for one worker's room, with no discovery, is in scope since 2026-10-14: [agent2agent.md](agent2agent.md).
 
 - **Federation.** [AMP](https://github.com/agentmessaging/protocol) addresses agents as `agent@tenant.provider` to route across providers. Every principal here is on one host.
 

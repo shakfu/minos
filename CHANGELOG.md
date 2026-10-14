@@ -6,6 +6,10 @@ Notable changes to minos. The format follows [Keep a Changelog](https://keepacha
 
 Both web front ends and the Python server are gone. `go/` holds the server and the terminal client, and the wire format between them is still OS.js's without any OS.js code.
 
+### Added
+
+- `minosg`, an A2A v1.0 gateway. It serves one worker's room to an orchestrator over JSON-RPC, on loopback, behind a bearer token. A message is posted to the room, and the worker's next message completes the task. It is a minos client on the host, chosen over serving A2A from `minosd`, because the server's wire is frozen and nothing else changes. Push notifications and file parts are refused. a2a-go raises the Go minimum to 1.26. See [agent2agent.md](docs/dev/agent2agent.md).
+
 ### Removed
 
 - The Python tree: `server/`, `messaging/`, `tui/`, the pytest suite, `pyproject.toml`, the uv venv, and the `install`, `serve-go` and `conformance-go` make targets. A second implementation of the core cost about 55% more code per feature, and it described behaviour `go/` already had. Three parts were ported rather than dropped: the conformance suite, the only black-box test of the server; the terminal client, its only client; and the audience demo.

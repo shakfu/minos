@@ -18,6 +18,7 @@ go/minosd
 go/minos
 go/minosb
 go/minosa
+go/minosg
 
 # python
 .venv

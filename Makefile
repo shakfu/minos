@@ -4,9 +4,10 @@ MEDIA := docs/media
 
 GO_SOURCES := $(shell find go -name '*.go' 2>/dev/null) go/go.mod go/go.sum
 
-## The server, the terminal client, and one run's pair: the host-side broker
-## go/minosb and the shim go/minosa that the container carries.
-go: go/minosd go/minos go/minosb go/minosa
+## The server, the terminal client, one run's pair: the host-side broker
+## go/minosb and the shim go/minosa that the container carries, and the A2A
+## gateway go/minosg.
+go: go/minosd go/minos go/minosb go/minosa go/minosg
 
 go/minosd: $(GO_SOURCES)
 	@cd go && go build -o minosd ./cmd/minosd
@@ -16,6 +17,9 @@ go/minos: $(GO_SOURCES)
 
 go/minosb: $(GO_SOURCES)
 	@cd go && go build -o minosb ./cmd/minosb
+
+go/minosg: $(GO_SOURCES)
+	@cd go && go build -o minosg ./cmd/minosg
 
 ## Static, because it runs in a container that carries nothing else.
 go/minosa: $(GO_SOURCES)
@@ -94,4 +98,4 @@ $(MEDIA)/network.pdf: $(MEDIA)/network.d2
 
 
 clean:
-	@rm -rf .run go/minosd go/minos go/minosb go/minosa
+	@rm -rf .run go/minosd go/minos go/minosb go/minosa go/minosg

@@ -71,6 +71,14 @@ The design is in [design.md](docs/dev/design.md) and [recommended-architecture.m
 
 - **OS.js wire format.** Routes, `osjs/*` websocket names and the `osjs:` mountpoint are frozen, so a front end can be replaced without changing the server.
 
+### A2A gateway
+
+- **One worker as one A2A agent.** `minosg` serves a room over [A2A](https://a2a-protocol.org/latest/specification) v1.0 JSON-RPC for an orchestrator. What the orchestrator says is said in the room, under the gateway's account.
+
+- **A task ends at the worker's next message.** That message is the task's artifact. `CancelTask` posts `/interrupt`.
+
+- **Loopback and a bearer token.** No push notifications and no file parts. The mapping and its limits are in [agent2agent.md](docs/dev/agent2agent.md).
+
 ### Terminal client
 
 - **Four tabs.** `OVERVIEW` ranks the 5 projects with the most said in open places in the last 7 days, then lists what waits on you. `PROJECTS`, `ROOMS` and `PEOPLE` list the rest.
@@ -111,7 +119,7 @@ Phase 0 of [implementation-plan.md](docs/dev/implementation-plan.md) is built on
 
 ## Run
 
-Go 1.25 or newer builds everything. There is no other toolchain.
+Go 1.26 or newer builds everything. There is no other toolchain.
 
 ```text
 make serve # the server on http://127.0.0.1:8000
@@ -124,7 +132,7 @@ The server does not need `dist/`. If it is empty, the server warns and serves th
 
 | Target | Does |
 |-|-|
-| `make go` | Build `go/minosd`, `go/minos`, `go/minosb` and `go/minosa`. |
+| `make go` | Build `go/minosd`, `go/minos`, `go/minosb`, `go/minosa` and `go/minosg`. |
 | `make demo` | Narrate the channel audience rule, against a server and database of its own. |
 | `make host-run` | Drive one real `claude` under `minosb` on the host, and check relay, held messages, both interrupt lanes and the shim. Spends turns on your account; the agent is unsandboxed. |
 | `make test` | `go test -race ./...`, the wire contract included. |
@@ -170,6 +178,17 @@ Before starting the broker:
 
 `say` and `submit` take `-payload F`, a JSON file. `--` ends the flags.
 
+### An A2A gateway, by hand
+
+`demo` must invite the gateway's account and the worker to the room.
+
+```text
+MINOS_PASSWORD=alice MINOS_A2A_TOKEN=<token> ./go/minosg -user alice -room <id> -worker worker
+curl http://127.0.0.1:8100/.well-known/agent-card.json
+```
+
+`-listen` sets the address, loopback only, default `127.0.0.1:8100`. `-timeout` bounds the wait for the worker, default 30m.
+
 ## Cheatsheet
 
 ```text
@@ -180,9 +199,10 @@ Before starting the broker:
 
 | Variable | Read by | Is |
 |-|-|-|
-| `MINOS_SERVER` | `minos`, `minosb` | The server's base URL. Default `http://127.0.0.1:8000`. |
-| `MINOS_USER` | `minos`, `minosb` | The account, in place of `-user`. |
-| `MINOS_PASSWORD` | `minos`, `minosb` | The password. `minos` falls back to a prompt; `minosb` requires it. |
+| `MINOS_SERVER` | `minos`, `minosb`, `minosg` | The server's base URL. Default `http://127.0.0.1:8000`. |
+| `MINOS_USER` | `minos`, `minosb`, `minosg` | The account, in place of `-user`. |
+| `MINOS_PASSWORD` | `minos`, `minosb`, `minosg` | The password. `minos` falls back to a prompt; `minosb` and `minosg` require it. |
+| `MINOS_A2A_TOKEN` | `minosg` | The bearer token every A2A request must carry. Required. |
 | `MINOS_SOCKET` | `minosa` | The run's socket, in place of `-socket`. |
 | `MINOS_TIMELINE_DB` | `minosd` | The database file. Default `timeline.db` under `MINOS_RUN`. |
 
@@ -272,6 +292,7 @@ A `<channel>` is one word: its name with `_` for each space, its id, or its id p
 | `go/cmd/minos` | The terminal client. |
 | `go/cmd/minosb` | One run's broker, on the host. |
 | `go/cmd/minosa` | The shim in the container. Static; imports nothing from the client. |
+| `go/cmd/minosg` | The A2A gateway, on the host. |
 | `go/cmd/demo` | `make demo`. |
 | `go/internal/httpapi` | Routes, the signed session cookie, the websocket upgrade. |
 | `go/internal/socket` | Frame format, connection registry, fan-out. |
@@ -283,6 +304,7 @@ A `<channel>` is one word: its name with `_` for each space, its id, or its id p
 | `go/internal/tui` | The terminal interface. |
 | `go/internal/broker` | The six operations, delivery and tears, and the per-agent stream adapter. |
 | `go/internal/link` | The run socket: framing, refusals, limits. |
+| `go/internal/gateway` | One room as an A2A agent: the card, the token, the task mapping. |
 | `go/internal/testserver` | A whole server in process. `Restart` reopens it on the same database. |
 | `go/conformance` | The wire contract, tested against a server process. |
 | `docs/` | The wire contract; design notes in `docs/dev/`; d2 sources in `docs/media/`. |
