@@ -4,18 +4,23 @@
 // child of the dispatcher: its death ends the run. The dispatcher keeps the
 // container handle for itself, so stopping a run never goes through here.
 //
-// Control output is one JSON object per line on stdout, for the dispatcher to
-// read: `ready` once the socket is answering, `held` and `turn` as the push
+// Control output is one JSON object per line on stdout, or in the file -events
+// names, for the dispatcher to read: `ready` once the socket is answering, `held` and `turn` as the push
 // lane fills and drains, `interrupt` with each request's outcome, `torn` when
 // delivery gives up, `exited` when the run command ends, `stopped` on the way
 // out. Anything a person should read goes to stderr.
+//
+// With -events, stdout carries the agent's own stream instead, byte for byte.
+// A dispatcher that reads the agent's output, as pma reads cost and progress
+// from its worker's log, then sees what it would see without the broker.
 //
 // Control input is one JSON object per line on stdin, read only when there is
 // a run command: `{"op":"interrupt","id":"..."}` stops the current turn. A
 // line that is not one is answered with `refused`. End of input ends nothing.
 //
 // Everything after `--` is the run command, which is `sanduk run` in a real
-// dispatch. The broker owns its stdin and stdout: stdin is the only lane that
+// dispatch. -task writes the agent's task as its first stdin frame, so the run
+// command needs no wrapper that does it. The broker owns its stdin and stdout: stdin is the only lane that
 // reaches a model that never calls the shim, and stdout is the broker's only
 // view of the work. It does not own the container. Stopping a run goes to the
 // engine directly, so it never goes through this process; stopping a turn is
@@ -34,6 +39,7 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -46,9 +52,9 @@ import (
 // never calls `messages` again.
 const tearInterval = time.Second
 
-func main() { os.Exit(run(os.Args[1:], os.Stderr)) }
+func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
-func run(args []string, stderr io.Writer) int {
+func run(args []string, stdout, stderr io.Writer) int {
 	fallback := os.Getenv("MINOS_SERVER")
 	if fallback == "" {
 		fallback = "http://127.0.0.1:8000"
@@ -64,6 +70,8 @@ func run(args []string, stderr io.Writer) int {
 	mode := flags.Uint("mode", 0o600, "the socket's file mode; the socket is the credential")
 	agent := flags.String("agent", "claude", "whose stream the run command speaks")
 	interrupters := flags.String("interrupters", "", "comma-separated users whose /interrupt in the room stops a turn")
+	eventsPath := flags.String("events", "", "append control events to this file; stdout then carries the agent's stream")
+	task := flags.String("task", "", "the agent's task, written as its first stdin frame")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -83,10 +91,25 @@ func run(args []string, stderr io.Writer) int {
 		return fail(stderr, "minosb needs -user, or MINOS_USER")
 	case password == "":
 		return fail(stderr, "minosb needs MINOS_PASSWORD in the environment")
+	case *task != "" && flags.NArg() == 0:
+		return fail(stderr, "-task needs a run command after --")
 	}
 	if err := link.CheckPath(*socket); err != nil {
 		return fail(stderr, "cannot use -socket %s: %v", *socket, err)
 	}
+
+	// Control events and the agent's stream never share stdout: interleaved,
+	// either could split a line of the other.
+	events, passthrough := stdout, io.Writer(nil)
+	if *eventsPath != "" {
+		file, err := os.OpenFile(*eventsPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+		if err != nil {
+			return fail(stderr, "cannot use -events %s: %v", *eventsPath, err)
+		}
+		defer file.Close()
+		events, passthrough = file, stdout
+	}
+	report := reporter(events)
 
 	run, err := broker.Open(broker.Config{
 		Server: *server, User: *user, Password: password,
@@ -122,7 +145,7 @@ func run(args []string, stderr io.Writer) int {
 		}
 		var drained <-chan struct{}
 		var relay *broker.Relay
-		if command, relay, drained, err = start(run, adapter, argv); err != nil {
+		if command, relay, drained, err = start(run, adapter, argv, *task, report, passthrough); err != nil {
 			return fail(stderr, "%v", err)
 		}
 		go control(os.Stdin, relay.Interrupt, report)
@@ -158,8 +181,11 @@ func run(args []string, stderr io.Writer) int {
 
 // start runs the agent with its stdio on the broker's pipes. The channel
 // closes once stdout is read and relayed; Wait closes the pipe, so it must
-// not run before then or the last turn is lost.
-func start(run *broker.Broker, adapter broker.Adapter, argv []string) (*exec.Cmd, *broker.Relay, <-chan struct{}, error) {
+// not run before then or the last turn is lost. A non-empty task is the first
+// frame on stdin. A non-nil passthrough gets every byte of the agent's stdout
+// as it is read.
+func start(run *broker.Broker, adapter broker.Adapter, argv []string, task string,
+	report func(map[string]any), passthrough io.Writer) (*exec.Cmd, *broker.Relay, <-chan struct{}, error) {
 	command := exec.Command(argv[0], argv[1:]...)
 	command.Env = childEnv(os.Environ())
 	// The run command's own notes are a person's to read, not the room's.
@@ -177,12 +203,30 @@ func start(run *broker.Broker, adapter broker.Adapter, argv []string) (*exec.Cmd
 		return nil, nil, nil, fmt.Errorf("cannot start %s: %w", argv[0], err)
 	}
 
+	// Before Deliver starts, so nothing reaches stdin ahead of the task. The
+	// relay starts inside a turn, which this frame begins.
+	if task != "" {
+		frame, err := adapter.Push([]string{task})
+		if err == nil {
+			_, err = stdin.Write(frame)
+		}
+		if err != nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+			return nil, nil, nil, fmt.Errorf("cannot give %s its task: %w", argv[0], err)
+		}
+	}
+
 	relay := broker.NewRelay(run, adapter, stdin, report)
 	go relay.Deliver()
+	var stream io.Reader = stdout
+	if passthrough != nil {
+		stream = io.TeeReader(stdout, passthrough)
+	}
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		if err := relay.Read(stdout); err != nil {
+		if err := relay.Read(stream); err != nil {
 			report(map[string]any{"event": "unread", "error": err.Error()})
 		}
 	}()
@@ -264,12 +308,26 @@ func stop(command *exec.Cmd, code int) int {
 	return code
 }
 
-func report(event map[string]any) {
-	raw, err := json.Marshal(event)
-	if err != nil {
-		return
+// reporter writes control events to w, one line each. The lock keeps lines
+// whole: events come from the relay, the control lane and the main loop.
+// `stopped` is the last line: the relay can still be reporting a turn while
+// the main loop exits, and a dispatcher stops reading at `stopped`.
+func reporter(w io.Writer) func(map[string]any) {
+	var mutex sync.Mutex
+	stopped := false
+	return func(event map[string]any) {
+		raw, err := json.Marshal(event)
+		if err != nil {
+			return
+		}
+		mutex.Lock()
+		defer mutex.Unlock()
+		if stopped {
+			return
+		}
+		stopped = event["event"] == "stopped"
+		fmt.Fprintln(w, string(raw))
 	}
-	fmt.Fprintln(os.Stdout, string(raw))
 }
 
 func fail(stderr io.Writer, format string, args ...any) int {

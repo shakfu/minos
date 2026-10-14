@@ -5,11 +5,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -33,7 +36,7 @@ func launch(t *testing.T, socket string) (int, string, bool) {
 	t.Setenv("MINOS_PASSWORD", "p")
 
 	var stderr bytes.Buffer
-	code := run([]string{"-server", server.URL, "-user", "u", "-room", "r", "-socket", socket}, &stderr)
+	code := run([]string{"-server", server.URL, "-user", "u", "-room", "r", "-socket", socket}, io.Discard, &stderr)
 	return code, stderr.String(), reached.Load()
 }
 
@@ -104,7 +107,7 @@ func TestTheLastTurnIsRelayedWhenTheAgentExitsAtOnce(t *testing.T) {
 		code := run([]string{
 			"-server", server.Base, "-user", "bob", "-room", room.ID,
 			"-socket", testserver.SocketPath(t), "--", "/bin/echo", record,
-		}, &stderr)
+		}, io.Discard, &stderr)
 		if code != 0 {
 			t.Fatalf("run %d exited %d: %s", n, code, stderr.String())
 		}
@@ -168,5 +171,205 @@ func TestInterruptersAreACommaSeparatedList(t *testing.T) {
 	}
 	if got := names(""); got != nil {
 		t.Fatalf("an empty list answered %q", got)
+	}
+}
+
+// -- the agent's stream -------------------------------------------------------
+
+// passRun runs one agent that prints stream under minosb, and returns what
+// minosb wrote to stdout and the path of its events file.
+func passRun(t *testing.T, stream string, withEvents bool) (stdout, events string, room string, developer *client.Client) {
+	t.Helper()
+	server := testserver.Start(t, 200)
+	_, developer, _, err := client.Connect(server.Base, "demo", "demo")
+	if err != nil {
+		t.Fatalf("the developer cannot connect: %v", err)
+	}
+	t.Cleanup(developer.Stop)
+	opened, err := developer.OpenRoom([]client.Principal{{Kind: "user", ID: "bob"}}, "Run", "persisted")
+	if err != nil {
+		t.Fatalf("cannot open the run's room: %v", err)
+	}
+	t.Setenv("MINOS_PASSWORD", "bob")
+
+	dir := t.TempDir()
+	agentOutput := filepath.Join(dir, "stream")
+	if err := os.WriteFile(agentOutput, []byte(stream), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-server", server.Base, "-user", "bob", "-room", opened.ID, "-socket", testserver.SocketPath(t)}
+	events = filepath.Join(dir, "events.jsonl")
+	if withEvents {
+		args = append(args, "-events", events)
+	}
+	var out, stderr bytes.Buffer
+	if code := run(append(args, "--", "/bin/cat", agentOutput), &out, &stderr); code != 0 {
+		t.Fatalf("minosb exited %d: %s", code, stderr.String())
+	}
+	return out.String(), events, opened.ID, developer
+}
+
+// A dispatcher that reads the agent's output sees it unchanged: a line past
+// the scanner's first buffer, and a last line with no newline, included.
+func TestWithAnEventsFileStdoutIsTheAgentsStreamByteForByte(t *testing.T) {
+	stream := `{"type":"system","subtype":"init"}` + "\n" +
+		`{"type":"assistant","text":"` + strings.Repeat("a", 70_000) + `"}` + "\n" +
+		`{"type":"result","result":"all 41 pass","total_cost_usd":0.12}` + "\n" +
+		`trailing words with no newline`
+	stdout, events, room, developer := passRun(t, stream, true)
+
+	if stdout != stream {
+		t.Fatalf("stdout differs from the agent's stream: %d bytes, want %d", len(stdout), len(stream))
+	}
+	raw, err := os.ReadFile(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("an events line is not JSON: %q", line)
+		}
+		names = append(names, event["event"].(string))
+	}
+	if names[0] != "ready" || names[len(names)-1] != "stopped" || !slices.Contains(names, "exited") {
+		t.Fatalf("the events file holds %v", names)
+	}
+
+	// The relay still reads the stream it passes on.
+	waitForBody(t, developer, room, "all 41 pass")
+}
+
+// Without -events the contract is unchanged: stdout holds control events and
+// nothing of the agent's.
+func TestWithoutAnEventsFileStdoutHoldsOnlyControlEvents(t *testing.T) {
+	stream := `{"type":"result","result":"done"}` + "\n"
+	stdout, events, _, _ := passRun(t, stream, false)
+
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil || event["event"] == nil {
+			t.Fatalf("stdout holds a line that is not a control event: %q", line)
+		}
+	}
+	if _, err := os.Stat(events); !os.IsNotExist(err) {
+		t.Fatalf("an events file was written: %v", err)
+	}
+}
+
+func TestAnEventsFileItCannotOpenIsRefusedBeforeTheServer(t *testing.T) {
+	var reached atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached.Store(true)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	t.Setenv("MINOS_PASSWORD", "p")
+
+	var stderr bytes.Buffer
+	code := run([]string{"-server", server.URL, "-user", "u", "-room", "r",
+		"-socket", "/tmp/minos-unused.sock", "-events", "/nonexistent/dir/events"}, io.Discard, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "-events") || reached.Load() {
+		t.Fatalf("exit %d, stderr %q, reached %v", code, stderr.String(), reached.Load())
+	}
+}
+
+func waitForBody(t *testing.T, c *client.Client, room, body string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, message := range c.Log(room) {
+			if message.Body == body {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("the room never heard %q", body)
+}
+
+// The relay may report a turn while the main loop exits. Nothing follows
+// `stopped`, which is where a dispatcher stops reading.
+func TestNothingIsReportedAfterStopped(t *testing.T) {
+	var out bytes.Buffer
+	report := reporter(&out)
+	report(map[string]any{"event": "exited", "code": 0})
+	report(map[string]any{"event": "stopped", "reason": "exited"})
+	report(map[string]any{"event": "turn", "delivering": 0})
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[1], `"stopped"`) {
+		t.Fatalf("reported %q", lines)
+	}
+}
+
+// -- the task -----------------------------------------------------------------
+
+// The task is the agent's first stdin frame, framed as any push is, so a run
+// command needs no wrapper to deliver it.
+func TestTheTaskIsTheFirstFrameOnTheAgentsStdin(t *testing.T) {
+	server := testserver.Start(t, 200)
+	_, developer, _, err := client.Connect(server.Base, "demo", "demo")
+	if err != nil {
+		t.Fatalf("the developer cannot connect: %v", err)
+	}
+	t.Cleanup(developer.Stop)
+	room, err := developer.OpenRoom([]client.Principal{{Kind: "user", ID: "bob"}}, "Run", "persisted")
+	if err != nil {
+		t.Fatalf("cannot open the run's room: %v", err)
+	}
+	t.Setenv("MINOS_PASSWORD", "bob")
+
+	first := filepath.Join(t.TempDir(), "first")
+	agent := `read -r line; printf '%s\n' "$line" > "$1"; echo '{"type":"result","result":"got it"}'`
+	task := "Fix \"the parser\".\nThen run make test."
+	var stderr bytes.Buffer
+	code := run([]string{
+		"-server", server.Base, "-user", "bob", "-room", room.ID,
+		"-socket", testserver.SocketPath(t), "-task", task,
+		"--", "/bin/sh", "-c", agent, "agent", first,
+	}, io.Discard, &stderr)
+	if code != 0 {
+		t.Fatalf("minosb exited %d: %s", code, stderr.String())
+	}
+
+	raw, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatalf("the agent read nothing: %v", err)
+	}
+	var frame struct {
+		Type    string `json:"type"`
+		Message struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		t.Fatalf("the first frame is not JSON: %q", raw)
+	}
+	if frame.Type != "user" || frame.Message.Role != "user" ||
+		len(frame.Message.Content) != 1 || frame.Message.Content[0].Text != task {
+		t.Fatalf("the first frame is %s", raw)
+	}
+	waitForBody(t, developer, room.ID, "got it")
+}
+
+func TestATaskWithNoRunCommandIsRefusedBeforeTheServer(t *testing.T) {
+	var reached atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached.Store(true)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	t.Setenv("MINOS_PASSWORD", "p")
+
+	var stderr bytes.Buffer
+	code := run([]string{"-server", server.URL, "-user", "u", "-room", "r",
+		"-socket", "/tmp/minos-unused.sock", "-task", "do it"}, io.Discard, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "-task needs a run command") || reached.Load() {
+		t.Fatalf("exit %d, stderr %q, reached %v", code, stderr.String(), reached.Load())
 	}
 }
