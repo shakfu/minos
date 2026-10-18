@@ -265,6 +265,30 @@ func TestAMessageArrivingDuringADeliveredTurnIsHeld(t *testing.T) {
 	}
 }
 
+// An agent that stops reading stdin blocks the write, not the reports. A
+// message arriving during the blocked push is still held and reported.
+func TestAStalledPushStillReportsWhatArrives(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	worker, events := scripted(t, run)
+
+	say(t, run.developer, run.room, "one")
+	waitFor(t, "one held", func() bool { return events.seen("held") == 1 })
+	worker.endTurn(t, "done")
+	waitFor(t, "the turn's end", func() bool { return events.seen("turn") == 1 })
+
+	// The agent has not read "one", so its push is still being written.
+	say(t, run.developer, run.room, "two")
+	waitFor(t, "two held", func() bool { return events.seen("held") == 2 })
+
+	if got := texts(t, worker.read(t)); len(got) != 1 || got[0] != "demo: one" {
+		t.Fatalf("the agent was pushed %q", got)
+	}
+	worker.endTurn(t, "answered one")
+	if got := texts(t, worker.read(t)); len(got) != 1 || got[0] != "demo: two" {
+		t.Fatalf("the agent was pushed %q", got)
+	}
+}
+
 // A pushed body cannot forge a line from someone else.
 func TestAPushedBodyCannotForgeALine(t *testing.T) {
 	run := dispatch(t, config.HistoryLimit, false)

@@ -1,4 +1,5 @@
-// Command minos is the terminal client.
+// Command minos is the terminal client. `minos room ensure` is its one-shot
+// command, for a dispatcher founding a run's room.
 //
 // Login happens before the screen is taken, so a refusal is a line on the
 // terminal rather than something drawn inside an interface with nothing to show.
@@ -19,7 +20,12 @@ import (
 	"minos/internal/tui"
 )
 
-func main() { os.Exit(run()) }
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "room" {
+		os.Exit(room(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	os.Exit(run())
+}
 
 func run() int {
 	fallback := os.Getenv("MINOS_SERVER")

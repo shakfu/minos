@@ -548,6 +548,60 @@ func TestKeysTypedWhileAKeyWaitsAreHandledInOrderAfter(t *testing.T) {
 	}
 }
 
+// While a key awaits the server, the screen still draws what arrives: here an
+// invitation, pushed by another user during the wait.
+func TestTheScreenRedrawsWhileAKeyAwaitsTheServer(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo := connect(t, server.Base, "demo")
+	screen := simulated(t, 100, 24)
+	ui := newUi(screen, demo, client.Profile{Username: "demo"})
+	release := make(chan struct{})
+	quitOnF1(ui)
+	handle := ui.keyHandler
+	ui.keyHandler = func(event *tcell.EventKey) {
+		if event.Key() == tcell.KeyEnter {
+			_ = ui.await(func() error { <-release; return nil })
+			return
+		}
+		handle(event)
+	}
+
+	// Read only while the key awaits, holding owner: every draw then needs it.
+	drawn := func() string {
+		ui.owner.Lock()
+		defer ui.owner.Unlock()
+		if !ui.waiting {
+			return ""
+		}
+		return contents(screen)
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		ui.loop()
+		close(returned)
+	}()
+	screen.PostEventWait(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	waitFor(t, "the waiting marker", func() bool { return strings.Contains(drawn(), "waiting") })
+
+	alice := connect(t, server.Base, "alice")
+	if _, err := alice.OpenRoom([]client.Principal{{Kind: "user", ID: "demo"}}, "", "persisted"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the invitation drawn", func() bool { return strings.Contains(drawn(), "1 open invitation") })
+
+	close(release)
+	screen.PostEventWait(tcell.NewEventKey(tcell.KeyF1, 0, tcell.ModNone))
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the loop did not end")
+	}
+	if strings.Contains(contents(screen), "waiting") {
+		t.Fatal("the marker outlived the request")
+	}
+}
+
 // quitOnF1 makes F1 end the loop the way /quit does: in turn, after every key
 // before it. ^C ends it at once, even mid-key, so a test that reads the UI
 // afterwards ends with F1.

@@ -1,6 +1,6 @@
 # pma integration
 
-2026-10-14. How minos and [pma](https://github.com/shakfu/pma) can work together, read against pma at `a69f3eb`. A proposal for approval. Built so far: `minosb -events` and `minosb -task` (section 4.2).
+2026-10-14. How minos and [pma](https://github.com/shakfu/pma) can work together, read against pma at `a69f3eb`. A proposal for approval. Built so far: `minosb -events`, `minosb -task` and `minos room ensure` (section 4.2).
 
 ## 1. Summary
 
@@ -108,7 +108,7 @@ minosb -server ... -user worker -room {room} -interrupters demo -task {prompt} -
 |-|-|
 | `-task TEXT`: `minosb` writes the first stdin frame itself, so no wrapper is needed. Text, because pma fills `{prompt}` as one argument. Built 2026-10-14 | minos |
 | The agent's stream passed through to stdout unchanged, with control events moved to `-events FILE`. Built 2026-10-14 | minos |
-| A room filed under project and task. Proposed in [run-rooms.md](run-rooms.md): pma founds it with `minos room ensure` and passes `{room}`; `minosb` is unchanged | minos, pma |
+| A room filed under project and task: pma founds it with `minos room ensure` and passes `{room}`; `minosb` is unchanged ([run-rooms.md](run-rooms.md)). Built 2026-10-18 on the minos side | minos, pma |
 | The template, a socket path outside the worktree, and the room id on the run row | pma |
 
 - **Gain.** The developer reads a pma run as it happens, corrects it, and interrupts it from the minos TUI. `make host-run` already proves the relay, held messages and both interrupt lanes with a real `claude`.
@@ -146,7 +146,7 @@ This is a precondition for 4.2 and 4.3, and costs little in either repository.
 
 ## 5. Recommendation
 
-1. **The `minosb` changes in 4.2.** Stream passthrough first, because it blocks 4.2 and 4.3. Then `-task`, then filing the room. The first two are built. Filing needs no `minosb` change; see [run-rooms.md](run-rooms.md). All are testable in Go with the scripted fake agent.
+1. **The `minosb` changes in 4.2.** Stream passthrough first, because it blocks 4.2 and 4.3. Then `-task`, then filing the room. All three are built on the minos side. Filing is `minos room ensure` and needs no `minosb` change; see [run-rooms.md](run-rooms.md). All are testable in Go with the scripted fake agent.
 
 2. **4.4, then the pma template.** A real pma dispatch whose room shows in the minos TUI is the phase 0 exit test of [implementation-plan.md](implementation-plan.md), without the container.
 

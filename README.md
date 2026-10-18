@@ -41,6 +41,8 @@ The design is in [design.md](docs/dev/design.md) and [recommended-architecture.m
 
 - **Interrupts.** A turn stops on `{"op":"interrupt","id":"..."}` on `minosb`'s stdin, or on `/interrupt [correction]` in the room from a user named in `-interrupters`. The correction is pushed when the stopped turn ends.
 
+- **Room founding for a dispatcher.** `minos room ensure -project P -task K` prints the id of the room filed under that project and task, founding, inviting and reopening it as needed.
+
 - **Socket hardening.** The socket is created with its final mode, refuses a path holding anything else, has a 5 s request deadline and admits 64 connections.
 
 - **Forgery-safe output.** A message body holding a newline or other non-printable character is quoted in both lanes.
@@ -158,7 +160,7 @@ Add `-events FILE` to keep control events off stdout, which then carries the age
 
 Before starting the broker:
 
-- `demo` must invite `worker` to the room.
+- `demo` must invite `worker` to the room. `MINOS_USER=demo MINOS_PASSWORD=demo ./go/minos room ensure -project pma -task 23 -invite worker` founds one and prints its id.
 
 - Without `-channel`, `submit` is refused.
 

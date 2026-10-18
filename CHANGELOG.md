@@ -10,6 +10,8 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 - `minosg`, an A2A v1.0 gateway. It serves one worker's room to an orchestrator over JSON-RPC, on loopback, behind a bearer token. A message is posted to the room, and the worker's next message completes the task. It is a minos client on the host, chosen over serving A2A from `minosd`, because the server's wire is frozen and nothing else changes. Push notifications and file parts are refused. a2a-go raises the Go minimum to 1.26. See [agent2agent.md](docs/dev/agent2agent.md).
 
+- `minos room ensure -project NAME -task KEY [-invite PRINCIPAL]... [-tag TAG]...` prints the id of the room titled `task/KEY` under the project. It founds the project and the room if missing, invites whoever the room lacks, and reopens it if closed. A dispatcher such as pma passes the id to `minosb -room`. pma founds the room rather than `minosb`, because founding needs an administrator and `minosb` holds the worker's credential. See [run-rooms.md](docs/dev/run-rooms.md).
+
 - `minosb -task TEXT` writes the agent's task as its first stdin frame, framed as any push is. A run command that waits for its task on stdin needed a wrapper script to send it, and a pma worker template cannot express one. Text over a file, because pma fills `{prompt}` as one argument.
 
 - `minosb -events FILE` appends control events to FILE, and stdout then carries the agent's stream byte for byte. pma reads cost, summary and progress from its worker's output, and that output was consumed by `minosb`. A flag over always passing the stream through, because `make host-run` and any dispatcher reading events on stdout keep working.
@@ -19,6 +21,12 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 - The Python tree: `server/`, `messaging/`, `tui/`, the pytest suite, `pyproject.toml`, the uv venv, and the `install`, `serve-go` and `conformance-go` make targets. A second implementation of the core cost about 55% more code per feature, and it described behaviour `go/` already had. Three parts were ported rather than dropped: the conformance suite, the only black-box test of the server; the terminal client, its only client; and the audience demo.
 
 ### Fixed
+
+- Two concurrent `project.create` calls with one name could both succeed. The name check and the insert ran outside the lock that room titles already take. Found by two `minos room ensure` calls racing on a new project.
+
+- An agent that stopped reading stdin stopped `held` events: the relay wrote stdin on the goroutine that reports them, and the write blocked. Writes now run on their own goroutine, in order, and interrupt outcomes are reported after the write they follow. A write deadline was rejected: a frame can exceed the 64 KiB pipe buffer, so a timed-out write leaves half a JSON line.
+
+- The terminal client did not redraw while a key's request was outstanding, for up to 10 s. The handler now hands the screen to the loop while a request waits, and the status line reads `waiting`. Keys typed meanwhile are still handled in order afterwards. Chosen over moving each request off its handler, which would split about 35 handlers in two.
 
 - `minosb` could report a `turn` after `stopped`. The relay reports a turn's end on its own goroutine, which can run after the main loop has reported `stopped` on its way out. Nothing is reported after `stopped` now.
 

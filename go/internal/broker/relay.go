@@ -134,13 +134,16 @@ type Relay struct {
 
 	// ended tells Deliver a turn ended; Deliver alone clears inTurn, so the
 	// `turn` event precedes the write. Buffered by one: a turn ends only after
-	// Deliver has written the frame that started it.
+	// the frame that started it was written.
 	ended chan struct{}
+	// ready wakes the writer, the only goroutine that writes stdin. A write
+	// blocks while the agent is not reading, and Deliver must keep reporting.
+	ready chan struct{}
 
 	mutex sync.Mutex
 	// A turn is under way until the agent's stream says it ended. The run
 	// starts inside one: the dispatcher gave the agent its task. A boolean
-	// suffices because only Deliver writes, one frame per turn, between turns.
+	// suffices because only Deliver queues a frame, one per turn, between turns.
 	inTurn bool
 	held   []string
 	// asks wait for Deliver to act on them. interrupting is set once a
@@ -149,6 +152,9 @@ type Relay struct {
 	interrupting bool
 	// frames numbers the interrupts written, for the agent's request ids.
 	frames int
+	// jobs are the writer's, in order: each frame, and the reports that must
+	// follow it.
+	jobs []func()
 }
 
 // NewRelay wires the broker to one agent's stdin. control reports to the
@@ -159,7 +165,7 @@ func NewRelay(b *Broker, adapter Adapter, stdin io.WriteCloser, control func(map
 	}
 	return &Relay{
 		broker: b, adapter: adapter, stdin: stdin, control: control,
-		ended: make(chan struct{}, 1), inTurn: true,
+		ended: make(chan struct{}, 1), ready: make(chan struct{}, 1), inTurn: true,
 	}
 }
 
@@ -189,8 +195,9 @@ func (r *Relay) Read(stdout io.Reader) error {
 }
 
 // Deliver pushes what the room says onto the agent's stdin until the broker
-// stops. It is the only writer to stdin, so nothing overtakes a held message.
+// stops. Its writer is the only one, so nothing overtakes a held message.
 func (r *Relay) Deliver() {
+	go r.writer()
 	for {
 		ended := false
 		select {
@@ -244,17 +251,56 @@ func (r *Relay) deliver(ended bool) {
 		for i := range arrived {
 			r.control(map[string]any{"event": "held", "waiting": depth - len(arrived) + i + 1})
 		}
-		r.interrupt(asks, send, id)
+		if len(asks) > 0 {
+			r.enqueue(func() { r.interrupt(asks, send, id) })
+		}
 		return
 	}
-	for _, ask := range asks {
-		r.control(map[string]any{"event": "interrupt", "by": ask.By, "id": ask.ID, "outcome": "idle"})
+	if len(asks) > 0 {
+		r.enqueue(func() {
+			for _, ask := range asks {
+				r.control(map[string]any{"event": "interrupt", "by": ask.By, "id": ask.ID, "outcome": "idle"})
+			}
+		})
 	}
 	if ended {
 		r.control(map[string]any{"event": "turn", "delivering": len(batch)})
 	}
 	if len(batch) > 0 {
-		r.write(batch)
+		r.enqueue(func() { r.write(batch) })
+	}
+}
+
+func (r *Relay) enqueue(job func()) {
+	r.mutex.Lock()
+	r.jobs = append(r.jobs, job)
+	r.mutex.Unlock()
+	select {
+	case r.ready <- struct{}{}:
+	default:
+	}
+}
+
+// writer runs the jobs in order until the broker stops. A write blocked on an
+// agent that stopped reading stays blocked; the broker's exit ends it.
+func (r *Relay) writer() {
+	for {
+		select {
+		case <-r.broker.stopped:
+			return
+		case <-r.ready:
+		}
+		for {
+			r.mutex.Lock()
+			if len(r.jobs) == 0 {
+				r.mutex.Unlock()
+				break
+			}
+			job := r.jobs[0]
+			r.jobs = r.jobs[1:]
+			r.mutex.Unlock()
+			job()
+		}
 	}
 }
 

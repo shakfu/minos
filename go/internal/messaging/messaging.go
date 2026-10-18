@@ -1096,6 +1096,8 @@ func (m *Messaging) CreateProject(isAdmin bool, name string, tags []any) (*Proje
 	if strings.Contains(name, "/") {
 		return nil, refuse("A project name has no '/' in it")
 	}
+	m.naming.Lock()
+	defer m.naming.Unlock()
 	existing, err := m.store.ProjectNamed(name)
 	if err != nil {
 		return nil, err

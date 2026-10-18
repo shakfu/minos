@@ -85,6 +85,32 @@ func TestConcurrentCreatesOfOneNameMakeOneRoom(t *testing.T) {
 	}
 }
 
+// A project name is unique the same way, and was checked without the lock.
+func TestConcurrentCreatesOfOneNameMakeOneProject(t *testing.T) {
+	store, err := timeline.Open(filepath.Join(t.TempDir(), "timeline.db"), config.HistoryLimit, time.Minute, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	m := New(store, func([]string, any) {}, func() []string { return []string{"demo"} })
+
+	var wait sync.WaitGroup
+	var created atomic.Int32
+	for range 20 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if _, err := m.CreateProject(true, "pma", nil); err == nil {
+				created.Add(1)
+			}
+		}()
+	}
+	wait.Wait()
+	if n := created.Load(); n != 1 {
+		t.Fatalf("%d projects called pma were created", n)
+	}
+}
+
 // Entering releases the user's place in any other room, and says which, so the
 // transport can forget those occupancies rather than hold them to disconnect.
 func TestEnteringReportsTheOccupanciesItReleased(t *testing.T) {

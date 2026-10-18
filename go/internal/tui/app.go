@@ -199,6 +199,13 @@ type Ui struct {
 	// the way a slow request does.
 	keyHandler func(*tcell.EventKey)
 
+	// owner is held by whoever may touch UI state while a key is handled: the
+	// handler, or the loop redrawing while the handler awaits the server.
+	// dispatching is set by the loop alone, around a handler's run.
+	owner       sync.Mutex
+	dispatching bool
+	waiting     bool
+
 	// Notices arrive from the client's applier as well as from commands.
 	mutex   sync.Mutex
 	notices []string
@@ -596,7 +603,7 @@ func (u *Ui) enterRoom(id string) {
 	if u.occupancy != "" {
 		return
 	}
-	occupancy, err := u.client.Enter(id)
+	occupancy, err := awaitValue(u, func() (string, error) { return u.client.Enter(id) })
 	if err != nil {
 		u.notice(err.Error())
 		return
@@ -606,7 +613,7 @@ func (u *Ui) enterRoom(id string) {
 
 func (u *Ui) release() {
 	if u.occupancy != "" {
-		_ = u.client.Exit(u.occupancy)
+		_ = u.await(func() error { return u.client.Exit(u.occupancy) })
 		u.occupancy = ""
 		u.offerHeld()
 	}
@@ -823,21 +830,25 @@ func (u *Ui) loop() {
 
 // dispatch handles one key on its own goroutine and reads events until it
 // returns, so ^C quits while a request waits on the server. Anything else is
-// returned unhandled, in order. The loop touches no UI state meanwhile; the
-// screen is not redrawn until the key returns.
+// returned unhandled, in order. The loop redraws only while the handler awaits
+// a request, and handles no key until it returns.
 func (u *Ui) dispatch(event *tcell.EventKey) (later []tcell.Event, quit bool) {
 	done := make(chan struct{})
+	u.dispatching = true
 	go func() {
 		defer func() {
 			close(done)
 			_ = u.screen.PostEvent(tcell.NewEventInterrupt(nil)) // wakes PollEvent
 		}()
+		u.owner.Lock()
+		defer u.owner.Unlock()
 		u.keyHandler(event)
 	}()
 	pasting := u.pasting
 	for {
 		select {
 		case <-done:
+			u.dispatching = false
 			return later, false
 		default:
 		}
@@ -845,7 +856,12 @@ func (u *Ui) dispatch(event *tcell.EventKey) (later []tcell.Event, quit bool) {
 		case nil:
 			return later, true
 		case *tcell.EventInterrupt:
-			// A wake-up; the redraw after the key covers it.
+			// Drawing alone: the selection and the room list are repaired after
+			// the key, so the handler resumes on the state it left.
+			if u.owner.TryLock() {
+				u.draw()
+				u.owner.Unlock()
+			}
 		case *tcell.EventPaste:
 			pasting = polled.Start()
 			later = append(later, polled)
@@ -858,6 +874,27 @@ func (u *Ui) dispatch(event *tcell.EventKey) (later []tcell.Event, quit bool) {
 			later = append(later, polled)
 		}
 	}
+}
+
+// await runs a request with the UI handed to the loop, which redraws until it
+// returns. Outside dispatch, as in a test, it only runs the request.
+func (u *Ui) await(request func() error) error {
+	_, err := awaitValue(u, func() (struct{}, error) { return struct{}{}, request() })
+	return err
+}
+
+func awaitValue[T any](u *Ui, request func() (T, error)) (T, error) {
+	if !u.dispatching {
+		return request()
+	}
+	u.waiting = true
+	u.owner.Unlock()
+	u.wake()
+	defer func() {
+		u.owner.Lock()
+		u.waiting = false
+	}()
+	return request()
 }
 
 func (u *Ui) key(event *tcell.EventKey) {
@@ -966,11 +1003,13 @@ func (u *Ui) submit() {
 			subject, body = "", text
 		}
 		if u.submitting(u.selected) {
-			if _, err = u.client.Submit(u.selected, subject, body); err == nil {
+			if _, err = awaitValue(u, func() (client.Submission, error) {
+				return u.client.Submit(u.selected, subject, body)
+			}); err == nil {
 				u.notice("Submitted: it reaches the channel if a moderator approves it")
 			}
 		} else {
-			err = u.client.Publish(u.selected, subject, body)
+			err = u.await(func() error { return u.client.Publish(u.selected, subject, body) })
 		}
 	} else {
 		// Speaking in a room is being in it.
@@ -978,7 +1017,7 @@ func (u *Ui) submit() {
 		if u.occupancy == "" {
 			return
 		}
-		err = u.client.Send(u.selected, text)
+		err = u.await(func() error { return u.client.Send(u.selected, text) })
 	}
 	if err != nil {
 		u.notice(err.Error())
@@ -1067,7 +1106,7 @@ func (u *Ui) toggle(space client.Room) {
 	if u.client.Opened(space.ID)[message.Seq] {
 		return
 	}
-	if err := u.client.Open(space.ID, message.Seq); err != nil {
+	if err := u.await(func() error { return u.client.Open(space.ID, message.Seq) }); err != nil {
 		u.notice(err.Error())
 		return
 	}
@@ -1084,7 +1123,9 @@ func subjectOf(message client.Message) string {
 // chat raises a room with one person and enters it, sending text as its first
 // message when there is any.
 func (u *Ui) chat(name, text string) {
-	room, err := u.client.OpenRoom([]client.Principal{{Kind: "user", ID: name}}, "", "persisted")
+	room, err := awaitValue(u, func() (client.Room, error) {
+		return u.client.OpenRoom([]client.Principal{{Kind: "user", ID: name}}, "", "persisted")
+	})
 	if err != nil {
 		u.notice(err.Error())
 		return
@@ -1093,7 +1134,7 @@ func (u *Ui) chat(name, text string) {
 	if text == "" {
 		return
 	}
-	if err := u.client.Send(room.ID, text); err != nil {
+	if err := u.await(func() error { return u.client.Send(room.ID, text) }); err != nil {
 		u.notice(err.Error())
 	}
 }
@@ -1251,7 +1292,7 @@ func (u *Ui) cmdOpen(args []string) error {
 	if err != nil {
 		return err
 	}
-	room, err := u.client.OpenRoom(invite, "", "persisted")
+	room, err := awaitValue(u, func() (client.Room, error) { return u.client.OpenRoom(invite, "", "persisted") })
 	if err != nil {
 		return err
 	}
@@ -1264,7 +1305,7 @@ func (u *Ui) cmdMeet(args []string) error {
 	if err != nil {
 		return err
 	}
-	room, err := u.client.OpenRoom(invite, "", "transient")
+	room, err := awaitValue(u, func() (client.Room, error) { return u.client.OpenRoom(invite, "", "transient") })
 	if err != nil {
 		return err
 	}
@@ -1289,7 +1330,9 @@ func (u *Ui) cmdCreate(args []string) error {
 		title = strings.Join(append([]string{title}, args[1:]...), " ")
 	}
 
-	room, err := u.client.CreateRoom(title, nil, project, "", "")
+	room, err := awaitValue(u, func() (client.Room, error) {
+		return u.client.CreateRoom(title, nil, project, "", "")
+	})
 	if err != nil {
 		return err
 	}
@@ -1322,7 +1365,9 @@ func (u *Ui) cmdInvite(args []string) error {
 		if err != nil {
 			return err
 		}
-		if room, err = u.client.Invite(u.selected, principal); err != nil {
+		if room, err = awaitValue(u, func() (client.Room, error) {
+			return u.client.Invite(u.selected, principal)
+		}); err != nil {
 			return err
 		}
 	}
@@ -1338,7 +1383,7 @@ func (u *Ui) cmdUninvite(args []string) error {
 	if err != nil {
 		return err
 	}
-	room, err := u.client.Uninvite(u.selected, principal)
+	room, err := awaitValue(u, func() (client.Room, error) { return u.client.Uninvite(u.selected, principal) })
 	if err != nil {
 		return err
 	}
@@ -1352,7 +1397,7 @@ func (u *Ui) cmdLeave([]string) error {
 	}
 	leaving := u.selected
 	u.release()
-	if err := u.client.Leave(leaving); err != nil {
+	if err := u.await(func() error { return u.client.Leave(leaving) }); err != nil {
 		return err
 	}
 	// Back to the list, as /exit goes: the space shown is no longer there.
@@ -1377,7 +1422,7 @@ func (u *Ui) cmdGroup(args []string) error {
 	}
 	switch action := strings.ToLower(args[0]); {
 	case action == "new" && len(args) >= 2:
-		group, err := u.client.CreateGroup(args[1], args[2:])
+		group, err := awaitValue(u, func() (client.Group, error) { return u.client.CreateGroup(args[1], args[2:]) })
 		if err != nil {
 			return err
 		}
@@ -1388,12 +1433,16 @@ func (u *Ui) cmdGroup(args []string) error {
 			return err
 		}
 		if action == "add" {
-			if _, err := u.client.AssignGroup(group.ID, args[2]); err != nil {
+			if _, err := awaitValue(u, func() (client.Group, error) {
+				return u.client.AssignGroup(group.ID, args[2])
+			}); err != nil {
 				return err
 			}
 			u.notice(fmt.Sprintf("%s joined @%s, and every room it was invited to", args[2], args[1]))
 		} else {
-			if _, err := u.client.UnassignGroup(group.ID, args[2]); err != nil {
+			if _, err := awaitValue(u, func() (client.Group, error) {
+				return u.client.UnassignGroup(group.ID, args[2])
+			}); err != nil {
 				return err
 			}
 			u.notice(fmt.Sprintf("%s left @%s, and every room it carried", args[2], args[1]))
@@ -1414,7 +1463,9 @@ func (u *Ui) cmdProject(args []string) error {
 	// Trailing `#tag` words classify it, so the name may still have spaces.
 	case action == "new" && len(args) >= 2:
 		words, tags := splitTags(args[1:])
-		project, err := u.client.CreateProject(strings.Join(words, " "), tags)
+		project, err := awaitValue(u, func() (client.Project, error) {
+			return u.client.CreateProject(strings.Join(words, " "), tags)
+		})
 		if err != nil {
 			return err
 		}
@@ -1454,7 +1505,7 @@ func (u *Ui) cmdProject(args []string) error {
 				scope, task = "task", strings.Join(args[3:], " ")
 			}
 		}
-		filed, err := u.client.FileRoom(room, project, scope, task)
+		filed, err := awaitValue(u, func() (client.Room, error) { return u.client.FileRoom(room, project, scope, task) })
 		if err != nil {
 			return err
 		}
@@ -1469,7 +1520,7 @@ func (u *Ui) cmdProject(args []string) error {
 		if found := u.project(project); found != nil {
 			name = found.Name
 		}
-		if err := u.client.DissolveProject(project); err != nil {
+		if err := u.await(func() error { return u.client.DissolveProject(project) }); err != nil {
 			return err
 		}
 		u.notice("Dissolved " + name + "; its rooms are filed under none")
@@ -1534,7 +1585,9 @@ func (u *Ui) cmdInterrupt(args []string) error {
 	if u.occupancy == "" {
 		return nil
 	}
-	return u.client.Send(u.selected, strings.TrimSpace("/interrupt "+strings.Join(args, " ")))
+	return u.await(func() error {
+		return u.client.Send(u.selected, strings.TrimSpace("/interrupt "+strings.Join(args, " ")))
+	})
 }
 
 func (u *Ui) cmdClose(args []string) error  { return u.setState(args, false) }
@@ -1545,7 +1598,7 @@ func (u *Ui) setState(args []string, open bool) error {
 	if err != nil {
 		return err
 	}
-	updated, err := u.client.SetState(room, open)
+	updated, err := awaitValue(u, func() (client.Room, error) { return u.client.SetState(room, open) })
 	if err != nil {
 		return err
 	}
@@ -1659,14 +1712,14 @@ func (u *Ui) cmdChannel(args []string) error {
 
 	switch action {
 	case "appoint":
-		channel, err := u.client.Appoint(id, name)
+		channel, err := awaitValue(u, func() (client.Room, error) { return u.client.Appoint(id, name) })
 		if err != nil {
 			return err
 		}
 		u.notice(fmt.Sprintf("%s moderates %s", name, channel.Title))
 		return nil
 	case "dismiss":
-		channel, err := u.client.Dismiss(id, name)
+		channel, err := awaitValue(u, func() (client.Room, error) { return u.client.Dismiss(id, name) })
 		if err != nil {
 			return err
 		}
@@ -1683,14 +1736,14 @@ func (u *Ui) cmdChannel(args []string) error {
 		return err
 	}
 	if action == "admit" {
-		channel, err := u.client.AdmitGroup(id, group.ID)
+		channel, err := awaitValue(u, func() (client.Room, error) { return u.client.AdmitGroup(id, group.ID) })
 		if err != nil {
 			return err
 		}
 		u.notice(fmt.Sprintf("@%s may subscribe to %s", name, channel.Title))
 		return nil
 	}
-	channel, err := u.client.RevokeGroup(id, group.ID)
+	channel, err := awaitValue(u, func() (client.Room, error) { return u.client.RevokeGroup(id, group.ID) })
 	if err != nil {
 		return err
 	}
@@ -1785,7 +1838,9 @@ func (u *Ui) newChannel(args []string) error {
 		title = strings.Join(append([]string{title}, words[1:]...), " ")
 	}
 
-	channel, err := u.client.CreateChannel(title, groups, project)
+	channel, err := awaitValue(u, func() (client.Room, error) {
+		return u.client.CreateChannel(title, groups, project)
+	})
 	if err != nil {
 		return err
 	}
@@ -1805,7 +1860,7 @@ func (u *Ui) cmdSubscribe(args []string) error {
 	if err != nil {
 		return err
 	}
-	channel, err := u.client.Subscribe(id)
+	channel, err := awaitValue(u, func() (client.Room, error) { return u.client.Subscribe(id) })
 	if err != nil {
 		return err
 	}
@@ -1821,7 +1876,7 @@ func (u *Ui) cmdUnsubscribe([]string) error {
 	}
 	leaving := u.selected
 	u.release()
-	if err := u.client.Unsubscribe(leaving); err != nil {
+	if err := u.await(func() error { return u.client.Unsubscribe(leaving) }); err != nil {
 		return err
 	}
 	u.exited()
@@ -1832,7 +1887,7 @@ func (u *Ui) cmdQueue([]string) error {
 	if _, ok := u.client.Channels()[u.selected]; !ok {
 		return refusal("Select a channel first: /queue lists what it has to decide")
 	}
-	pending, err := u.client.Queue(u.selected)
+	pending, err := awaitValue(u, func() ([]client.Submission, error) { return u.client.Queue(u.selected) })
 	if err != nil {
 		return err
 	}
@@ -1853,7 +1908,7 @@ func (u *Ui) cmdApprove(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := u.client.Approve(submission.ID); err != nil {
+	if err := u.await(func() error { return u.client.Approve(submission.ID) }); err != nil {
 		return err
 	}
 	u.notice(fmt.Sprintf("Approved; %s's words are in the channel now", submission.Author))
@@ -1868,7 +1923,9 @@ func (u *Ui) cmdReject(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := u.client.Reject(submission.ID, strings.Join(args[1:], " ")); err != nil {
+	if err := u.await(func() error {
+		return u.client.Reject(submission.ID, strings.Join(args[1:], " "))
+	}); err != nil {
 		return err
 	}
 	u.notice(fmt.Sprintf("Rejected; %s is told", submission.Author))
@@ -1894,7 +1951,7 @@ func (u *Ui) cmdAck(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := u.client.Acknowledge(submission.ID); err != nil {
+	if err := u.await(func() error { return u.client.Acknowledge(submission.ID) }); err != nil {
 		return err
 	}
 	u.notice("Closed")
@@ -1931,7 +1988,7 @@ func (u *Ui) cmdArchive(args []string) error {
 			change.SetPeriod, change.Period = true, &period
 		}
 	}
-	room, err := u.client.SetArchive(space.ID, change)
+	room, err := awaitValue(u, func() (client.Room, error) { return u.client.SetArchive(space.ID, change) })
 	if err != nil {
 		return err
 	}
@@ -1952,7 +2009,12 @@ func (u *Ui) cmdArchived(args []string) error {
 		}
 		after = parsed
 	}
-	messages, more, err := u.client.ArchiveRead(space.ID, after)
+	var messages []client.Message
+	var more bool
+	err := u.await(func() (err error) {
+		messages, more, err = u.client.ArchiveRead(space.ID, after)
+		return err
+	})
 	if err != nil {
 		return err
 	}
@@ -1976,7 +2038,9 @@ func (u *Ui) cmdSearch(args []string) error {
 		return refusal("Usage: /search <text>")
 	}
 	query := strings.Join(args, " ")
-	messages, err := u.client.ArchiveSearch(space.ID, query)
+	messages, err := awaitValue(u, func() ([]client.Message, error) {
+		return u.client.ArchiveSearch(space.ID, query)
+	})
 	if err != nil {
 		return err
 	}
@@ -2161,7 +2225,11 @@ func (u *Ui) drawStatus(width int) {
 	who += count(int64(u.client.OpenInvitations()), "open invitation")
 	who += count(u.client.UnreadMessages(), "unread message")
 	state, colour := "disconnected", "bad"
-	if u.client.Connected() {
+	switch {
+	case !u.client.Connected():
+	case u.waiting:
+		state, colour = "waiting", "dim"
+	default:
 		state, colour = "connected", "good"
 	}
 

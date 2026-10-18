@@ -1,6 +1,6 @@
 # Who founds a run's room
 
-2026-10-14. Status: proposed, for approval. Follows [pma-integration.md](pma-integration.md) section 4.2, whose last `minosb` item asked for "room creation filed under project and task".
+2026-10-14. Status: built 2026-10-18, as option C (`go/cmd/minos/room.go`). Follows [pma-integration.md](pma-integration.md) section 4.2, whose last `minosb` item asked for "room creation filed under project and task".
 
 ## Decision
 
