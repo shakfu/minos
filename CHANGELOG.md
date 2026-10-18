@@ -158,17 +158,11 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
   In the terminal client, Tab highlights a room and Enter goes in. Inside, the screen is that room: no sidebar, Tab ignored, and a status line that counts open invitations and unread messages apart. `/exit` steps out and keeps your place; `/leave` still gives it up. An invitation is offered rather than entered, and one that arrives while you are in a room waits until you step out. The zoom also ends when the room closes, or when you enter a room on another device. Inside a room, `/open`, `/meet`, `/create` and `/subscribe` ask before taking you out of it. A room you only highlight is a preview, and nothing in it is marked read.
 
-- The terminal client takes a channel's name, its id, or the start of its id wherever it asked for the full id: `/subscribe` and `/channel
-  admit|revoke|appoint|dismiss`. It learns names of channels it is not
-  subscribed to from their announcement on `system`, the one place the model lets anyone discover a channel. The argument is one word, with `_` for a space in a name, because a multi-word argument followed by a user or group would have to be split by guessing. An ambiguous prefix is refused.
+- The terminal client takes a channel's name, its id, or the start of its id wherever it asked for the full id: `/subscribe` and `/channel admit|revoke|appoint|dismiss`. It learns names of channels it is not subscribed to from their announcement on `system`, the one place the model lets anyone discover a channel. The argument is one word, with `_` for a space in a name, because a multi-word argument followed by a user or group would have to be split by guessing. An ambiguous prefix is refused.
 
 - The channel feed and archival, in the server. Channel messages and submissions carry a `subject`, taken from the body's first line when none is given. `channel.open` marks one item opened per subscriber, and `read` on a channel is now refused. `archive.set`, `archive.read` and `archive.search` give each permanent room and channel an age limit and a searchable archive. The sweep moves aged messages out from the oldest, without renumbering. The schema is version 4: existing channel messages and submissions get their first line as a subject, and version 3 now creates the submissions table itself, because version 4 alters it before the schema runs. 22 conformance tests cover it.
 
-  In the terminal client, every channel but `system` lists its items by subject, pending first and then opened, each newest first. Up and Down move a cursor over them. Enter opens the item under it and shows its body, and the
-  cursor follows it to the opened list. `subject | body` in the composer sets
-  the headline; without the bar the server takes the first line. Channels no longer show an unread count, and an `archived` push drops what it names.
-  `/archive [<period>|never] [searchable|private]` shows or sets a space's
-  archival, with a period such as `30d` or `12h`. `/archived [<after>]` pages through the archive, and `/search <text>` searches it. Their results replace the conversation until Esc, because the notice area holds six lines and a page holds two hundred.
+  In the terminal client, every channel but `system` lists its items by subject, pending first and then opened, each newest first. Up and Down move a cursor over them. Enter opens the item under it and shows its body, and the cursor follows it to the opened list. `subject | body` in the composer sets the headline; without the bar the server takes the first line. Channels no longer show an unread count, and an `archived` push drops what it names. `/archive [<period>|never] [searchable|private]` shows or sets a space's archival, with a period such as `30d` or `12h`. `/archived [<after>]` pages through the archive, and `/search <text>` searches it. Their results replace the conversation until Esc, because the notice area holds six lines and a page holds two hundred.
 
 - `go/conformance/`, the conformance suite in Go: 164 tests, one per Python test, 176 cases with subtests. `MINOS_CONFORMANCE_SCOPE` is gone, because one server claims the whole contract. The handshake workaround for `simple_websocket` went with that library. With `MINOS_CONFORMANCE_CMD` unset, the suite builds `cmd/minosd` itself.
 
@@ -218,9 +212,7 @@ Entries written before `03a2262` (2026-09-11), when the Python server and both w
 
   `moderators` goes on the channel object beside `restrictedTo`, rather than behind an operation of its own, so it rides the `room` push the core already sends. That extends two shapes core tests pin exactly, `sync` and the room push; each test now adds the new fields under `MINOS_CONFORMANCE_SCOPE=full`, so a scope that does not match its server fails instead of skipping. `make test` now runs `conformance-go`, the only black-box run of section 5. The schema is version 3 in `go/`, and the Python server, which stays at 2, refuses a database Go has upgraded.
 
-  In `tui/`, the composer submits when a channel has moderators and the caller is
-  neither one nor an administrator. New commands: `/channel appoint|dismiss`,
-  `/queue`, `/approve`, `/reject`, `/submissions` and `/ack`.
+  In `tui/`, the composer submits when a channel has moderators and the caller is neither one nor an administrator. New commands: `/channel appoint|dismiss`, `/queue`, `/approve`, `/reject`, `/submissions` and `/ack`.
 
 - Two decisions in `chat-concepts.md` 5, both moved out of its open questions. A channel may have no moderator, and such a channel accepts no submissions: a price feed publishes to an audience and there is nothing to curate, so a submission to a moderator-less channel is refused rather than queued. And a rejected submission is deleted -- it never held a sequence number, so nothing is left for a subscriber to re-request.
 
@@ -243,9 +235,7 @@ Entries written before `03a2262` (2026-09-11), when the Python server and both w
       {"op": "channel.admit",  "channel": "system", "group": "<id>"}
       {"op": "channel.revoke", "channel": "system", "group": "<id>"}
 
-  A channel with no groups is open, so revoking the last one reopens it rather than closing it to everybody: open is the absence of a rule, and there is no way to write "nobody". Room and channel objects gained `restrictedTo`, empty
-  on every room and on an open channel. `/channel admit|revoke <id> <group>`
-  reaches it from the terminal client.
+  A channel with no groups is open, so revoking the last one reopens it rather than closing it to everybody: open is the absence of a rule, and there is no way to write "nobody". Room and channel objects gained `restrictedTo`, empty on every room and on an open channel. `/channel admit|revoke <id> <group>` reaches it from the terminal client.
 
   Eligibility is re-read on every delivery rather than fixed when the subscription was stored. Someone removed from the last group that admitted them keeps their subscription and leaves the audience: they stop receiving the channel, it leaves their `sync`, `history` on it is refused, and they are sent a `roomGone`. Re-admitting the group restores all of it without their acting again. The alternative was to delete the subscription, which is what a room's group grant does to access -- rejected because a subscription is the subscriber's own act, and the server would be destroying a choice it could not give back. The cost is a group resolution per fan-out.
 

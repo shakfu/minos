@@ -23,7 +23,7 @@ Requirement 1 is what a sealed container buys and what any route out of it spend
 
 **A per-run broker on the host holds the credential, the conversation and the agent's pipes. The container holds a shim and nothing else.** `pma` mints a grant and starts a broker. The broker creates the run's socket, dials `minosd` with the grant, owns the room's cursor, and starts the container through `sanduk` with that socket mounted and the agent's stdio on its own pipes. It answers six operations on the socket; the agent reaches the conversation by running a command on its `PATH`. `pma` keeps container control for itself, so stopping a run never goes through the broker. Nothing inside the container holds a credential, knows the wire, or can name an address.
 
-```
+```text
   HOST                                     SEALED CONTAINER
   ----                                     ----------------
   developer -- TUI --.
@@ -176,27 +176,37 @@ Each phase is usable before the next exists.
 **Phase 0 -- a worker in a room, with no server change.** The broker dials the existing listener with an ordinary session. Containment already holds at layer 1.
 
 1. The broker: dial, the six operations, the queue, the cursor and gap repair, the reader split so a blocked model call never stops draining the connection.
+
 2. `minosa`: the multicall shim and the socket protocol. One socket per run, outside the work mount.
+
 3. `sanduk`: mount the worktree at its host path, map the host uid and gid at runtime and drop to it, and expose the run with its stdio on pipes.
+
 4. The broker takes the pipes: push on stdin, relay the turn's final message to the room, interrupt before push.
 
 **Phase 1 -- the server work that makes isolation a rule rather than a convention.**
 
 5. Grants: mint and revoke, carrying one room, a read window, a capability set and an expiry that tracks the run. Revocation closes every connection on the grant, with a reason the client can tell from an ordinary drop -- otherwise a client that is supposed to stop reconnects instead.
+
 6. Author kind, readable by a grant holder. A worker that cannot tell the developer's instruction from the supervisor's cannot obey the right one when they disagree.
+
 7. A submission deadline with a third terminal state, and an answer payload.
+
 8. A send rate and a per-grant quota.
 
 **Phase 2 -- policy, in `pma`.**
 
 9. The verb taxonomy: interrupts, and standing-eligible.
+
 10. Payload validation at the boundary.
+
 11. Decision scope, and the rule file that `always` writes to.
+
 12. Knowledge sources classified by least-trusted writer; validating stages read none.
 
 **Phase 3 -- reach.**
 
 13. `minosa mcp` over the same socket.
+
 14. Per-agent MCP registration in the dispatch adapters.
 
 Phase 0 ships a worker that talks and asks. Phase 1 is what makes the result defensible. Phase 2 is what stops the developer answering the same question once per dispatch. Phase 3 is a convenience for the agents that prefer it.
@@ -204,7 +214,11 @@ Phase 0 ships a worker that talks and asks. Phase 1 is what makes the result def
 ## 13. Open questions the plan must answer
 
 1. Does a run proceed when the server is unreachable at start -- fail the run, or run with no conversation? Stopping works either way.
+
 2. Whose failure is a submission that nobody answered before its deadline: the worker's, or the person's?
+
 3. Which record is authoritative in a dispute -- the relay log for what reached a model, the archive for what was decided -- and does the archive's retention cover at least the relay's?
+
 4. Can `pma` recover a workflow room after losing its own index? If it founds the rooms and its state is the only map, its failure hides the conversation in exactly the case the conversation exists for.
+
 5. Nothing deletes a completed workflow room. A finished workflow is an unambiguous trigger; who is entitled to act on it is not decided.

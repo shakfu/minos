@@ -76,7 +76,6 @@ The thirteen names are a convenience for the caller, not a restriction on it. An
 
 **The tool names live in the container; the tool definitions live on the host; only the host decides.** That is the transferable idea, and it is what makes the front end interchangeable: an MCP server, a shim, or both over one policy point.
 
-
 ## 3. What transfers
 
 ### 3.1 The shim reaches further than the tool

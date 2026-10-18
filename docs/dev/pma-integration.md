@@ -24,6 +24,7 @@ Sources: pma `CHANGELOG.md` (Unreleased, 0.6.0), `docs/dev/async_dispatch.md`, `
 Two facts about the code:
 
 - **No supervising model.** `pma-agent` appears in no Rust source. [design.md](design.md) section 2 assumes one.
+
 - **Every human gate is on the host:** plan approval, `pma review --approve/--reject`, `pma pr`, `pma push` (pma `workflows.md` section 15.13).
 
 ## 3. Where the two disagree
@@ -33,8 +34,11 @@ Two facts about the code:
 pma `docs/dev/using-containers.md` and `implementation-plan.md` items 2b.6-2b.8 plan for:
 
 - `minosd` attached to the sealed network;
+
 - a minos client inside the container;
+
 - a Rust wire client in pma (`open`, `send`, `history`, `submission.*`, `grant.*`);
+
 - grants and a refused `/vfs` as blockers.
 
 minos rejected the first two in [recommended-architecture.md](recommended-architecture.md) section 11. [implementation-plan.md](implementation-plan.md) rulings 2.1 and 2.2 replace the third: pma starts `minosb` as a child and writes no wire client. Grants stay phase 1 work, but `minosb`'s six operations already keep a container away from `/vfs`. pma's documents should be updated to match.
@@ -77,7 +81,9 @@ Cheapest first. Each is usable alone.
 ### 4.1 Approvals and notices through minos
 
 - `notify` posts each job's summary to a channel.
+
 - An `awaiting-approval` job, or a run that reaches `ready`, becomes a submission in a moderated channel.
+
 - An approval runs `pma job approve <id>` or `pma review <id> --approve`. A rejection runs `pma review <id> --reject`.
 
 | Needs | Where |
@@ -86,6 +92,7 @@ Cheapest first. Each is usable alone.
 | A way to find waiting jobs and ready runs: `pma job --json` (an open question in `async_dispatch.md`) or polling the text output | pma |
 
 - **Gain.** Approval from any device, an archived record of each decision, and pma's verbs on the moderation queue minos already has.
+
 - **Cost.** It partly duplicates `pma web`. It adds a minos dependency to a host-only flow that works today.
 
 ### 4.2 Talk to a running dispatch, with the agent on the host
@@ -105,6 +112,7 @@ minosb -server ... -user worker -room {room} -interrupters demo -task {prompt} -
 | The template, a socket path outside the worktree, and the room id on the run row | pma |
 
 - **Gain.** The developer reads a pma run as it happens, corrects it, and interrupts it from the minos TUI. `make host-run` already proves the relay, held messages and both interrupt lanes with a real `claude`.
+
 - **Cost.** About 150 lines in `minosb` with tests, and one template in pma. The agent stays unsandboxed, as pma's `claude` worker is today.
 
 ### 4.3 The same, in a container
@@ -121,7 +129,9 @@ Not verified: sanduk is not installed on this machine. The local sanduk-rs tree 
 ### 4.4 Shared identity
 
 - pma files each room under the pma project, with the task key as `task`.
+
 - pma mirrors project tags into minos.
+
 - pma stores the room id on the run row, and recovers it from `sync` if the row is lost.
 
 This is a precondition for 4.2 and 4.3, and costs little in either repository.
@@ -129,15 +139,21 @@ This is a precondition for 4.2 and 4.3, and costs little in either repository.
 ### 4.5 Not proposed
 
 - **A2A between pma and minos.** pma starts `minosb` itself and needs no protocol in between. `minosg` ([agent2agent.md](agent2agent.md)) is for orchestrators minos does not start.
+
 - **A Rust wire client in pma.** Ruled out by implementation-plan 2.1.
+
 - **Using minos for progress.** pma reads the agent's log, and `async_dispatch.md` explains why. The relay posts whole turns to the room. It is not a progress feed.
 
 ## 5. Recommendation
 
 1. **The `minosb` changes in 4.2.** Stream passthrough first, because it blocks 4.2 and 4.3. Then `-task`, then filing the room. The first two are built. Filing needs no `minosb` change; see [run-rooms.md](run-rooms.md). All are testable in Go with the scripted fake agent.
+
 2. **4.4, then the pma template.** A real pma dispatch whose room shows in the minos TUI is the phase 0 exit test of [implementation-plan.md](implementation-plan.md), without the container.
+
 3. **4.1, only if approvals outside `pma web` are wanted.**
+
 4. **4.3, when sanduk has stdin passthrough and the socket mount.**
+
 5. **Update pma's `using-containers.md` and implementation-plan 2b.6-2b.8** to the broker design.
 
 ### An alternative framing
@@ -147,7 +163,11 @@ pma already has control and approvals on the host. minos could serve it as two t
 ## 6. Open questions
 
 1. **Do you need to correct a run while it works?** If approvals and notices are enough, 4.1 alone covers it, and 4.2 and 4.3 wait.
+
 2. **What grain should a room have?** pma has 1031 open tasks, and minos cannot delete a room ([pma_feedback.md](pma_feedback.md) section 2). The candidates are one room per task, per workflow instance, or per project. A workflow instance bounds the count by work done, not by backlog.
+
 3. **Who is the interrupter?** pma cannot write `minosb`'s stdin. Either the developer's account goes in `-interrupters`, or pma gets an account and posts `/interrupt` itself.
+
 4. **Does pma ever run `minosd`?** [pma_feedback.md](pma_feedback.md) 7.1 says no: it should be an operator's service. Then, when the server is down, does a run fail (implementation-plan section 3, answer 1) or fall back to running without a room?
+
 5. **Does a run's summary come from pma's parser or from the room?** With passthrough, both exist. They should agree, and pma's log should be the authority.
