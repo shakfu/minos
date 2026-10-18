@@ -1,0 +1,155 @@
+# pma and minos, option 4.2: the agent on the host, no container.
+# Source for integration.svg. Regenerate with `make diagrams`, which runs
+# d2 --layout=tala over this file. Needs d2; nothing else in the tree does.
+# See docs/dev/pma-integration.md section 4.2. The contained form is
+# architecture.d2.
+
+direction: right
+
+title: "pma and minos -- a run on the host" {
+  shape: text
+  near: top-center
+  style: {
+    font-size: 28
+    bold: true
+  }
+}
+
+host: "Host -- one uid" {
+  style: {
+    fill: "#f8f8f7"
+    stroke: "#666666"
+  }
+
+  dev: "Developer" {
+    shape: person
+    style.fill: "#ffffff"
+  }
+
+  tui: "minos TUI\ngo/cmd/minos" {
+    style.fill: "#ffffff"
+  }
+
+  pma: "pma\njob runner and watchdog\nworker template claude-minos" {
+    style: {
+      fill: "#eef2f6"
+      stroke-width: 3
+    }
+  }
+
+  ensure: "minos room ensure\nproposed, run-rooms.md" {
+    style: {
+      fill: "#ffffff"
+      stroke-dash: 2
+    }
+  }
+
+  minosd: "minosd\noperator's service\none listener" {
+    style: {
+      fill: "#ffffff"
+      stroke-width: 3
+    }
+  }
+
+  broker: "minosb -- one per run\nMINOS_PASSWORD from the worker's env\n-task  -linger  -events  -interrupters" {
+    style: {
+      fill: "#ffffff"
+      stroke-width: 3
+    }
+  }
+
+  agent: "claude\n--input-format stream-json\nunsandboxed, in the worktree" {
+    style: {
+      fill: "#ffffff"
+      stroke-dash: 2
+    }
+  }
+
+  log: "agent-N.log\nparse_claude, pma watch" {
+    shape: page
+    style.fill: "#ffffff"
+  }
+
+  events: "events file\nready, held, turn, interrupt,\nclosed, exited, stopped" {
+    shape: page
+    style.fill: "#ffffff"
+  }
+
+  sock: "run socket\noutside the worktree" {
+    shape: page
+    style.fill: "#ffffff"
+  }
+
+  verify: "verify\nsanduk_sandbox: writes confined" {
+    style.fill: "#ffffff"
+  }
+}
+
+host.dev -> host.tui
+host.tui -> host.minosd: "reads the run;\ncorrects it; /interrupt" {
+  style.stroke: "#2563eb"
+}
+
+host.pma -> host.ensure: "before the run" {
+  style: {
+    stroke: "#0b3d63"
+    stroke-dash: 4
+  }
+}
+host.ensure -> host.minosd: "files the room under\nproject and task" {
+  style: {
+    stroke: "#0b3d63"
+    stroke-dash: 4
+  }
+}
+host.pma -> host.broker: "starts it under the watchdog.\nstdin is /dev/null" {
+  style: {
+    stroke: "#0b3d63"
+    stroke-width: 4
+  }
+}
+host.broker -> host.minosd: "logs in; relays each turn's\nfinal reply; reads the room" {
+  style: {
+    stroke: "#0b3d63"
+    stroke-width: 4
+  }
+}
+
+host.broker -> host.agent: "stdin: the task, then held messages\nand interrupts between turns.\nClosed after -linger idle" {
+  style.stroke: "#0f766e"
+}
+host.agent -> host.broker: "stdout: stream-json;\na result ends each turn" {
+  style.stroke: "#0f766e"
+}
+host.agent -> host.sock: "minosa, if allowed" {
+  style.stroke: "#0f766e"
+}
+host.sock -> host.broker: "six operations" {
+  style.stroke: "#0f766e"
+}
+
+host.broker -> host.log: "the agent's stream,\nbyte for byte" {
+  style.stroke: "#7a7a7a"
+}
+host.broker -> host.events: "control events" {
+  style.stroke: "#7a7a7a"
+}
+host.pma -> host.log: "last result: cost, summary" {
+  style.stroke: "#7a7a7a"
+}
+host.pma -> host.verify: "the only evidence" {
+  style.stroke: "#7a7a7a"
+}
+
+host.agent -> host.broker: "same uid: can read\n/proc/<pid>/environ" {
+  style: {
+    stroke: "#aa3333"
+    stroke-dash: 4
+  }
+}
+
+legend: "blue: the developer's lane, through minos\nnavy, heavy: authority and the broker's link -- dashed where proposed\nteal: the broker's lanes to the agent\ngrey: pma's own record and its evidence\nred dashed: exposure -- on the host the agent can read the broker's password\nDashed outline: proposed, or untrusted. Approvals stay with pma on the host." {
+  shape: text
+  near: bottom-center
+  style.font-size: 18
+}

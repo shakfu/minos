@@ -33,10 +33,10 @@ host: "Host" {
     pma: "pma -- the tool\nadmin session" {
       style.fill: "#eef2f6"
     }
-    broker1: "minosb -- run 1\nholds the grant" {
+    broker1: "minosb -- run 1\nholds the credential" {
       style.fill: "#eef2f6"
     }
-    broker2: "minosb -- run 2\nholds its own grant" {
+    broker2: "minosb -- run 2\nholds its own" {
       style.fill: "#eef2f6"
     }
   }
@@ -114,14 +114,14 @@ provider: "model provider API\nhttps" {
 }
 
 host.loopback.tui -> host.minosd.tcp: "websocket + HTTP"
-host.loopback.pma -> host.minosd.tcp: "admin ops:\nmint, revoke, found"
-host.loopback.broker1 -> host.minosd.tcp: "its grant:\none room, windowed" {
+host.loopback.pma -> host.minosd.tcp: "admin ops: found rooms;\nmint and revoke grants, later"
+host.loopback.broker1 -> host.minosd.tcp: "a password today;\na grant later: one room, windowed" {
   style: {
     stroke: "#0b3d63"
     stroke-width: 4
   }
 }
-host.loopback.broker2 -> host.minosd.tcp: "its own grant" {
+host.loopback.broker2 -> host.minosd.tcp: "its own credential" {
   style: {
     stroke: "#0b3d63"
     stroke-width: 4
@@ -187,7 +187,7 @@ host.sealed.c1.shim -> host.sock2: "another run's socket\nis not mounted here" {
   }
 }
 
-legend: "navy, heavy: the one path a container has, and where it stops\ngrey dotted: model traffic, through the relay\nred dashed: no route, or nothing to reach\nThe mount removes reach. The grant, held outside, removes authority.\nThe six operations remove the rest: minosd's file and settings routes are not implemented here." {
+legend: "navy, heavy: the one path a container has, and where it stops\ngrey dotted: model traffic, through the relay\nred dashed: no route, or nothing to reach\nThe mount removes reach. The credential, held outside, removes authority.\nThe six operations remove the rest: minosd's file and settings routes are not implemented here." {
   shape: text
   near: bottom-center
   style.font-size: 18

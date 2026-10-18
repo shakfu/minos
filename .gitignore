@@ -20,6 +20,10 @@ go/minosb
 go/minosa
 go/minosg
 
+# The diagram renderings. Built by `make diagrams`; the d2 sources are tracked.
+/docs/media/*.svg
+/docs/media/*.pdf
+
 # python
 .venv
 

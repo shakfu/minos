@@ -150,7 +150,7 @@ Title uniqueness makes step 4 safe when two dispatches race, because the server 
 The worker template from [pma-integration.md](pma-integration.md) 4.2 then reads:
 
 ```text
-minosb -user worker -room {room} -interrupters demo -task {prompt} -socket {socket} -events {events} -- \
+minosb -user worker -room {room} -interrupters demo -task {prompt} -linger 2m -socket {socket} -events {events} -- \
   claude -p --input-format stream-json --output-format stream-json --verbose ...
 ```
 

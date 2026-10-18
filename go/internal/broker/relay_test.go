@@ -29,11 +29,18 @@ type agent struct {
 // scripted wires a relay to a fake agent and starts both lanes.
 func scripted(t *testing.T, run *run) (*agent, *control) {
 	t.Helper()
+	return lingering(t, run, 0)
+}
+
+// lingering is scripted with the relay's linger set.
+func lingering(t *testing.T, run *run, linger time.Duration) (*agent, *control) {
+	t.Helper()
 	pushed, toAgent := io.Pipe()
 	fromAgent, said := io.Pipe()
 	events := &control{}
 
 	relay := NewRelay(run.worker, claudeAdapter{}, toAgent, events.record)
+	relay.Linger(linger)
 	go relay.Deliver()
 	go func() { _ = relay.Read(fromAgent) }()
 	t.Cleanup(func() {
@@ -556,5 +563,82 @@ func TestAnInterruptIsAControlRequestCarryingItsID(t *testing.T) {
 	want := `{"request":{"subtype":"interrupt"},"request_id":"r1","type":"control_request"}` + "\n"
 	if string(frame) != want {
 		t.Fatalf("the interrupt frame is %s", frame)
+	}
+}
+
+// -- the linger --------------------------------------------------------------
+
+// closedWithin waits for the agent's stdin to reach end of input.
+func (a *agent) closedWithin(t *testing.T, wait time.Duration) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, a.stdin)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the agent's stdin failed: %v", err)
+		}
+	case <-time.After(wait):
+		t.Fatal("the agent's stdin stayed open")
+	}
+}
+
+// An agent that reads stdin to its end exits once the run goes quiet, so a
+// dispatcher's run ends without a signal. The room hears why it went quiet.
+func TestAnIdleRunsStdinIsClosedAndTheRoomIsTold(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	worker, events := lingering(t, run, 100*time.Millisecond)
+	worker.endTurn(t, "done")
+
+	worker.closedWithin(t, 5*time.Second)
+	if events.seen("closed") != 1 {
+		t.Fatalf("closed was reported %d times", events.seen("closed"))
+	}
+	waitFor(t, "the notice", func() bool {
+		for _, message := range run.developer.Log(run.room) {
+			if message.Body == closedNotice {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// A message before the linger runs out starts a turn, and a turn is never
+// cut short by the linger: it counts again from the turn's end.
+func TestAMessageWithinTheLingerStartsATurnAndTheLingerWaitsForIt(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	worker, events := lingering(t, run, 300*time.Millisecond)
+	worker.endTurn(t, "done")
+
+	say(t, run.developer, run.room, "one more thing")
+	if got := text(t, worker.read(t)); !strings.Contains(got, "one more thing") {
+		t.Fatalf("the agent was pushed %q", got)
+	}
+	time.Sleep(600 * time.Millisecond)
+	if events.seen("closed") != 0 {
+		t.Fatal("stdin was closed during a turn")
+	}
+	worker.endTurn(t, "done again")
+	worker.closedWithin(t, 5*time.Second)
+}
+
+// After the close nothing reaches the agent, and nothing is lost silently:
+// the dispatcher hears of each message and each interrupt.
+func TestWhatArrivesAfterTheCloseIsReported(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false, "demo")
+	worker, events := lingering(t, run, 50*time.Millisecond)
+	worker.endTurn(t, "done")
+	worker.closedWithin(t, 5*time.Second)
+
+	say(t, run.developer, run.room, "too late")
+	waitFor(t, "the undelivered report", func() bool { return events.seen("undelivered") == 1 })
+	worker.relay.Interrupt(Ask{By: "dispatcher", ID: "p1"})
+	waitFor(t, "the interrupt's report", func() bool { return len(events.outcomes()) == 1 })
+	if got := events.outcomes(); got[0] != "closed" {
+		t.Fatalf("the interrupt was reported as %v", got)
 	}
 }

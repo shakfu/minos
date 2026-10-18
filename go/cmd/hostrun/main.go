@@ -2,11 +2,14 @@
 // container. It checks what the scripted fakes in internal/broker cannot: that
 // a real Claude Code process ends turns the way the relay assumes, that a
 // message held mid-turn is answered after it, that both interrupt lanes stop a
-// turn, and whether the agent calls the shim at all.
+// turn, that the agent exits once -linger closes its input, and whether the
+// agent calls the shim at all.
 //
 // It spends turns on the caller's Claude account, and the agent runs
 // unsandboxed in a temporary directory. Never part of `make test`: a model is
 // never in a test path. Run it with `make host-run`.
+//
+// The transcript and the agent's whole stream, agent.jsonl, go to -out.
 //
 // HOSTRUN_AGENT replaces the agent command, which sh -c runs with the task
 // as its first stdin frame. -step bounds each wait.
@@ -48,6 +51,9 @@ const longTurn = "Count from 1 to 300, one number per line, and nothing else."
 
 // How long after a long turn is pushed the probe acts inside it.
 const midTurn = 4 * time.Second
+
+// Longer than any gap between the script's steps, so only the end is idle.
+const linger = 20 * time.Second
 
 func main() {
 	step := flag.Duration("step", 3*time.Minute, "how long each step waits")
@@ -110,12 +116,23 @@ func run(step time.Duration, out string) int {
 		return fail("%v", err)
 	}
 	socket := filepath.Join(os.TempDir(), fmt.Sprintf("minos-hostrun-%d.sock", os.Getpid()))
+	// Events through a FIFO, read live; stdout is then the agent's stream,
+	// kept whole in agent.jsonl.
+	fifo := filepath.Join(out, "events.fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		return fail("%v", err)
+	}
+	stream, err := os.Create(filepath.Join(out, "agent.jsonl"))
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer stream.Close()
 	frame, _ := json.Marshal(map[string]any{
 		"type": "user", "message": map[string]any{"role": "user", "content": task},
 	})
 	broker := exec.Command(filepath.Join(root, "go", "minosb"),
 		"-server", server.Base, "-user", "worker", "-room", room.ID,
-		"-socket", socket, "-interrupters", "demo", "--", "sh", "-c", feed+agent)
+		"-socket", socket, "-interrupters", "demo", "-linger", linger.String(), "-events", fifo, "--", "sh", "-c", feed+agent)
 	broker.Dir = work
 	broker.Env = append(os.Environ(),
 		"MINOS_PASSWORD=worker", "MINOS_SOCKET="+socket, "MINOS_TASK="+string(frame),
@@ -130,13 +147,17 @@ func run(step time.Duration, out string) int {
 	if err != nil {
 		return fail("%v", err)
 	}
-	events, err := broker.StdoutPipe()
-	if err != nil {
-		return fail("%v", err)
-	}
+	broker.Stdout = stream
 	if err := broker.Start(); err != nil {
 		return fail("cannot start minosb: %v", err)
 	}
+	// Read-write, so the open never waits for a minosb that failed to start.
+	// The read never sees end of input; the process exits instead.
+	events, err := os.OpenFile(fifo, os.O_RDWR, 0)
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer events.Close()
 
 	p := &probe{step: step, developer: developer, room: room.ID, control: control}
 	go p.read(events)
@@ -201,6 +222,14 @@ func (p *probe) script() {
 	p.check("an interrupt between turns is idle", p.wait(interrupt("dispatcher", "idle")))
 	p.command(`{"op":"stop"}`)
 	p.check("an unknown control op is refused", p.wait(func(e map[string]any) bool { return e["event"] == "refused" }))
+
+	// Nothing more is said, so minosb closes the agent's input and the run
+	// ends without a signal.
+	p.check("minosb closes an idle agent's input", p.wait(func(e map[string]any) bool { return e["event"] == "closed" }))
+	p.check("the room is told the run is closing", p.waitWorker("[closed:"))
+	p.check("the agent exits 0 at end of input", p.wait(func(e map[string]any) bool {
+		return e["event"] == "exited" && e["code"] == float64(0)
+	}))
 }
 
 func interrupt(by, outcome string) func(map[string]any) bool {

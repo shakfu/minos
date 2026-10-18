@@ -14,7 +14,17 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 - `minosb -task TEXT` writes the agent's task as its first stdin frame, framed as any push is. A run command that waits for its task on stdin needed a wrapper script to send it, and a pma worker template cannot express one. Text over a file, because pma fills `{prompt}` as one argument.
 
+- `minosb -linger DUR` closes the agent's stdin once it has been idle between turns for DUR, and tells the room. `claude --input-format stream-json` reads stdin until it closes, and nothing closed it, so a run under a dispatcher ended only at the dispatcher's timeout. A message or interrupt after the close is reported as `undelivered`, or as outcome `closed`. Idle time over an exit after the first turn, because a correction between turns must still reach the agent. `make host-run` checks that a real `claude` exits 0.
+
+- `make host-run` keeps the agent's stream as `agent.jsonl` beside the transcript, with control events read from `minosb -events`. On Claude Code 2.1.299, `total_cost_usd` in each `result` record is cumulative for the session, so a dispatcher reading the last record gets the run's total. An interrupted turn ends with `error_during_execution` and adds nothing to it. Consequences for pma are in [pma-integration.md](docs/dev/pma-integration.md) open question 5.
+
 - `minosb -events FILE` appends control events to FILE, and stdout then carries the agent's stream byte for byte. pma reads cost, summary and progress from its worker's output, and that output was consumed by `minosb`. A flag over always passing the stream through, because `make host-run` and any dispatcher reading events on stdout keep working.
+
+- `docs/media/integration.d2`, the pma run on the host from [pma-integration.md](docs/dev/pma-integration.md) 4.2: no container, and the password exposure that follows. `make diagrams` renders it.
+
+### Changed
+
+- `architecture.d2` and `network.d2` match what is built. The broker holds a password until grants land. It runs the command pma names after `--`, and owns the stream adapter that the diagram had given to sanduk. The room is filed under project and task, and `pma-agent` is marked not built.
 
 ### Removed
 
@@ -27,6 +37,8 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 - An agent that stopped reading stdin stopped `held` events: the relay wrote stdin on the goroutine that reports them, and the write blocked. Writes now run on their own goroutine, in order, and interrupt outcomes are reported after the write they follow. A write deadline was rejected: a frame can exceed the 64 KiB pipe buffer, so a timed-out write leaves half a JSON line.
 
 - The terminal client did not redraw while a key's request was outstanding, for up to 10 s. The handler now hands the screen to the loop while a request waits, and the status line reads `waiting`. Keys typed meanwhile are still handled in order afterwards. Chosen over moving each request off its handler, which would split about 35 handlers in two.
+
+- The SVG and PDF files `make diagrams` writes showed in `git status`, ready to commit, though the Makefile says they are not committed. `.gitignore` now excludes them.
 
 - `minosb` could report a `turn` after `stopped`. The relay reports a turn's end on its own goroutine, which can run after the main loop has reported `stopped` on its way out. Nothing is reported after `stopped` now.
 

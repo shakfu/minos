@@ -78,11 +78,12 @@ cover:
 ## The diagrams in $(MEDIA), from their d2 sources. The only target that
 ## needs a toolchain other than Go, and nothing else depends on it. The
 ## renderings are not committed; the docs link the sources.
-diagrams: $(MEDIA)/architecture.svg $(MEDIA)/network.svg $(MEDIA)/architecture.pdf $(MEDIA)/network.pdf
+diagrams: $(MEDIA)/architecture.svg $(MEDIA)/network.svg $(MEDIA)/integration.svg $(MEDIA)/architecture.pdf $(MEDIA)/network.pdf $(MEDIA)/integration.pdf
 
 clean-diagrams:
 	@rm -f $(MEDIA)/architecture.svg $(MEDIA)/architecture.pdf
 	@rm -f $(MEDIA)/network.svg $(MEDIA)/network.pdf
+	@rm -f $(MEDIA)/integration.svg $(MEDIA)/integration.pdf
 
 $(MEDIA)/architecture.svg: $(MEDIA)/architecture.d2
 	@d2 --layout=tala $< $@
@@ -94,6 +95,12 @@ $(MEDIA)/architecture.pdf: $(MEDIA)/architecture.d2
 	@d2 --layout=tala $< $@
 
 $(MEDIA)/network.pdf: $(MEDIA)/network.d2
+	@d2 --layout=tala $< $@
+
+$(MEDIA)/integration.svg: $(MEDIA)/integration.d2
+	@d2 --layout=tala $< $@
+
+$(MEDIA)/integration.pdf: $(MEDIA)/integration.d2
 	@d2 --layout=tala $< $@
 
 

@@ -26,6 +26,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"minos/internal/messaging"
 )
@@ -155,7 +156,16 @@ type Relay struct {
 	// jobs are the writer's, in order: each frame, and the reports that must
 	// follow it.
 	jobs []func()
+
+	// linger is how long the relay waits between turns, with nothing held,
+	// before it closes the agent's stdin. Zero never closes it. closed is
+	// Deliver's alone.
+	linger time.Duration
+	closed bool
 }
+
+// The room's last word from a run that stopped reading it.
+const closedNotice = "[closed: this run reads no more messages and is ending]"
 
 // NewRelay wires the broker to one agent's stdin. control reports to the
 // dispatcher and must not block.
@@ -194,20 +204,81 @@ func (r *Relay) Read(stdout io.Reader) error {
 	return scanner.Err()
 }
 
+// Linger sets how long the relay waits, idle, before closing the agent's
+// stdin. An agent that reads stdin to its end then exits, and so does the
+// run. Call it before Deliver.
+func (r *Relay) Linger(d time.Duration) { r.linger = d }
+
 // Deliver pushes what the room says onto the agent's stdin until the broker
 // stops. Its writer is the only one, so nothing overtakes a held message.
+// Any activity restarts the linger.
 func (r *Relay) Deliver() {
 	go r.writer()
+	var idle <-chan time.Time
 	for {
-		ended := false
+		ended, expired := false, false
 		select {
 		case <-r.broker.stopped:
 			return
 		case <-r.broker.changed:
 		case <-r.ended:
 			ended = true
+		case <-idle:
+			expired = true
+		}
+		if r.closed {
+			r.refuse()
+			continue
 		}
 		r.deliver(ended)
+		idle = nil
+		if r.linger > 0 && r.idle() {
+			if expired {
+				r.close()
+				continue
+			}
+			idle = time.After(r.linger)
+		}
+	}
+}
+
+// idle is between turns with nothing held.
+func (r *Relay) idle() bool {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return !r.inTurn && len(r.held) == 0
+}
+
+// close tells the room, then ends the agent's input. The notice goes first:
+// the agent may exit at once, and the run with it. The writer closes stdin
+// after the frames queued before it.
+func (r *Relay) close() {
+	r.closed = true
+	if err := r.broker.relay(closedNotice); err != nil {
+		r.control(map[string]any{"event": "unrelayed", "error": err.Error()})
+	}
+	r.enqueue(func() {
+		event := map[string]any{"event": "closed", "linger": r.linger.String()}
+		if err := r.stdin.Close(); err != nil {
+			event["error"] = err.Error()
+		}
+		r.control(event)
+	})
+}
+
+// refuse answers what arrives after close, so no message or ask goes
+// unreported.
+func (r *Relay) refuse() {
+	arrived, asked := r.broker.forPush()
+	r.mutex.Lock()
+	asks := append(r.asks, asked...)
+	r.asks = nil
+	r.mutex.Unlock()
+	for _, ask := range asks {
+		r.control(map[string]any{"event": "interrupt", "by": ask.By, "id": ask.ID, "outcome": "closed"})
+	}
+	if len(arrived) > 0 {
+		r.control(map[string]any{"event": "undelivered", "messages": len(arrived)})
 	}
 }
 

@@ -1,7 +1,8 @@
 # Agents in containers: who talks to whom.
 # Source for architecture.svg. Regenerate with `make diagrams`, which runs
 # d2 --layout=tala over this file. Needs d2; nothing else in the tree does.
-# See docs/dev/recommended-architecture.md
+# See docs/dev/recommended-architecture.md. The host-only form pma would use
+# first is integration.d2.
 
 direction: down
 
@@ -36,7 +37,7 @@ host: "Host" {
     }
   }
 
-  supervisor: "pma-agent\nuntrusted model\nholds a grant" {
+  supervisor: "pma-agent -- not built\nuntrusted model\nholds a grant" {
     style: {
       fill: "#ffffff"
       stroke-dash: 2
@@ -49,18 +50,18 @@ host: "Host" {
       stroke-width: 3
     }
 
-    note: "one per run.\nHolds the grant, the cursor and the pipes" {
+    note: "one per run, a child of pma.\nHolds the credential, the cursor and the pipes.\nA password until grants land" {
       shape: text
       style.font-size: 16
     }
 
-    wire: "wire side\ngrant, 6 ops, one queue, one cursor" {
+    wire: "wire side\ncredential, 6 ops, one queue, one cursor" {
       style.fill: "#eef2f6"
     }
     sockd: "socket server\nsix operations, and no seventh" {
       style.fill: "#eef2f6"
     }
-    pipes: "process side\nruns the stage through sanduk,\nstream-json in and out" {
+    pipes: "process side\nruns the command after --, as pma gives it;\nstream-json through the -agent adapter" {
       style.fill: "#eef2f6"
     }
 
@@ -78,7 +79,7 @@ host: "Host" {
     }
   }
 
-  sanduk: "sanduk\nbuilds, starts and kills the container\nowns the per-agent adapter" {
+  sanduk: "sanduk run\nthe run command pma names.\nBuilds, starts and kills the container" {
     style.fill: "#ffffff"
   }
 
@@ -94,7 +95,7 @@ host: "Host" {
     control: "control\nchannel, restricted to group workers\nread-only to its audience" {
       style.fill: "#ffffff"
     }
-    room: "workflow/<id>\nroom, admin-founded\none per workflow instance" {
+    room: "the run's room\nfiled under project and task\ngrain undecided" {
       style.fill: "#ffffff"
     }
 
@@ -134,19 +135,19 @@ mounts: "bind mounts\n/work at its host path, artifacts, session store" {
 host.dev -> host.tui
 host.tui -> host.minosd.core: "chat"
 host.supervisor -> host.minosd.core: "chat, within its grant"
-host.pma -> host.minosd.core: "admin: found rooms, invite,\nmint and revoke grants" {
+host.pma -> host.minosd.core: "admin: rooms, invites;\ngrants, later" {
   style: {
     stroke: "#0b3d63"
     stroke-width: 4
   }
 }
-host.pma -> host.broker: "dispatch a stage:\nthe grant, the room, the window" {
+host.pma -> host.broker: "starts it per run" {
   style: {
     stroke: "#0b3d63"
     stroke-width: 4
   }
 }
-host.broker.wire -> host.minosd.core: "the grant, on the ordinary listener.\nThe room gets every turn's final message" {
+host.broker.wire -> host.minosd.core: "its credential, on the ordinary listener.\nThe room gets every turn's final message" {
   style: {
     stroke: "#0b3d63"
     stroke-width: 4
@@ -159,7 +160,7 @@ box.shim -> host.broker.sockd: "unix socket, one per run,\nmounted outside /work
   }
 }
 
-host.broker.pipes -> host.sanduk: "run the stage,\nstdio on pipes" {
+host.broker.pipes -> host.sanduk: "runs it as a child,\nstdio on pipes" {
   style: {
     stroke: "#7a7a7a"
     stroke-dash: 4
@@ -178,10 +179,13 @@ host.pma -> box: "stops it directly:\nneeds neither minosd nor the broker" {
   }
 }
 
-host.broker.pipes -> box.agent: "stdin: a pushed message,\nqueued for the turn's end;\nan interrupt, which is not" {
+host.broker.pipes -> box.agent: "stdin: the task first; a pushed message,\nqueued for the turn's end; an interrupt,\nwhich is not. Closed after -linger idle" {
   style.stroke: "#0f766e"
 }
 box.agent -> host.broker.pipes: "stdout: the turn,\nits trace, its cost" {
+  style.stroke: "#0f766e"
+}
+host.broker -> host.pma: "the agent's stream;\nevents to a file" {
   style.stroke: "#0f766e"
 }
 

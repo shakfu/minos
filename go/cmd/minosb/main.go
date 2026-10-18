@@ -20,7 +20,9 @@
 //
 // Everything after `--` is the run command, which is `sanduk run` in a real
 // dispatch. -task writes the agent's task as its first stdin frame, so the run
-// command needs no wrapper that does it. The broker owns its stdin and stdout: stdin is the only lane that
+// command needs no wrapper that does it. -linger closes the agent's stdin once
+// it has been idle that long, so an agent that reads to end of input exits and
+// the run ends without a signal. The broker owns its stdin and stdout: stdin is the only lane that
 // reaches a model that never calls the shim, and stdout is the broker's only
 // view of the work. It does not own the container. Stopping a run goes to the
 // engine directly, so it never goes through this process; stopping a turn is
@@ -72,6 +74,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	interrupters := flags.String("interrupters", "", "comma-separated users whose /interrupt in the room stops a turn")
 	eventsPath := flags.String("events", "", "append control events to this file; stdout then carries the agent's stream")
 	task := flags.String("task", "", "the agent's task, written as its first stdin frame")
+	linger := flags.Duration("linger", 0, "close the agent's stdin after this long idle between turns; 0 never closes it")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -93,6 +96,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, "minosb needs MINOS_PASSWORD in the environment")
 	case *task != "" && flags.NArg() == 0:
 		return fail(stderr, "-task needs a run command after --")
+	case *linger < 0:
+		return fail(stderr, "-linger cannot be negative")
+	case *linger > 0 && flags.NArg() == 0:
+		return fail(stderr, "-linger needs a run command after --")
 	}
 	if err := link.CheckPath(*socket); err != nil {
 		return fail(stderr, "cannot use -socket %s: %v", *socket, err)
@@ -145,7 +152,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		var drained <-chan struct{}
 		var relay *broker.Relay
-		if command, relay, drained, err = start(run, adapter, argv, *task, report, passthrough); err != nil {
+		if command, relay, drained, err = start(run, adapter, argv, *task, *linger, report, passthrough); err != nil {
 			return fail(stderr, "%v", err)
 		}
 		go control(os.Stdin, relay.Interrupt, report)
@@ -182,9 +189,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 // start runs the agent with its stdio on the broker's pipes. The channel
 // closes once stdout is read and relayed; Wait closes the pipe, so it must
 // not run before then or the last turn is lost. A non-empty task is the first
-// frame on stdin. A non-nil passthrough gets every byte of the agent's stdout
+// frame on stdin. A positive linger closes stdin once the agent idles that
+// long. A non-nil passthrough gets every byte of the agent's stdout
 // as it is read.
-func start(run *broker.Broker, adapter broker.Adapter, argv []string, task string,
+func start(run *broker.Broker, adapter broker.Adapter, argv []string, task string, linger time.Duration,
 	report func(map[string]any), passthrough io.Writer) (*exec.Cmd, *broker.Relay, <-chan struct{}, error) {
 	command := exec.Command(argv[0], argv[1:]...)
 	command.Env = childEnv(os.Environ())
@@ -218,6 +226,7 @@ func start(run *broker.Broker, adapter broker.Adapter, argv []string, task strin
 	}
 
 	relay := broker.NewRelay(run, adapter, stdin, report)
+	relay.Linger(linger)
 	go relay.Deliver()
 	var stream io.Reader = stdout
 	if passthrough != nil {

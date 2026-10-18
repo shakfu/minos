@@ -373,3 +373,55 @@ func TestATaskWithNoRunCommandIsRefusedBeforeTheServer(t *testing.T) {
 		t.Fatalf("exit %d, stderr %q, reached %v", code, stderr.String(), reached.Load())
 	}
 }
+
+// -- the linger ---------------------------------------------------------------
+
+// An agent that reads its stdin to the end, as claude does with
+// --input-format stream-json, ends the run once -linger closes it.
+func TestALingerEndsARunWhoseAgentWaitsForInput(t *testing.T) {
+	server := testserver.Start(t, 200)
+	_, developer, _, err := client.Connect(server.Base, "demo", "demo")
+	if err != nil {
+		t.Fatalf("the developer cannot connect: %v", err)
+	}
+	t.Cleanup(developer.Stop)
+	room, err := developer.OpenRoom([]client.Principal{{Kind: "user", ID: "bob"}}, "Run", "persisted")
+	if err != nil {
+		t.Fatalf("cannot open the run's room: %v", err)
+	}
+	t.Setenv("MINOS_PASSWORD", "bob")
+
+	agent := `while read -r line; do echo '{"type":"result","result":"done"}'; done; exit 3`
+	var out, stderr bytes.Buffer
+	code := run([]string{
+		"-server", server.Base, "-user", "bob", "-room", room.ID,
+		"-socket", testserver.SocketPath(t), "-task", "do it", "-linger", "100ms",
+		"--", "/bin/sh", "-c", agent,
+	}, &out, &stderr)
+	if code != 3 {
+		t.Fatalf("minosb exited %d, not the agent's 3: %s", code, stderr.String())
+	}
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		var event map[string]any
+		if json.Unmarshal([]byte(line), &event) == nil {
+			names = append(names, fmt.Sprint(event["event"]))
+		}
+	}
+	closed, exited := slices.Index(names, "closed"), slices.Index(names, "exited")
+	if closed < 0 || exited < closed {
+		t.Fatalf("the events were %v", names)
+	}
+}
+
+func TestALingerIsRefusedWithoutARunCommandOrBelowZero(t *testing.T) {
+	t.Setenv("MINOS_PASSWORD", "p")
+	for _, args := range [][]string{{"-linger", "1s"}, {"-linger", "-1s", "--", "true"}} {
+		var stderr bytes.Buffer
+		base := []string{"-server", "http://127.0.0.1:1", "-user", "u", "-room", "r", "-socket", "/tmp/minos-unused.sock"}
+		code := run(append(base, args...), io.Discard, &stderr)
+		if code != 2 || !strings.Contains(stderr.String(), "-linger") {
+			t.Fatalf("%v: exited %d: %s", args, code, stderr.String())
+		}
+	}
+}

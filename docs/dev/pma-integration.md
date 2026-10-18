@@ -1,6 +1,6 @@
 # pma integration
 
-2026-10-14. How minos and [pma](https://github.com/shakfu/pma) can work together, read against pma at `a69f3eb`. A proposal for approval. Built so far: `minosb -events`, `minosb -task` and `minos room ensure` (section 4.2).
+2026-10-14. How minos and [pma](https://github.com/shakfu/pma) can work together, read against pma at `a69f3eb`. A proposal for approval. Built so far: `minosb -events`, `minosb -task`, `minosb -linger` and `minos room ensure` (section 4.2).
 
 ## 1. Summary
 
@@ -49,7 +49,8 @@ minos rejected the first two in [recommended-architecture.md](recommended-archit
 |-|-|-|-|
 | Worker stdin | `WATCHDOG` runs the worker with stdin from `/dev/null` and keeps the pipe as a kill switch (`agent.rs`) | `minosb` reads `{"op":"interrupt"}` on stdin | pma cannot use `minosb`'s stdin interrupt. A room `/interrupt` from a listed interrupter still works. |
 | Prompt | An argument: `claude -p {prompt}` (`worker.rs`, `Worker::claude`) | The first stdin frame, written by a wrapper (README, "A container run, by hand") | A pma worker template cannot express the wrapper. Resolved by `minosb -task`. |
-| Agent output | Cost and summary from the last `result` line in the log; `pma watch` reads the log live | `minosb` keeps the agent's stdout and prints its own control events | A run under `minosb` loses its cost, its summary, and its watch view. The parser takes the last JSON line (pma TODO L10), and `minosb` writes `exited` and `stopped` last. This blocks options 4.2 and 4.3. |
+| Agent output | Cost and summary from the last `result` line in the log; `pma watch` reads the log live | `minosb` keeps the agent's stdout and prints its own control events | A run under `minosb` lost its cost, its summary, and its watch view. pma's `parse_claude` takes the last line that parses as JSON and requires `type: result`, and `minosb` wrote `exited` and `stopped` last. Resolved by `minosb -events`. |
+| Run end | The watchdog waits for the worker to exit, or for the job timeout | `claude --input-format stream-json` reads stdin until it closes, and `minosb` never closed it | A run never ended by itself. It held pma's single job runner until the timeout, then counted as killed. Resolved by `minosb -linger`; `make host-run` shows a real `claude` exiting 0. |
 | Process group | The watchdog kills the group on exit or timeout | `minosb`'s death ends the run | Compatible. `minosb` is one more process in the group. |
 | Parallel agents | `max_parallel` agents per job | One `minosb`, one socket, one room per run | Compatible. Each run gets its own broker. |
 
@@ -60,6 +61,8 @@ pma `async_dispatch.md`, "Why observe rather than let agents push":
 > A push channel is a socket or token inside the agent's environment. `pma` strips that environment of credentials; this would add one back for every worker.
 
 The `minosa` socket is such a channel. It holds no credential, but it can speak in the room and submit. The two positions fit if pma treats anything a worker says in minos as advice and keeps verify as the only evidence. pma already treats an agent's own report that way.
+
+On the host (option 4.2) the socket is not the only channel. The agent runs as the developer's uid, and `/proc/<pid>/environ` of a same-uid process is readable under Yama `ptrace_scope=1`, checked on this machine 2026-10-14. So the agent can read `MINOS_PASSWORD` from `minosb`, and then act as the worker account directly. `childEnv` removes it from the agent's own environment only. The credential stays out of the agent's reach only in a container (4.3). For 4.2, give the worker account no more than the run's room and channel.
 
 ### 3.4 Identity
 
@@ -97,23 +100,28 @@ Cheapest first. Each is usable alone.
 
 ### 4.2 Talk to a running dispatch, with the agent on the host
 
-A pma worker template `claude-minos`:
+Diagram: [integration.d2](../media/integration.d2). A pma worker template `claude-minos`:
 
 ```text
-minosb -server ... -user worker -room {room} -interrupters demo -task {prompt} -socket {socket} -- \
+minosb -server ... -user worker -room {room} -interrupters demo -task {prompt} -linger 2m -socket {socket} -- \
   claude -p --input-format stream-json --output-format stream-json --verbose ...
 ```
+
+pma's template decides what runs and how it is launched. `minosb` runs whatever follows `--` as a child, with `MINOS_PASSWORD` and `MINOS_USER` removed from its environment. It has no code that chooses an agent and none that names sanduk, so option 4.3 changes only the template. `minosb` knows only the agent's stream format, through the adapter `-agent` selects (`claude`, the only one): how to frame a message on stdin, that a `result` record ends a turn, and how to frame an interrupt. `minosd` never touches the agent process.
 
 | Needs | Where |
 |-|-|
 | `-task TEXT`: `minosb` writes the first stdin frame itself, so no wrapper is needed. Text, because pma fills `{prompt}` as one argument. Built 2026-10-14 | minos |
 | The agent's stream passed through to stdout unchanged, with control events moved to `-events FILE`. Built 2026-10-14 | minos |
+| `-linger DUR`: stdin closed after DUR idle between turns, so the agent exits and the run ends. Built 2026-10-14 | minos |
 | A room filed under project and task: pma founds it with `minos room ensure` and passes `{room}`; `minosb` is unchanged ([run-rooms.md](run-rooms.md)). Built 2026-10-18 on the minos side | minos, pma |
 | The template, a socket path outside the worktree, and the room id on the run row | pma |
 
+`-linger DUR` waits until the agent is between turns with nothing held, then for DUR more. Any message or interrupt restarts the wait, and a turn is never cut short. On expiry `minosb` posts `[closed: this run reads no more messages and is ending]` to the room, closes stdin, and reports `closed`. After that, a room message is reported as `undelivered`, and an interrupt as outcome `closed`. The default, 0, never closes stdin, so a template without the flag hangs until pma's timeout.
+
 - **Gain.** The developer reads a pma run as it happens, corrects it, and interrupts it from the minos TUI. `make host-run` already proves the relay, held messages and both interrupt lanes with a real `claude`.
 
-- **Cost.** About 150 lines in `minosb` with tests, and one template in pma. The agent stays unsandboxed, as pma's `claude` worker is today.
+- **Cost.** About 150 lines in `minosb` with tests, and one template in pma. The agent stays unsandboxed, as pma's `claude` worker is today. pma's `sanduk_sandbox` policy confines verify only (`dispatch.rs`, `verify_once`); agent runs pass none, so `minosb` reaches the server and creates its socket unconfined. The credential goes in the worker's `env`, which pma applies after `agent::restrict`.
 
 ### 4.3 The same, in a container
 
@@ -146,7 +154,7 @@ This is a precondition for 4.2 and 4.3, and costs little in either repository.
 
 ## 5. Recommendation
 
-1. **The `minosb` changes in 4.2.** Stream passthrough first, because it blocks 4.2 and 4.3. Then `-task`, then filing the room. All three are built on the minos side. Filing is `minos room ensure` and needs no `minosb` change; see [run-rooms.md](run-rooms.md). All are testable in Go with the scripted fake agent.
+1. **The `minosb` changes in 4.2.** Stream passthrough and `-linger` first, because each blocks 4.2 and 4.3. Then `-task`, then filing the room. All four are built on the minos side. Filing is `minos room ensure` and needs no `minosb` change; see [run-rooms.md](run-rooms.md). All are testable in Go with the scripted fake agent.
 
 2. **4.4, then the pma template.** A real pma dispatch whose room shows in the minos TUI is the phase 0 exit test of [implementation-plan.md](implementation-plan.md), without the container.
 
@@ -171,3 +179,9 @@ pma already has control and approvals on the host. minos could serve it as two t
 4. **Does pma ever run `minosd`?** [pma_feedback.md](pma_feedback.md) 7.1 says no: it should be an operator's service. Then, when the server is down, does a run fail (implementation-plan section 3, answer 1) or fall back to running without a room?
 
 5. **Does a run's summary come from pma's parser or from the room?** With passthrough, both exist. They should agree, and pma's log should be the authority.
+
+   Measured with `make host-run` on Claude Code 2.1.299, 2026-10-14: one session, seven `result` records. `total_cost_usd` is cumulative for the session and never falls, while `usage` is per turn. So `parse_claude`'s last record gives the right total. Three consequences for pma:
+
+   - The summary is the last turn's reply, not the task's outcome. After a correction it answers the correction.
+   - A run whose last turn was interrupted ends on `error_during_execution`, which `parse_claude` reads as a failure even when the work is done.
+   - An interrupted turn adds 0 to the total and reports 0 tokens. Whether its partial output is billed is not known.
