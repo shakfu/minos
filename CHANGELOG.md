@@ -18,7 +18,7 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 - `minosb -task TEXT` writes the agent's task as its first stdin frame, framed as any push is. A run command that waits for its task on stdin needed a wrapper script to send it, and a pma worker template cannot express one. Text over a file, because pma fills `{prompt}` as one argument.
 
-- `minosb -linger DUR` closes the agent's stdin once it has been idle between turns for DUR, and tells the room. `claude --input-format stream-json` reads stdin until it closes, and nothing closed it, so a run under a dispatcher ended only at the dispatcher's timeout. A message or interrupt after the close is reported as `undelivered`, or as outcome `closed`. Idle time over an exit after the first turn, because a correction between turns must still reach the agent. `make host-run` checks that a real `claude` exits 0.
+- `minosb -linger DUR` closes the agent's stdin once it has been idle between turns for DUR, and tells the room. `claude --input-format stream-json` reads stdin until it closes, and nothing closed it, so a run under a dispatcher ended only at the dispatcher's timeout. The idle time counts from the last turn's end. Presence and other rooms' traffic do not restart it; they did at first, so a busy server kept a run open. A message or interrupt after the close is reported as `undelivered`, or as outcome `closed`. Idle time over an exit after the first turn, because a correction between turns must still reach the agent. `make host-run` checks that a real `claude` exits 0.
 
 - `make host-run` keeps the agent's stream as `agent.jsonl` beside the transcript, with control events read from `minosb -events`. On Claude Code 2.1.299, `total_cost_usd` in each `result` record is cumulative for the session, so a dispatcher reading the last record gets the run's total. An interrupted turn ends with `error_during_execution` and adds nothing to it. Consequences for pma are in [pma-integration.md](docs/dev/pma-integration.md) open question 5.
 
@@ -35,6 +35,8 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 - The Python tree: `server/`, `messaging/`, `tui/`, the pytest suite, `pyproject.toml`, the uv venv, and the `install`, `serve-go` and `conformance-go` make targets. A second implementation of the core cost about 55% more code per feature, and it described behaviour `go/` already had. Three parts were ported rather than dropped: the conformance suite, the only black-box test of the server; the terminal client, its only client; and the audience demo.
 
 ### Fixed
+
+- A message the agent read with `minosa messages` during a turn was pushed onto its stdin again when the turn ended. The two lanes keep separate cursors, and held messages were queued before the read. A held message the socket has delivered is now left out of the frame, and the `turn` event counts it as `read`. A correction from `/interrupt` is pushed regardless, since the stopped turn resumes on it. In `make sim` the frames carried 23 messages instead of 40.
 
 - Two concurrent `project.create` calls with one name could both succeed. The name check and the insert ran outside the lock that room titles already take. Found by two `minos room ensure` calls racing on a new project.
 

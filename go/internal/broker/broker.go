@@ -263,10 +263,19 @@ func (b *Broker) wake() {
 	}
 }
 
+// held is one message waiting for the agent's stdin. seq tells whether the
+// socket has delivered it since. A correction is pushed even then: it is what
+// the stopped turn resumes on.
+type held struct {
+	seq        int64
+	text       string
+	correction bool
+}
+
 // forPush is what the agent has not been told over its stdin, and the
 // interrupts asked for in the room since. Text from others only: a room event
 // is the server's bookkeeping, and the worker's own messages are not news to it.
-func (b *Broker) forPush() ([]string, []Ask) {
+func (b *Broker) forPush() ([]held, []Ask) {
 	b.mutex.Lock()
 	since, torn := b.pushed, b.torn
 	b.mutex.Unlock()
@@ -274,7 +283,7 @@ func (b *Broker) forPush() ([]string, []Ask) {
 		return nil, nil
 	}
 
-	var texts []string
+	var texts []held
 	var asks []Ask
 	last := since
 	for _, message := range b.chat.Log(b.config.Room) {
@@ -285,15 +294,17 @@ func (b *Broker) forPush() ([]string, []Ask) {
 		if message.Author == b.me || message.Kind != "text" {
 			continue
 		}
-		body := message.Body
+		body, corrects := message.Body, false
 		if correction, ok := interruptBody(body); ok && slices.Contains(b.config.Interrupters, message.Author) {
 			asks = append(asks, Ask{By: message.Author, ID: fmt.Sprintf("seq-%d", message.Seq)})
 			if correction == "" {
 				continue
 			}
-			body = correction
+			body, corrects = correction, true
 		}
-		texts = append(texts, fmt.Sprintf("%s: %s", message.Author, link.Line(body)))
+		texts = append(texts, held{
+			seq: message.Seq, text: fmt.Sprintf("%s: %s", message.Author, link.Line(body)), correction: corrects,
+		})
 	}
 
 	b.mutex.Lock()
@@ -302,6 +313,23 @@ func (b *Broker) forPush() ([]string, []Ask) {
 	}
 	b.mutex.Unlock()
 	return texts, asks
+}
+
+// unread is the text of what the socket has not delivered, and how many it
+// had. An agent that read a message with `messages` mid-turn is not told it
+// again when the turn ends.
+func (b *Broker) unread(waiting []held) ([]string, int) {
+	b.mutex.Lock()
+	delivered := b.delivered
+	b.mutex.Unlock()
+	texts := make([]string, 0, len(waiting))
+	for _, message := range waiting {
+		if message.seq <= delivered && !message.correction {
+			continue
+		}
+		texts = append(texts, message.text)
+	}
+	return texts, len(waiting) - len(texts)
 }
 
 // interruptBody is the correction an `/interrupt` carries, and whether body

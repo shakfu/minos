@@ -146,7 +146,7 @@ type Relay struct {
 	// starts inside one: the dispatcher gave the agent its task. A boolean
 	// suffices because only Deliver queues a frame, one per turn, between turns.
 	inTurn bool
-	held   []string
+	held   []held
 	// asks wait for Deliver to act on them. interrupting is set once a
 	// turn's interrupt is written, so a second ask for that turn is merged.
 	asks         []Ask
@@ -211,7 +211,8 @@ func (r *Relay) Linger(d time.Duration) { r.linger = d }
 
 // Deliver pushes what the room says onto the agent's stdin until the broker
 // stops. Its writer is the only one, so nothing overtakes a held message.
-// Any activity restarts the linger.
+// The linger counts from the last turn's end. A wake that starts no turn,
+// such as presence or another room's message, does not restart it.
 func (r *Relay) Deliver() {
 	go r.writer()
 	var idle <-chan time.Time
@@ -231,12 +232,12 @@ func (r *Relay) Deliver() {
 			continue
 		}
 		r.deliver(ended)
-		idle = nil
-		if r.linger > 0 && r.idle() {
-			if expired {
-				r.close()
-				continue
-			}
+		if r.linger == 0 || !r.idle() {
+			idle = nil
+		} else if expired {
+			r.close()
+			idle = nil
+		} else if idle == nil {
 			idle = time.After(r.linger)
 		}
 	}
@@ -313,8 +314,10 @@ func (r *Relay) deliver(ended bool) {
 		id = fmt.Sprintf("minos-%d", r.frames)
 	}
 	var batch []string
+	read := 0
 	if !inTurn && depth > 0 {
-		batch, r.held, r.inTurn = r.held, nil, true
+		batch, read = r.broker.unread(r.held)
+		r.held, r.inTurn = nil, len(batch) > 0
 	}
 	r.mutex.Unlock()
 
@@ -335,7 +338,11 @@ func (r *Relay) deliver(ended bool) {
 		})
 	}
 	if ended {
-		r.control(map[string]any{"event": "turn", "delivering": len(batch)})
+		event := map[string]any{"event": "turn", "delivering": len(batch)}
+		if read > 0 {
+			event["read"] = read
+		}
+		r.control(event)
 	}
 	if len(batch) > 0 {
 		r.enqueue(func() { r.write(batch) })

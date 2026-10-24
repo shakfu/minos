@@ -29,7 +29,7 @@ The design is in [design.md](docs/dev/design.md) and [recommended-architecture.m
 
 - **Three lanes to the agent.** The broker pushes room messages onto the agent's stdin between turns. It relays each turn's final message from stdout to the room. The agent asks for anything else over the socket.
 
-- **One frame per turn.** Messages held during a turn go as one stdin frame, so one turn answers them.
+- **One frame per turn.** Messages held during a turn go as one stdin frame, so one turn answers them. A message the agent read with `messages` during the turn is left out; the `turn` event counts it as `read`.
 
 - **Decisions through a channel.** `submit` posts to a moderated channel; `await` blocks until a moderator approves or rejects it, or the wait times out.
 

@@ -117,7 +117,7 @@ pma's template decides what runs and how it is launched. `minosb` runs whatever 
 | A room filed under project and task: pma founds it with `minos room ensure` and passes `{room}`; `minosb` is unchanged ([run-rooms.md](run-rooms.md)). Built 2026-10-18 on the minos side | minos, pma |
 | The template, a socket path outside the worktree, and the room id on the run row | pma |
 
-`-linger DUR` waits until the agent is between turns with nothing held, then for DUR more. Any message or interrupt restarts the wait, and a turn is never cut short. On expiry `minosb` posts `[closed: this run reads no more messages and is ending]` to the room, closes stdin, and reports `closed`. After that, a room message is reported as `undelivered`, and an interrupt as outcome `closed`. The default, 0, never closes stdin, so a template without the flag hangs until pma's timeout.
+`-linger DUR` waits until the agent is between turns with nothing held, then for DUR more. A pushed message starts a turn and so restarts the wait; presence, other rooms and an interrupt between turns do not. A turn is never cut short. On expiry `minosb` posts `[closed: this run reads no more messages and is ending]` to the room, closes stdin, and reports `closed`. After that, a room message is reported as `undelivered`, and an interrupt as outcome `closed`. The default, 0, never closes stdin, so a template without the flag hangs until pma's timeout.
 
 - **Gain.** The developer reads a pma run as it happens, corrects it, and interrupts it from the minos TUI. `make host-run` already proves the relay, held messages and both interrupt lanes with a real `claude`.
 

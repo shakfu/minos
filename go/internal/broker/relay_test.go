@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"minos/internal/client"
 	"minos/internal/config"
 	"minos/internal/link"
 	"minos/internal/messaging"
@@ -262,8 +263,8 @@ func TestAMessageArrivingDuringADeliveredTurnIsHeld(t *testing.T) {
 	worker.relay.mutex.Lock()
 	held := slices.Clone(worker.relay.held)
 	worker.relay.mutex.Unlock()
-	if len(held) != 1 || held[0] != "demo: three" {
-		t.Fatalf("mid-turn, the relay holds %q", held)
+	if len(held) != 1 || held[0].text != "demo: three" {
+		t.Fatalf("mid-turn, the relay holds %+v", held)
 	}
 
 	worker.endTurn(t, "answered one and two")
@@ -626,6 +627,32 @@ func TestAMessageWithinTheLingerStartsATurnAndTheLingerWaitsForIt(t *testing.T) 
 	worker.closedWithin(t, 5*time.Second)
 }
 
+// Traffic the run does not act on leaves the linger running: talk in another
+// room the worker shares, every 50 ms, does not hold off a 300 ms linger.
+func TestTrafficElsewhereDoesNotRestartTheLinger(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	other, err := run.developer.OpenRoom([]client.Principal{{Kind: "user", ID: "bob"}}, "Elsewhere", "persisted")
+	if err != nil {
+		t.Fatalf("cannot open the other room: %v", err)
+	}
+	worker, _ := lingering(t, run, 300*time.Millisecond)
+	worker.endTurn(t, "done")
+
+	quiet := make(chan struct{})
+	defer close(quiet)
+	go func() {
+		for {
+			select {
+			case <-quiet:
+				return
+			case <-time.After(50 * time.Millisecond):
+				_ = run.developer.Send(other.ID, "elsewhere")
+			}
+		}
+	}()
+	worker.closedWithin(t, 2*time.Second)
+}
+
 // After the close nothing reaches the agent, and nothing is lost silently:
 // the dispatcher hears of each message and each interrupt.
 func TestWhatArrivesAfterTheCloseIsReported(t *testing.T) {
@@ -640,5 +667,78 @@ func TestWhatArrivesAfterTheCloseIsReported(t *testing.T) {
 	waitFor(t, "the interrupt's report", func() bool { return len(events.outcomes()) == 1 })
 	if got := events.outcomes(); got[0] != "closed" {
 		t.Fatalf("the interrupt was reported as %v", got)
+	}
+}
+
+// -- one delivery per message ------------------------------------------------
+
+// lastTurn is the last `turn` event reported.
+func (c *control) lastTurn() map[string]any {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	for i := len(c.events) - 1; i >= 0; i-- {
+		if c.events[i]["event"] == "turn" {
+			return c.events[i]
+		}
+	}
+	return nil
+}
+
+// An agent that read a message with `messages` mid-turn is not pushed it
+// again when the turn ends; what it has not read still is.
+func TestAMessageReadOverTheSocketMidTurnIsNotPushedAgain(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	worker, events := scripted(t, run)
+
+	say(t, run.developer, run.room, "one")
+	waitFor(t, "one held", func() bool { return events.seen("held") == 1 })
+	run.drain(t, 1)
+	say(t, run.developer, run.room, "two")
+	waitFor(t, "two held", func() bool { return events.seen("held") == 2 })
+
+	worker.endTurn(t, "done")
+	if got := texts(t, worker.read(t)); strings.Join(got, "|") != "demo: two" {
+		t.Fatalf("the agent was pushed %q", got)
+	}
+	if turn := events.lastTurn(); turn["delivering"] != 1 || turn["read"] != 1 {
+		t.Fatalf("the turn was reported as %v", turn)
+	}
+}
+
+// When everything held was read, no frame is written and no turn starts: the
+// next message is pushed on its own.
+func TestATurnWhoseHeldMessagesWereAllReadStartsNoTurn(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	worker, events := scripted(t, run)
+
+	say(t, run.developer, run.room, "one")
+	waitFor(t, "one held", func() bool { return events.seen("held") == 1 })
+	run.drain(t, 1)
+	worker.endTurn(t, "done")
+	waitFor(t, "the turn report", func() bool { return events.lastTurn() != nil })
+	if turn := events.lastTurn(); turn["delivering"] != 0 || turn["read"] != 1 {
+		t.Fatalf("the turn was reported as %v", turn)
+	}
+
+	say(t, run.developer, run.room, "next")
+	if got := texts(t, worker.read(t)); strings.Join(got, "|") != "demo: next" {
+		t.Fatalf("the agent was pushed %q", got)
+	}
+}
+
+// A correction is pushed even when the agent read the `/interrupt` that
+// carried it: the stopped turn resumes on it.
+func TestACorrectionReadOverTheSocketIsStillPushed(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false, "demo")
+	worker, _ := scripted(t, run)
+
+	say(t, run.developer, run.room, "/interrupt use vfs.go")
+	if frame := worker.read(t); kind(frame) != "control_request" {
+		t.Fatalf("the agent was pushed %v before the interrupt", frame)
+	}
+	run.drain(t, 1)
+	worker.endInterrupted(t)
+	if got := texts(t, worker.read(t)); strings.Join(got, "|") != "demo: use vfs.go" {
+		t.Fatalf("the correction arrived as %q", got)
 	}
 }

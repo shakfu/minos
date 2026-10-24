@@ -84,6 +84,8 @@ The fake shows the plumbing works. It says nothing about a model's behaviour, fo
 
 2. **Mark socket deliveries as pushed.** After `messages` hands a message over, it should not be pushed onto stdin as well. The alternative is a push that says which messages the agent has already read. Either way a model reads each message once.
 
+   Built on 2026-10-24: a held message the socket has delivered is left out of the frame, except an interrupt's correction. Rerun, the frames carried 23 messages, not 40. Finding 3 undercounts: `messages` hands over everything since the cursor, so `bob` had read 7 messages and `worker` 10, not only their findings. The reverse duplicate remains: a message pushed first is still returned by a later `messages`.
+
 3. **Address pushes before rooms hold more than one agent.** Mentions or topics would let a broker push only what concerns its agent. Without that, turns grow as agents times messages. A supervisor that forwards selectively is the topology [design.md](design.md) section 5 already describes, and needs no change to the server.
 
 4. **Let an agent wait for a decision without holding its turn.** `submit` would return at once, and the decision would arrive as a pushed message. The agent stays reachable while a person decides, at the cost of one more turn. `await` stays for agents that want to block.
