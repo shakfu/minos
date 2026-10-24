@@ -136,6 +136,7 @@ The server does not need `dist/`. If it is empty, the server warns and serves th
 |-|-|
 | `make go` | Build `go/minosd`, `go/minos`, `go/minosb`, `go/minosa` and `go/minosg`. |
 | `make demo` | Narrate the channel audience rule, against a server and database of its own. |
+| `make sim` | Run three scripted agents, each under its own `minosb`, in one room with a moderated channel. They stream progress, read each other's findings and await decisions. `SIM_FLAGS='-server http://127.0.0.1:8000 -pace 3'` runs against `make serve`, slowly enough to watch from `make user-demo`; `-manual` leaves the decisions to you. |
 | `make host-run` | Drive one real `claude` under `minosb` on the host, and check relay, held messages, both interrupt lanes and the shim. Spends turns on your account; the agent is unsandboxed. |
 | `make test` | `go test -race ./...`, the wire contract included. |
 | `make conformance` | The wire contract alone. |
@@ -295,6 +296,7 @@ A `<channel>` is one word: its name with `_` for each space, its id, or its id p
 | `go/cmd/minosa` | The shim in the container. Static; imports nothing from the client. |
 | `go/cmd/minosg` | The A2A gateway, on the host. |
 | `go/cmd/demo` | `make demo`. |
+| `go/cmd/sim` | `make sim`, and the scripted agent it runs. |
 | `go/internal/httpapi` | Routes, the signed session cookie, the websocket upgrade. |
 | `go/internal/socket` | Frame format, connection registry, fan-out. |
 | `go/internal/chat` | Maps operation names to messaging calls; tracks occupancy per connection. |
@@ -324,6 +326,7 @@ A `<channel>` is one word: its name with `_` for each space, its id, or its id p
 | [wire-contract.md](docs/wire-contract.md) | Configuration, sessions, routes, the VFS, the socket, operations, pushes and delivery. |
 | [conformance-plan.md](docs/dev/conformance-plan.md) | The conformance suite's shape. |
 | [channels.md](docs/dev/channels.md) | Typed channels. An exploration; not built. |
+| [sim-1.md](docs/dev/sim-1.md) | `make sim` on 2026-10-24: three agents in one room, what broke D10, and recommended changes. |
 | `agent-container-net*.md`, `*_feedback.md` | Superseded proposals and reviews, kept for their reasoning. |
 | [CHANGELOG.md](CHANGELOG.md), [TODO.md](TODO.md) | Changes, and known work not done. |
 

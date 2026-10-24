@@ -96,6 +96,11 @@ type Messaging struct {
 	deliver Deliver
 	roster  func() []string
 
+	// agent says which accounts are agents; agentLimit is how many
+	// occupancies they may hold in one room, 0 for no limit.
+	agent      func(string) bool
+	agentLimit int
+
 	// naming is held from checking a permanent name to writing it, so two
 	// creates cannot both find it free. A lock over a unique index, because a
 	// database that already holds duplicates would then refuse to open.
@@ -107,6 +112,14 @@ func New(store *timeline.Timeline, deliver Deliver, roster func() []string) *Mes
 }
 
 func (m *Messaging) Store() *timeline.Timeline { return m.store }
+
+// LimitAgents caps the occupancies agents hold in one room (design.md D10).
+// Call it before serving.
+func (m *Messaging) LimitAgents(agent func(string) bool, limit int) {
+	m.agent, m.agentLimit = agent, limit
+}
+
+func (m *Messaging) isAgent(username string) bool { return m.agent != nil && m.agent(username) }
 
 // -- push shapes -------------------------------------------------------------
 
@@ -799,13 +812,21 @@ func without(first, second []string) []string {
 // A person is in one room at a time, so entering first leaves any other room
 // they are in, on any connection. The connection that held it is told with an
 // exited push; the same room on another connection is left alone.
+//
+// An agent is not a person: runs sharing an account sit in different rooms at
+// once, and each counts against its room's agent limit.
 func (m *Messaging) Enter(username, roomID string) (*EnterReply, error) {
 	room, err := m.requireAccess(roomID, username, timeline.RoomKind)
 	if err != nil {
 		return nil, err
 	}
+	agent := m.isAgent(username)
 	var released []string
-	for _, held := range m.store.OccupanciesElsewhere(username, roomID) {
+	var elsewhere []string
+	if !agent {
+		elsewhere = m.store.OccupanciesElsewhere(username, roomID)
+	}
+	for _, held := range elsewhere {
 		left, err := m.store.Exit(held)
 		if err != nil {
 			return nil, err
@@ -820,9 +841,12 @@ func (m *Messaging) Enter(username, roomID string) (*EnterReply, error) {
 		m.deliver([]string{username}, exitedEvent{Type: ExitedPush, Room: left, Occupancy: held})
 	}
 
-	occupancy, err := m.store.Enter(roomID, username)
+	occupancy, err := m.store.EnterCapped(roomID, username, m.isAgent, m.agentLimit)
 	if errors.Is(err, timeline.ErrNoRoom) {
 		return nil, refuse("No such room: %s", roomID)
+	}
+	if errors.Is(err, timeline.ErrRoomFull) {
+		return nil, refuse("That room already holds %d agent run(s), its limit", m.agentLimit)
 	}
 	if err != nil {
 		return nil, err

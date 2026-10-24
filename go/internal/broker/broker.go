@@ -165,6 +165,13 @@ func Open(config Config) (*Broker, error) {
 		}
 	}
 
+	// The run's place in its room, which the server counts against the
+	// room's agent limit. Released with the connection when the run stops.
+	if _, err := chat.Enter(config.Room); err != nil {
+		chat.Stop()
+		return nil, fmt.Errorf("%s cannot enter room %s: %w", profile.Username, config.Room, err)
+	}
+
 	b.attach()
 
 	// Both handlers run on the goroutine that applies pushes. Neither blocks,

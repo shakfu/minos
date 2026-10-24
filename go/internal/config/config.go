@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -59,6 +60,12 @@ type Config struct {
 	// adapter is coming.
 	Users  map[string]string
 	Admins map[string]bool
+
+	// Agents are the accounts runs speak as, until grants say who is one.
+	// RoomAgents is how many occupancies they may hold in one room, 0 for no
+	// limit: design.md D10, at 1.
+	Agents     map[string]bool
+	RoomAgents int
 }
 
 // Load reads the environment, falling back to the documented defaults.
@@ -85,8 +92,14 @@ func Load() Config {
 		// are not signed with a person's name. Grants replace it.
 		Users:  map[string]string{"demo": "demo", "alice": "alice", "bob": "bob", "worker": "worker"},
 		Admins: map[string]bool{"demo": true},
+
+		Agents:     names("MINOS_AGENTS", "worker"),
+		RoomAgents: number("MINOS_ROOM_AGENTS", 1),
 	}
 }
+
+// IsAgent is whether username is one of Agents.
+func (c Config) IsAgent(username string) bool { return c.Agents[username] }
 
 // DatabasePath is where the timeline lives. Under RunDir unless overridden,
 // because it is runtime state rather than anything a user owns.
@@ -117,6 +130,17 @@ func path(name, fallback string) string {
 		return fallback
 	}
 	return absolute
+}
+
+// names reads a comma-separated list, dropping blanks.
+func names(name, fallback string) map[string]bool {
+	found := map[string]bool{}
+	for _, entry := range strings.Split(text(name, fallback), ",") {
+		if entry = strings.TrimSpace(entry); entry != "" {
+			found[entry] = true
+		}
+	}
+	return found
 }
 
 func number(name string, fallback int) int {

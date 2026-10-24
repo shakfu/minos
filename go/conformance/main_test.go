@@ -16,7 +16,7 @@ import (
 // The demo accounts the contract names. demo is the only administrator.
 const admin = "demo"
 
-var passwords = map[string]string{"demo": "demo", "alice": "alice", "bob": "bob"}
+var passwords = map[string]string{"demo": "demo", "alice": "alice", "bob": "bob", "worker": "worker"}
 
 // The server every test shares, and the argv a fresh one is launched with.
 var (

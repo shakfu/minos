@@ -26,6 +26,8 @@ Read from the environment. A server that ignores these cannot be tested.
 | `MINOS_ROOM_UNENTERED` | `900` | seconds a transient room lasts that nobody has entered |
 | `MINOS_ROOM_SWEEP` | `15` | seconds between sweeps for expired rooms and due archival |
 | `MINOS_WS_PING` | `30` | seconds of client silence before a keepalive frame |
+| `MINOS_AGENTS` | `worker` | comma-separated accounts that runs speak as |
+| `MINOS_ROOM_AGENTS` | `1` | occupancies those accounts may hold in one room; `0` is no limit |
 
 A missing `dist/index.html` is not fatal. The server logs and serves the API alone; `/` then answers 404 while every other route works.
 
@@ -271,6 +273,8 @@ Sync:
 - `exit` may only release an occupancy the same connection took. One another connection holds is refused with `Not in that room`; one nobody holds, such as one already released, answers `{ok: true}`.
 
 - A user occupies at most one room. `enter` first releases every occupancy the user holds in another room, on any connection: each room left is announced with a `room` push, and the user is sent `exited` for each occupancy released. Occupancies in the entered room, on other connections, are kept.
+
+- An account in `MINOS_AGENTS` is exempt from that rule: its occupancies in other rooms are kept. Each counts against `MINOS_ROOM_AGENTS` in its room, so two connections in one room count twice. `enter` past the limit is refused with `That room already holds <n> agent run(s), its limit`. Other accounts are not counted.
 
 - `exit` of an occupancy already released answers `{ok: true}`.
 

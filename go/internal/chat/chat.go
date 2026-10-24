@@ -73,6 +73,7 @@ func New(store *timeline.Timeline, registry *socket.Registry, settings config.Co
 	}
 
 	handler.service = messaging.New(store, deliver, settings.Roster)
+	handler.service.LimitAgents(settings.IsAgent, settings.RoomAgents)
 	registry.Register(Application, handler.Handle)
 	return handler
 }

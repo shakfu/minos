@@ -616,3 +616,40 @@ func TestTheShimReachesTheBrokerOverTheRunsSocket(t *testing.T) {
 func clientPrincipal(username string) client.Principal {
 	return client.Principal{Kind: "user", ID: username}
 }
+
+// -- the agent limit ---------------------------------------------------------
+
+// worker is the default agent and a room admits one: design.md D10.
+func TestASecondRunInARoomIsRefusedAtOpen(t *testing.T) {
+	server := testserver.Start(t, 200)
+	_, developer, _, err := client.Connect(server.Base, "demo", "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(developer.Stop)
+	room, err := developer.OpenRoom([]client.Principal{{Kind: "user", ID: "worker"}}, "Run", "persisted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := Config{Server: server.Base, User: "worker", Password: "worker", Room: room.ID}
+
+	first, err := Open(config)
+	if err != nil {
+		t.Fatalf("the first run cannot open: %v", err)
+	}
+	if second, err := Open(config); err == nil {
+		second.Stop()
+		t.Fatal("a second run opened in the same room")
+	} else if !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("the refusal does not name the limit: %v", err)
+	}
+
+	first.Stop()
+	waitFor(t, "the first run's place to be given up", func() bool {
+		second, err := Open(config)
+		if err == nil {
+			second.Stop()
+		}
+		return err == nil
+	})
+}

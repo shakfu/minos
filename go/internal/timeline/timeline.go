@@ -79,6 +79,9 @@ const (
 // ErrNoRoom is returned by Append for a room that does not exist.
 var ErrNoRoom = errors.New("no such room")
 
+// ErrRoomFull is returned by EnterCapped for an agent past the room's limit.
+var ErrRoomFull = errors.New("room holds its limit of agents")
+
 // ErrNotPending is returned by Approve for a submission already decided.
 var ErrNotPending = errors.New("submission is not pending")
 
@@ -1615,7 +1618,27 @@ func (t *Timeline) Online() map[string]bool {
 // must cancel the deletion. Both happen under the occupancy lock, which
 // DeleteExpired also holds, so a room cannot be entered as it is deleted.
 func (t *Timeline) Enter(roomID, username string) (string, error) {
+	return t.EnterCapped(roomID, username, nil, 0)
+}
+
+// EnterCapped is Enter for a user whom agent reports, refused with
+// ErrRoomFull when the room already holds limit occupancies of such users.
+// Counted under the occupancy lock, so two agents entering at once cannot
+// both pass. A limit of 0 or less, or a nil agent, caps nothing.
+func (t *Timeline) EnterCapped(roomID, username string, agent func(string) bool, limit int) (string, error) {
 	t.live.Lock()
+	if agent != nil && limit > 0 && agent(username) {
+		held := 0
+		for _, seat := range t.occupancies {
+			if seat.room == roomID && agent(seat.user) {
+				held++
+			}
+		}
+		if held >= limit {
+			t.live.Unlock()
+			return "", ErrRoomFull
+		}
+	}
 	cleared, err := t.changed("UPDATE rooms SET empty_since = NULL WHERE id = ?", roomID)
 	if err != nil || !cleared {
 		t.live.Unlock()

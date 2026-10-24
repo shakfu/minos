@@ -4,6 +4,8 @@ import (
 	"errors"
 	"path/filepath"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -142,5 +144,35 @@ func TestARoomNobodyEnteredExpiresAfterItsOwnPeriod(t *testing.T) {
 	}
 	if deleted, err := store.DeleteExpired(unattended.ID); err != nil || !deleted {
 		t.Fatalf("DeleteExpired = %v, %v", deleted, err)
+	}
+}
+
+func TestAgentsEnteringAtOnceNeverPassTheLimit(t *testing.T) {
+	store, _ := fresh(t)
+	room := alone(t, store, User)
+	agent := func(user string) bool { return user == "worker" }
+	var entered atomic.Int32
+	var wait sync.WaitGroup
+	for range 20 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if _, err := store.EnterCapped(room.ID, "worker", agent, 2); err == nil {
+				entered.Add(1)
+			} else if !errors.Is(err, ErrRoomFull) {
+				t.Errorf("EnterCapped = %v", err)
+			}
+		}()
+	}
+	wait.Wait()
+	if entered.Load() != 2 {
+		t.Fatalf("%d agents entered a room of 2", entered.Load())
+	}
+	// A person is not counted, and an agent of 0 limit is not capped.
+	if _, err := store.EnterCapped(room.ID, "alice", agent, 2); err != nil {
+		t.Fatalf("a person was refused: %v", err)
+	}
+	if _, err := store.EnterCapped(room.ID, "worker", agent, 0); err != nil {
+		t.Fatalf("a limit of 0 refused: %v", err)
 	}
 }

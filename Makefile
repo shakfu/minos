@@ -1,6 +1,6 @@
 MEDIA := docs/media
 
-.PHONY: go serve tui user-demo user-alice demo host-run test conformance cover container diagrams clean-diagrams clean
+.PHONY: go serve tui user-demo user-alice demo sim host-run test conformance cover container diagrams clean-diagrams clean
 
 GO_SOURCES := $(shell find go -name '*.go' 2>/dev/null) go/go.mod go/go.sum
 
@@ -43,6 +43,15 @@ user-alice: go/minos
 ## A narrated run of the channel audience rule against a server of its own.
 demo: go/minosd
 	@cd go && MINOS_CONFORMANCE_CMD=$(CURDIR)/go/minosd go run ./cmd/demo
+
+## Three scripted agents, each under its own go/minosb, sharing one room and
+## a moderated channel, against a server of its own that admits all three
+## to one room. To watch it in `make user-demo`, run against `make serve`, which
+## counts only worker as an agent unless given MINOS_AGENTS and MINOS_ROOM_AGENTS:
+##   make sim SIM_FLAGS='-server http://127.0.0.1:8000 -pace 3 [-manual]'
+## -manual leaves the decisions to you.
+sim: go
+	@cd go && go run ./cmd/sim $(SIM_FLAGS)
 
 ## One real claude under go/minosb on the host, no container: relay, held
 ## messages, both interrupt lanes, the shim. Spends turns on your account.
