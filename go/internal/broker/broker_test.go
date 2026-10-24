@@ -619,8 +619,10 @@ func clientPrincipal(username string) client.Principal {
 
 // -- the agent limit ---------------------------------------------------------
 
-// worker is the default agent and a room admits one: design.md D10.
-func TestASecondRunInARoomIsRefusedAtOpen(t *testing.T) {
+// agentRun is a room demo raises for worker, the default agent, and the
+// config of a run in it.
+func agentRun(t *testing.T) (*testserver.Server, Config) {
+	t.Helper()
 	server := testserver.Start(t, 200)
 	_, developer, _, err := client.Connect(server.Base, "demo", "demo")
 	if err != nil {
@@ -631,7 +633,28 @@ func TestASecondRunInARoomIsRefusedAtOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := Config{Server: server.Base, User: "worker", Password: "worker", Room: room.ID}
+	return server, Config{Server: server.Base, User: "worker", Password: "worker", Room: room.ID}
+}
+
+// rival is a second worker session that takes the room's one place while
+// the run's client waits out its reconnect backoff after a restart.
+func rival(t *testing.T, server *testserver.Server, room string) (*client.Client, string) {
+	t.Helper()
+	_, other, _, err := client.Connect(server.Base, "worker", "worker")
+	if err != nil {
+		t.Fatalf("the rival cannot connect: %v", err)
+	}
+	t.Cleanup(other.Stop)
+	occupancy, err := other.Enter(room)
+	if err != nil {
+		t.Fatalf("the rival cannot enter: %v", err)
+	}
+	return other, occupancy
+}
+
+// worker is the default agent and a room admits one: design.md D10.
+func TestASecondRunInARoomIsRefusedAtOpen(t *testing.T) {
+	_, config := agentRun(t)
 
 	first, err := Open(config)
 	if err != nil {
@@ -651,5 +674,42 @@ func TestASecondRunInARoomIsRefusedAtOpen(t *testing.T) {
 			second.Stop()
 		}
 		return err == nil
+	})
+}
+
+func TestARunThatCannotTakeItsPlaceBackIsUnseated(t *testing.T) {
+	defer func(was time.Duration) { reseatWithin = was }(reseatWithin)
+	reseatWithin = 300 * time.Millisecond
+	server, config := agentRun(t)
+	run, err := Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(run.Stop)
+
+	server.Restart(t)
+	rival(t, server, config.Room)
+	waitFor(t, "the run to be unseated", func() bool { return !run.Seated() })
+}
+
+func TestARunTakesItsPlaceBackOnceItIsFree(t *testing.T) {
+	server, config := agentRun(t)
+	run, err := Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(run.Stop)
+
+	server.Restart(t)
+	other, occupancy := rival(t, server, config.Room)
+	waitFor(t, "the run to lose its place", func() bool { return !run.Chat().Holds(run.occupancy) })
+	if !run.Seated() {
+		t.Fatal("a run was unseated inside its window")
+	}
+	if err := other.Exit(occupancy); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the run to take its place back", func() bool {
+		return run.Seated() && run.Chat().Holds(run.occupancy)
 	})
 }

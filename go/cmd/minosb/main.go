@@ -7,7 +7,8 @@
 // Control output is one JSON object per line on stdout, or in the file -events
 // names, for the dispatcher to read: `ready` once the socket is answering, `held` and `turn` as the push
 // lane fills and drains, `interrupt` with each request's outcome, `torn` when
-// delivery gives up, `exited` when the run command ends, `stopped` on the way
+// delivery gives up, `unseated` when the run lost its place in the room and
+// could not take it back, `exited` when the run command ends, `stopped` on the way
 // out. Anything a person should read goes to stderr.
 //
 // With -events, stdout carries the agent's own stream instead, byte for byte.
@@ -49,9 +50,9 @@ import (
 	"minos/internal/link"
 )
 
-// How often the tear check runs. A tear is detected on the push goroutine and
-// reported here, because the dispatcher must hear it even if the container
-// never calls `messages` again.
+// How often the tear and seat checks run. A tear is detected on the push
+// goroutine and reported here, because the dispatcher must hear it even if
+// the container never calls `messages` again.
 const tearInterval = time.Second
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
@@ -180,6 +181,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 			if torn, missing := run.Torn(); torn {
 				report(map[string]any{"event": "torn", "missing": missing})
 				report(map[string]any{"event": "stopped", "reason": "torn"})
+				return stop(command, 1)
+			}
+			if !run.Seated() {
+				report(map[string]any{"event": "unseated", "room": *room})
+				report(map[string]any{"event": "stopped", "reason": "unseated"})
 				return stop(command, 1)
 			}
 		}

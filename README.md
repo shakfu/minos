@@ -37,7 +37,7 @@ The design is in [design.md](docs/dev/design.md) and [recommended-architecture.m
 
 - **Tears stop the run.** If the broker falls further behind than the history limit, it reports `torn` and exits rather than skip messages.
 
-- **Control events for the dispatcher.** `minosb` writes `ready`, `held`, `turn`, `interrupt`, `refused`, `closed`, `undelivered`, `torn`, `exited` and `stopped` to stdout as JSON lines. With `-events FILE` they go to that file, and stdout carries the agent's stream unchanged, for a dispatcher that reads it.
+- **Control events for the dispatcher.** `minosb` writes `ready`, `held`, `turn`, `interrupt`, `refused`, `closed`, `undelivered`, `torn`, `unseated`, `exited` and `stopped` to stdout as JSON lines. With `-events FILE` they go to that file, and stdout carries the agent's stream unchanged, for a dispatcher that reads it.
 
 - **Interrupts.** A turn stops on `{"op":"interrupt","id":"..."}` on `minosb`'s stdin, or on `/interrupt [correction]` in the room from a user named in `-interrupters`. The correction is pushed when the stopped turn ends.
 

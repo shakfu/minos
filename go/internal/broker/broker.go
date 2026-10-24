@@ -60,6 +60,12 @@ const payloadFence = "minos-payload"
 // pushed once the stopped turn ends.
 const interruptCommand = "/interrupt"
 
+// How long a run that lost its place in the room keeps asking for it back. A
+// reconnect can reach the server before it has released the dead connection's
+// place, and the room's agent limit then refuses the run its own seat. A
+// variable so tests can shorten it.
+var reseatWithin = 10 * time.Second
+
 // Config is one run, as the dispatcher describes it.
 type Config struct {
 	Server   string
@@ -115,6 +121,11 @@ type Broker struct {
 
 	stopped chan struct{}
 	once    sync.Once
+
+	// occupancy is the run's place in its room; unseated is when it was
+	// first found lost, zero while it is held. Seated's alone.
+	occupancy string
+	unseated  time.Time
 }
 
 // Open logs in, syncs, and checks that the run's spaces are reachable. A run
@@ -167,7 +178,7 @@ func Open(config Config) (*Broker, error) {
 
 	// The run's place in its room, which the server counts against the
 	// room's agent limit. Released with the connection when the run stops.
-	if _, err := chat.Enter(config.Room); err != nil {
+	if b.occupancy, err = chat.Enter(config.Room); err != nil {
 		chat.Stop()
 		return nil, fmt.Errorf("%s cannot enter room %s: %w", profile.Username, config.Room, err)
 	}
@@ -200,6 +211,27 @@ func (b *Broker) attach() {
 	b.earlier = log[0].Seq - 1
 	b.delivered = b.earlier
 	b.pushed = log[len(log)-1].Seq
+}
+
+// Seated is whether the run still holds its place in the room, entering again
+// if a reconnect lost it. It answers false once the place has been refused for
+// reseatWithin: the server no longer counts the run against the room's agent
+// limit (design.md D10), so the run must stop. Call it from one goroutine.
+func (b *Broker) Seated() bool {
+	if b.chat.Holds(b.occupancy) {
+		b.unseated = time.Time{}
+		return true
+	}
+	if b.chat.Connected() {
+		if occupancy, err := b.chat.Enter(b.config.Room); err == nil {
+			b.occupancy, b.unseated = occupancy, time.Time{}
+			return true
+		}
+	}
+	if b.unseated.IsZero() {
+		b.unseated = time.Now()
+	}
+	return time.Since(b.unseated) < reseatWithin
 }
 
 // Stop releases the session. The container's socket is closed by its owner.
