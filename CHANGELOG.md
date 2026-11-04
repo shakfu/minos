@@ -8,7 +8,7 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 ### Added
 
-- A room admits one agent run by default, enforcing D10 of [design.md](docs/dev/design.md). `MINOS_AGENTS` (default `worker`) names the accounts runs speak as. `MINOS_ROOM_AGENTS` (default 1, 0 for no limit) caps the occupancies they hold in one room. `minosb` enters its room on start and fails if refused. A run that loses its place on a reconnect asks for it back for 10 s, then reports `unseated` and stops; the retry covers a reconnect that reaches the server before it has released the dead connection's place. Agent accounts are exempt from one room per person: under that rule, a `worker` run entering a second room released its first, and a third run could then enter that one. The limit is server-wide; a per-room override was deferred.
+- A room admits one agent run by default, enforcing D10 of [design.md](docs/dev/design.md). `MINOS_AGENTS` (default `worker`) names the accounts runs speak as. `MINOS_ROOM_AGENTS` (default 1, 0 for no limit) caps the occupancies they hold in one room. `minosb` enters its room on start and fails if refused. A run that loses its place on a reconnect asks for it back for 45 s, then reports `unseated` and stops; the retry covers a reconnect that reaches the server before it has released the dead connection's place. 45 s outlasts the server's keepalive, 30 s of silence and a 10 s write; at 10 s, a server that missed the close still held the seat, and a brief network fault ended the run. Agent accounts are exempt from one room per person: under that rule, a `worker` run entering a second room released its first, and a third run could then enter that one. The limit is server-wide; a per-room override was deferred.
 
 - `make sim` runs three scripted agents through `minosd`, `minosb` and `minosa`, with no model. They share one room, stream progress with `say`, and wait on each other's findings over `messages`. Each submits a proposal and awaits the decision. A scripted moderator approves two and rejects one; `-manual` leaves the decisions to a person in the terminal client. `-server URL` runs against a running server, so the terminal client can watch, and `-pace F` slows the script. The agents run as `alice`, `bob` and `worker`. A broker drops its own account's messages, so agents sharing `worker` could not read each other.
 
@@ -35,6 +35,16 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 - The Python tree: `server/`, `messaging/`, `tui/`, the pytest suite, `pyproject.toml`, the uv venv, and the `install`, `serve-go` and `conformance-go` make targets. A second implementation of the core cost about 55% more code per feature, and it described behaviour `go/` already had. Three parts were ported rather than dropped: the conformance suite, the only black-box test of the server; the terminal client, its only client; and the audience demo.
 
 ### Fixed
+
+- `minosb` could drop `closed`. The relay reported it after closing the agent's stdin, so an agent that exited at once could end the run first, and nothing is written after `stopped`. `closed` is now reported before the close. A failed close is reported as `unclosed`.
+
+- A run refused at start left its session logged in on the server, until the session limit. The refused paths stopped the connection but did not log out. A dispatcher retrying a full room added one session per try.
+
+- A push that failed to write left a `-linger` run open until the next room message. The relay had marked a turn as started, and the failure cleared that mark without telling the loop that arms the linger.
+
+- `make host-run` with an `-out` directory used before failed at once: the events FIFO already existed. An existing FIFO is now reused.
+
+- The terminal client could miss a push that arrived while a key's request was outstanding. The redraw was skipped when the UI's lock was held, and nothing retried it; it is now retried after 10 ms. `TestTheScreenRedrawsWhileAKeyAwaitsTheServer` failed about 1 run in 13.
 
 - A message the agent read with `minosa messages` during a turn was pushed onto its stdin again when the turn ended. The two lanes keep separate cursors, and held messages were queued before the read. A held message the socket has delivered is now left out of the frame, and the `turn` event counts it as `read`. A correction from `/interrupt` is pushed regardless, since the stopped turn resumes on it. In `make sim` the frames carried 23 messages instead of 40.
 

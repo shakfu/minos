@@ -18,6 +18,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -119,8 +120,11 @@ func run(step time.Duration, out string) int {
 	// Events through a FIFO, read live; stdout is then the agent's stream,
 	// kept whole in agent.jsonl.
 	fifo := filepath.Join(out, "events.fifo")
+	// A FIFO left by an earlier run into the same -out is reused; it holds no data.
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		return fail("%v", err)
+		if info, statErr := os.Lstat(fifo); !errors.Is(err, os.ErrExist) || statErr != nil || info.Mode()&os.ModeNamedPipe == 0 {
+			return fail("%v", err)
+		}
 	}
 	stream, err := os.Create(filepath.Join(out, "agent.jsonl"))
 	if err != nil {

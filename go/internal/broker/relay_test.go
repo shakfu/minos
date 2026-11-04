@@ -670,6 +670,71 @@ func TestWhatArrivesAfterTheCloseIsReported(t *testing.T) {
 	}
 }
 
+// A push that fails starts no turn, so the linger still runs out and the run
+// ends. It had waited for the end of a turn that never began.
+func TestAFailedPushStillLetsTheLingerRunOut(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	worker, events := lingering(t, run, 500*time.Millisecond)
+	worker.stdin.(*io.PipeReader).Close()
+	worker.endTurn(t, "done")
+	// The relayed turn's own echo wakes the relay; let it pass, or it arms
+	// the linger after the failure and hides the fault.
+	waitFor(t, "the turn's echo", func() bool {
+		log := run.worker.Chat().Log(run.room)
+		return len(log) > 0 && log[len(log)-1].Body == "done"
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	say(t, run.developer, run.room, "unheard")
+	waitFor(t, "the failed push", func() bool { return events.seen("unpushed") == 1 })
+	waitFor(t, "the close", func() bool { return events.seen("closed") == 1 })
+}
+
+// closeProbe is stdin that records what the dispatcher had heard when it
+// was closed, and fails the close with failure.
+type closeProbe struct {
+	io.Writer
+	events  *control
+	failure error
+	heard   chan int
+}
+
+func (p *closeProbe) Close() error {
+	p.heard <- p.events.seen("closed")
+	return p.failure
+}
+
+// `closed` is reported before stdin closes. Reported after, it raced the
+// agent's exit, and a dispatcher that stops reading at `stopped` lost it.
+func TestClosedIsReportedBeforeTheAgentsInputEnds(t *testing.T) {
+	for _, failure := range []error{nil, io.ErrClosedPipe} {
+		run := dispatch(t, config.HistoryLimit, false)
+		fromAgent, said := io.Pipe()
+		t.Cleanup(func() { said.Close() })
+		events := &control{}
+		stdin := &closeProbe{Writer: io.Discard, events: events, failure: failure, heard: make(chan int, 1)}
+		relay := NewRelay(run.worker, claudeAdapter{}, stdin, events.record)
+		relay.Linger(50 * time.Millisecond)
+		go relay.Deliver()
+		go func() { _ = relay.Read(fromAgent) }()
+		(&agent{stdout: said}).endTurn(t, "done")
+
+		select {
+		case seen := <-stdin.heard:
+			if seen != 1 {
+				t.Fatalf("closed had been reported %d times when stdin closed", seen)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("stdin was never closed")
+		}
+		want := 0
+		if failure != nil {
+			want = 1
+		}
+		waitFor(t, "the close's outcome", func() bool { return events.seen("unclosed") == want })
+	}
+}
+
 // -- one delivery per message ------------------------------------------------
 
 // lastTurn is the last `turn` event reported.

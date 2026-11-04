@@ -250,20 +250,20 @@ func (r *Relay) idle() bool {
 	return !r.inTurn && len(r.held) == 0
 }
 
-// close tells the room, then ends the agent's input. The notice goes first:
-// the agent may exit at once, and the run with it. The writer closes stdin
-// after the frames queued before it.
+// close tells the room, then ends the agent's input. The notice and the
+// `closed` event both go first: the agent may exit at once, and the run with
+// it, before a later report is written. The writer closes stdin after the
+// frames queued before it.
 func (r *Relay) close() {
 	r.closed = true
 	if err := r.broker.relay(closedNotice); err != nil {
 		r.control(map[string]any{"event": "unrelayed", "error": err.Error()})
 	}
 	r.enqueue(func() {
-		event := map[string]any{"event": "closed", "linger": r.linger.String()}
+		r.control(map[string]any{"event": "closed", "linger": r.linger.String()})
 		if err := r.stdin.Close(); err != nil {
-			event["error"] = err.Error()
+			r.control(map[string]any{"event": "unclosed", "error": err.Error()})
 		}
-		r.control(event)
 	})
 }
 
@@ -417,10 +417,12 @@ func (r *Relay) write(texts []string) {
 		_, err = r.stdin.Write(frame)
 	}
 	if err != nil {
-		// Nothing reached the agent, so no turn started.
+		// Nothing reached the agent, so no turn started. Deliver must hear it,
+		// or the linger waits for the end of a turn that never began.
 		r.mutex.Lock()
 		r.inTurn = false
 		r.mutex.Unlock()
 		r.control(map[string]any{"event": "unpushed", "error": err.Error()})
+		r.broker.wake()
 	}
 }

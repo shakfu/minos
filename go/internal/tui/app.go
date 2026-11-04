@@ -861,6 +861,9 @@ func (u *Ui) dispatch(event *tcell.EventKey) (later []tcell.Event, quit bool) {
 			if u.owner.TryLock() {
 				u.draw()
 				u.owner.Unlock()
+			} else {
+				// Retried, not dropped: this may be the only wake a push sends.
+				time.AfterFunc(10*time.Millisecond, u.wake)
 			}
 		case *tcell.EventPaste:
 			pasting = polled.Start()

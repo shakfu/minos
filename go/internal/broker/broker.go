@@ -63,8 +63,10 @@ const interruptCommand = "/interrupt"
 // How long a run that lost its place in the room keeps asking for it back. A
 // reconnect can reach the server before it has released the dead connection's
 // place, and the room's agent limit then refuses the run its own seat. A
-// variable so tests can shorten it.
-var reseatWithin = 10 * time.Second
+// server that missed the close finds out at its next keepalive: 30 s of
+// silence (MINOS_WS_PING's default), then up to 10 s to write it. A variable
+// so tests can shorten it.
+var reseatWithin = 45 * time.Second
 
 // Config is one run, as the dispatcher describes it.
 type Config struct {
@@ -143,6 +145,12 @@ func Open(config Config) (*Broker, error) {
 		return nil, err
 	}
 
+	// A refused run releases its session too, or each retry leaves one logged in.
+	abandon := func() {
+		chat.Stop()
+		_ = session.Logout()
+	}
+
 	b := &Broker{
 		session:   session,
 		chat:      chat,
@@ -157,11 +165,11 @@ func Open(config Config) (*Broker, error) {
 
 	if slices.Contains(config.Interrupters, profile.Username) {
 		// The run's own relayed turn would stop the turn after it.
-		chat.Stop()
+		abandon()
 		return nil, fmt.Errorf("%s cannot be an interrupter of its own run", profile.Username)
 	}
 	if _, ok := chat.Space(config.Room); !ok {
-		chat.Stop()
+		abandon()
 		return nil, fmt.Errorf("%s cannot read room %s", profile.Username, config.Room)
 	}
 	if config.Channel != "" {
@@ -170,7 +178,7 @@ func Open(config Config) (*Broker, error) {
 		// for itself rather than making the dispatcher do it first.
 		if _, ok := chat.Space(config.Channel); !ok {
 			if _, err := chat.Subscribe(config.Channel); err != nil {
-				chat.Stop()
+				abandon()
 				return nil, fmt.Errorf("%s cannot read channel %s: %w", profile.Username, config.Channel, err)
 			}
 		}
@@ -179,7 +187,7 @@ func Open(config Config) (*Broker, error) {
 	// The run's place in its room, which the server counts against the
 	// room's agent limit. Released with the connection when the run stops.
 	if b.occupancy, err = chat.Enter(config.Room); err != nil {
-		chat.Stop()
+		abandon()
 		return nil, fmt.Errorf("%s cannot enter room %s: %w", profile.Username, config.Room, err)
 	}
 
