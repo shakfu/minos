@@ -25,7 +25,10 @@ func TestWrapFillsLinesAsTextwrapDoes(t *testing.T) {
 		{"hello world", 11, []string{"hello world"}},
 		{"abcdefghij", 4, []string{"abcd", "efgh", "ij"}},
 		{"ab cdefghij", 5, []string{"ab cd", "efghi", "j"}},
-		{"a\tb\nc", 10, []string{"a b c"}},
+		{"a\tb\nc", 10, []string{"a b", "c"}},
+		// A reply's paragraphs and list items keep their lines.
+		{"one two\n\n\n- x\n- y\n", 5, []string{"one", "two", "", "- x", "- y"}},
+		{"\n\nab\n  \n", 10, []string{"ab"}},
 		{"", 10, nil},
 		{"   ", 10, nil},
 		// Two cells each: a line of five cells holds two.

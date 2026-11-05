@@ -24,6 +24,8 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 - `minosb -events FILE` appends control events to FILE, and stdout then carries the agent's stream byte for byte. pma reads cost, summary and progress from its worker's output, and that output was consumed by `minosb`. A flag over always passing the stream through, because `make host-run` and any dispatcher reading events on stdout keep working.
 
+- The terminal client draws a message body as Markdown: headings, emphasis, inline and fenced code, lists, quotes, rules and links. Agents write Markdown, and its markers shown raw hid the structure. Every author's messages render, because the client cannot tell an agent from a person: `MINOS_AGENTS` is server configuration, and the wire does not carry it. A link shows its target beside its label, because the label is untrusted text. Tables are shown as written. A renderer over tcell styles, rather than glamour, because glamour emits ANSI escapes and `put` draws them as `?`.
+
 - `make install` builds the five binaries and copies them to `~/.local/bin`; `make uninstall` removes them. `BINDIR` overrides the destination.
 
 - `docs/media/integration.d2`, the pma run on the host from [pma-integration.md](docs/dev/pma-integration.md) 4.2: no container, and the password exposure that follows. `make diagrams` renders it.
@@ -37,6 +39,10 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 - The Python tree: `server/`, `messaging/`, `tui/`, the pytest suite, `pyproject.toml`, the uv venv, and the `install`, `serve-go` and `conformance-go` make targets. A second implementation of the core cost about 55% more code per feature, and it described behaviour `go/` already had. Three parts were ported rather than dropped: the conformance suite, the only black-box test of the server; the terminal client, its only client; and the audience demo.
 
 ### Fixed
+
+- The terminal client keeps a message's line breaks. Wrapping collapsed every newline, so an agent's paragraphs and list items ran together as one paragraph. Runs of blank lines keep one.
+
+- The terminal client takes back "No rooms yet" once a room arrives. A user whose first room came after start-up, such as one a dispatcher founded, saw the notice under that room.
 
 - `minosb` could drop `closed`. The relay reported it after closing the agent's stdin, so an agent that exited at once could end the run first, and nothing is written after `stopped`. `closed` is now reported before the close. A failed close is reported as `unclosed`.
 

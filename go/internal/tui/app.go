@@ -255,7 +255,7 @@ func newUi(screen tcell.Screen, c *client.Client, profile client.Profile) *Ui {
 		}
 	}
 	if len(c.Rooms()) == 0 {
-		u.notice("No rooms yet. Tab to PEOPLE and press Enter on someone, or /open <user>.")
+		u.notice(noRooms)
 	}
 	// Where the work is, which is what a session opens to want to know.
 	u.showTab(tabOverview)
@@ -266,6 +266,9 @@ func newUi(screen tcell.Screen, c *client.Client, profile client.Profile) *Ui {
 	return u
 }
 
+// noRooms is said at the start to a user with no rooms, and taken back when one arrives.
+const noRooms = "No rooms yet. Tab to PEOPLE and press Enter on someone, or /open <user>."
+
 // watch notices what changed under the interface: rooms that are new, and an
 // occupancy the server released because the user entered a room elsewhere.
 func (u *Ui) watch() {
@@ -275,6 +278,7 @@ func (u *Ui) watch() {
 			continue
 		}
 		u.known[id] = true
+		u.unsay(noRooms)
 		if room.CreatedBy == me {
 			continue
 		}
@@ -319,6 +323,13 @@ func (u *Ui) notice(text string) {
 	if len(u.notices) > noticeKeep {
 		u.notices = slices.Clone(u.notices[len(u.notices)-noticeKeep:])
 	}
+}
+
+// unsay drops a notice that is no longer true.
+func (u *Ui) unsay(text string) {
+	u.mutex.Lock()
+	defer u.mutex.Unlock()
+	u.notices = slices.DeleteFunc(u.notices, func(notice string) bool { return notice == text })
 }
 
 func (u *Ui) recentNotices(n int) []string {
@@ -2654,9 +2665,24 @@ func (u *Ui) ambiguousTitles(spaces []client.Room) map[string]bool {
 	return twice
 }
 
+// line is one drawn row: text in style, or spans when it holds several styles.
 type line struct {
 	text  string
 	style tcell.Style
+	spans []span
+}
+
+func (u *Ui) drawLine(y, x int, l line, width int) {
+	if l.spans == nil {
+		u.put(y, x, l.text, width, l.style, true)
+		return
+	}
+	for _, s := range l.spans {
+		size := min(width, cells(s.text))
+		u.put(y, x, s.text, size, s.style, false)
+		x, width = x+size, width-size
+	}
+	u.put(y, x, "", width, l.style, true)
 }
 
 // drawPane is one space: its header, then its log or its items.
@@ -2696,7 +2722,7 @@ func (u *Ui) drawPane(top, width, bottom int) {
 	u.scroll = max(0, min(u.scroll, max(0, len(lines)-visible)))
 	end := len(lines) - u.scroll
 	for offset, line := range lines[max(0, end-visible):end] {
-		u.put(top+2+offset, left, line.text, pane, line.style, true)
+		u.drawLine(top+2+offset, left, line, pane)
 	}
 
 	// Only a room has a read cursor, and only one the user is in counts as seen: a
@@ -2717,9 +2743,9 @@ func (u *Ui) drawFeed(space client.Room, top, pane, bottom int) {
 	focus, focusEnd, index := 0, 0, 0
 	dim := u.tint(plain, "dim")
 	section := func(title string, messages []client.Message, style tcell.Style) {
-		lines = append(lines, line{title, plain.Bold(true)})
+		lines = append(lines, line{title, plain.Bold(true), nil})
 		if len(messages) == 0 {
-			lines = append(lines, line{"  (none)", dim})
+			lines = append(lines, line{"  (none)", dim, nil})
 		}
 		for _, message := range messages {
 			marker, itemStyle := "  ", style
@@ -2727,17 +2753,17 @@ func (u *Ui) drawFeed(space client.Room, top, pane, bottom int) {
 				marker, itemStyle, focus = "> ", itemStyle.Reverse(true), len(lines)
 			}
 			lines = append(lines, line{fmt.Sprintf("%s%s %-*s %s", marker, stamp(message.At, "15:04"),
-				authorWidth, client.Prefix(message.Author, authorWidth), subjectOf(message)), itemStyle})
+				authorWidth, client.Prefix(message.Author, authorWidth), subjectOf(message)), itemStyle, nil})
 			if message.Seq == u.expanded {
-				body := wrap(message.Body, max(10, pane-4))
+				body := markdown(message.Body, max(10, pane-4), plain, dim)
 				if strings.TrimSpace(message.Body) == subjectOf(message) {
 					body = nil // the subject was the whole of it
 				}
 				for _, part := range body {
-					lines = append(lines, line{"    " + part, plain})
+					lines = append(lines, line{style: plain, spans: append([]span{{"    ", plain}}, part...)})
 				}
 				if len(body) == 0 {
-					lines = append(lines, line{"    (nothing more)", dim})
+					lines = append(lines, line{"    (nothing more)", dim, nil})
 				}
 			}
 			if index == u.item {
@@ -2745,7 +2771,7 @@ func (u *Ui) drawFeed(space client.Room, top, pane, bottom int) {
 			}
 			index++
 		}
-		lines = append(lines, line{"", plain})
+		lines = append(lines, line{"", plain, nil})
 	}
 	section(fmt.Sprintf("Pending (%d)", len(pending)), pending, u.tint(plain.Bold(true), "me"))
 	section("Opened", opened, dim)
@@ -2755,7 +2781,7 @@ func (u *Ui) drawFeed(space client.Room, top, pane, bottom int) {
 	visible := max(0, bottom-(top+2))
 	start := max(0, min(focusEnd-visible+1, focus))
 	for offset, line := range lines[start:min(len(lines), start+visible)] {
-		u.put(top+2+offset, left, line.text, pane, line.style, true)
+		u.drawLine(top+2+offset, left, line, pane)
 	}
 }
 
@@ -2777,13 +2803,27 @@ func (u *Ui) paneLines(space client.Room, pane int) []line {
 
 		prefix := fmt.Sprintf("%s %-*s ", stamp(message.At, "15:04"), authorWidth, client.Prefix(author, authorWidth))
 		indent := uniseg.StringWidth(prefix)
-		wrapped := wrap(message.Body, max(10, pane-indent))
-		if len(wrapped) == 0 {
-			wrapped = []string{""}
+		if message.Kind == "event" {
+			wrapped := wrap(message.Body, max(10, pane-indent))
+			if len(wrapped) == 0 {
+				wrapped = []string{""}
+			}
+			lines = append(lines, line{text: prefix + wrapped[0], style: style})
+			for _, extra := range wrapped[1:] {
+				lines = append(lines, line{text: strings.Repeat(" ", indent) + extra, style: style})
+			}
+			continue
 		}
-		lines = append(lines, line{prefix + wrapped[0], style})
-		for _, extra := range wrapped[1:] {
-			lines = append(lines, line{strings.Repeat(" ", indent) + extra, style})
+		rendered := markdown(message.Body, max(10, pane-indent), style, u.tint(style, "dim"))
+		if len(rendered) == 0 {
+			rendered = [][]span{nil}
+		}
+		for i, part := range rendered {
+			lead := strings.Repeat(" ", indent)
+			if i == 0 {
+				lead = prefix
+			}
+			lines = append(lines, line{style: style, spans: append([]span{{lead, style}}, part...)})
 		}
 	}
 
@@ -2798,14 +2838,14 @@ func (u *Ui) sessionLines(pane int) []line {
 		return nil
 	}
 	dim := u.tint(plain, "dim")
-	lines := []line{{strings.Repeat("-", max(4, min(pane, 40))), dim}}
+	lines := []line{{strings.Repeat("-", max(4, min(pane, 40))), dim, nil}}
 	for _, text := range recent {
 		wrapped := wrap(text, max(10, pane-2))
 		if len(wrapped) == 0 {
 			wrapped = []string{""}
 		}
 		for _, part := range wrapped {
-			lines = append(lines, line{"  " + part, dim})
+			lines = append(lines, line{"  " + part, dim, nil})
 		}
 	}
 	return lines
@@ -2820,14 +2860,14 @@ func (u *Ui) drawResults(top, width, bottom int) {
 
 	lines := make([]line, 0, len(u.results))
 	for _, text := range u.results {
-		lines = append(lines, line{text, plain})
+		lines = append(lines, line{text, plain, nil})
 	}
 	lines = append(lines, u.sessionLines(pane)...)
 	visible := max(0, bottom-(top+2))
 	u.scroll = max(0, min(u.scroll, max(0, len(lines)-visible)))
 	end := len(lines) - u.scroll
 	for offset, line := range lines[max(0, end-visible):end] {
-		u.put(top+2+offset, left, line.text, pane, line.style, true)
+		u.drawLine(top+2+offset, left, line, pane)
 	}
 }
 
@@ -2909,9 +2949,29 @@ func ljust(text string, width int) string {
 	return text
 }
 
-// wrap fills lines of at most width cells the way Python's textwrap does:
-// whitespace collapses, and a word longer than a line fills what is left of it.
+// wrap fills lines of at most width cells the way Python's textwrap does, one
+// line of text at a time: other whitespace collapses, runs of blank lines keep
+// one, and a word longer than a line fills what is left of it.
 func wrap(text string, width int) []string {
+	var lines []string
+	blank := false
+	for _, line := range strings.Split(text, "\n") {
+		filled := fill(line, width)
+		if len(filled) == 0 {
+			blank = len(lines) > 0
+			continue
+		}
+		if blank {
+			lines = append(lines, "")
+			blank = false
+		}
+		lines = append(lines, filled...)
+	}
+	return lines
+}
+
+// fill is wrap for text with no line breaks of its own.
+func fill(text string, width int) []string {
 	var lines []string
 	var current strings.Builder
 	used := 0

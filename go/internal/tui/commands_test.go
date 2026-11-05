@@ -485,6 +485,7 @@ func TestAnInvitationIsOfferedAndHeldWhileInARoom(t *testing.T) {
 	demo, alice := connect(t, server.Base, "demo"), connect(t, server.Base, "alice")
 	invite := []client.Principal{{Kind: "user", ID: "alice"}}
 	ui := headless(alice)
+	ui.mustSay(t, "No rooms yet")
 
 	first, err := demo.OpenRoom(invite, "First", "persisted")
 	if err != nil {
@@ -493,6 +494,9 @@ func TestAnInvitationIsOfferedAndHeldWhileInARoom(t *testing.T) {
 	waitFor(t, "the first invitation", func() bool { _, ok := alice.Rooms()[first.ID]; return ok })
 	ui.watch()
 	ui.mustSay(t, "You were invited to First")
+	if _, said := ui.said("No rooms yet"); said {
+		t.Fatal("the notice that alice has no rooms outlived her first")
+	}
 	if ui.occupancy != "" {
 		t.Fatal("an invitation pulled alice into the room")
 	}
