@@ -24,6 +24,8 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 - `minosb -events FILE` appends control events to FILE, and stdout then carries the agent's stream byte for byte. pma reads cost, summary and progress from its worker's output, and that output was consumed by `minosb`. A flag over always passing the stream through, because `make host-run` and any dispatcher reading events on stdout keep working.
 
+- `make install` builds the five binaries and copies them to `~/.local/bin`; `make uninstall` removes them. `BINDIR` overrides the destination.
+
 - `docs/media/integration.d2`, the pma run on the host from [pma-integration.md](docs/dev/pma-integration.md) 4.2: no container, and the password exposure that follows. `make diagrams` renders it.
 
 ### Changed

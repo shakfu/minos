@@ -1,6 +1,6 @@
 MEDIA := docs/media
 
-.PHONY: go serve tui user-demo user-alice demo sim host-run test conformance cover container diagrams clean-diagrams clean
+.PHONY: go install uninstall serve tui user-demo user-alice demo sim host-run test conformance cover container diagrams clean-diagrams clean
 
 GO_SOURCES := $(shell find go -name '*.go' 2>/dev/null) go/go.mod go/go.sum
 
@@ -20,6 +20,16 @@ go/minosb: $(GO_SOURCES)
 
 go/minosg: $(GO_SOURCES)
 	@cd go && go build -o minosg ./cmd/minosg
+
+## The five binaries into $(BINDIR), or out of it. BINDIR overrides the destination.
+BINDIR ?= $(HOME)/.local/bin
+install: go
+	@install -d $(BINDIR)
+	@install -m 755 go/minosd go/minos go/minosb go/minosa go/minosg $(BINDIR)
+	@echo "minos tools installed in $(BINDIR)"
+
+uninstall:
+	@rm -f $(addprefix $(BINDIR)/,minosd minos minosb minosa minosg)
 
 ## Static, because it runs in a container that carries nothing else.
 go/minosa: $(GO_SOURCES)
