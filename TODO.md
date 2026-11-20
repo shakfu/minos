@@ -14,11 +14,11 @@ Items marked `pma backend` make minos the place pma's agents run, in place of he
 
 - [ ] pma backend: agent state in the client. pma reads state from `-events` (`pushed`, `turn` with `delivering: 0`, `stopped`; `docs/minosb-events.md`), so pma needs nothing more. Open: the client lists a `waiting` room under what waits on you in `OVERVIEW`. Clients never see `-events`, so this needs the state on the wire. herdr's `blocked` waits for permission requests.
 
-- [ ] pma backend: adapters for pma's workers (decided 2026-11-20: minos runs agents other than Claude). Replaces the Medium item that asked whether to. There are two kinds:
-  - stream: one long-lived process that takes stdin frames, as `claudeAdapter`;
-  - one-shot: the broker runs the CLI once per turn and resumes its session by id. `Interrupt` kills the process.
-
-  pma ships `claude`, `codex` (`exec`, `exec resume`), `opencode` (`run --session`), `pi`, `omp`, `gilda`, `minima`, `hax`, `myra` and `hilda`. Each adapter states how a turn's text is passed, what ends a turn, the session id, the resume flag, and the cost where reported. [agentpipe](https://github.com/kevinelliott/agentpipe) `pkg/adapters/` records these for 15 CLIs. A worker without an adapter keeps today's side broker and `minosa`.
+- [ ] pma backend: adapters for pma's workers (decided 2026-11-20: minos runs agents other than Claude).
+  - Done: the one-shot kind, `minosb -agent-spec FILE` (`docs/one-shot-agents.md`), with specs for `gilda`, `hax`, `minima`, `hilda` and `myra` in `agents/`.
+  - Done: the ACP kind, `minosb -agent acp`, and the conformance suite `go/acpconformance` (`docs/acp.md`). `myra --acp` passes it.
+  - Next: an ACP server in gilda, hax, minima and hilda, each passing `make acp-conformance`.
+  - Not covered: codex, opencode, pi, omp. Their output was never read.
 
 - [ ] pma backend: move an open client into a room, for pma's `H` from its web. Done: `minos -room ID [-exit-with USER]`. Open: when a client is already open elsewhere, a server request moves it into the room, so `H` needs no new terminal. Only the user's own sessions may be moved.
 

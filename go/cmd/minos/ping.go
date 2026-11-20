@@ -27,6 +27,8 @@ var capabilities = []string{
 	"minosb.end",
 	"minosb.pushed",
 	"minosb.session",
+	"minosb.agent-spec",
+	"minosb.acp",
 }
 
 // Exit statuses of `minos ping`, for a dispatcher to tell apart.

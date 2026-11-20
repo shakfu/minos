@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -552,4 +553,85 @@ func TestARunThatEndsCleanlyFreesItsSeatForTheNext(t *testing.T) {
 			t.Fatalf("run %d exited %d: %s", n, code, stderr.String())
 		}
 	}
+}
+
+// A one-shot agent under minosb: the task is the first run, a person's
+// message resumes it, and /end ends the run. stdout is the CLI's own output.
+func TestAOneShotAgentRunsOncePerTurnUnderMinosb(t *testing.T) {
+	server := testserver.Start(t, 200)
+	_, developer, _, err := client.Connect(server.Base, "demo", "demo")
+	if err != nil {
+		t.Fatalf("the developer cannot connect: %v", err)
+	}
+	t.Cleanup(developer.Stop)
+	room, err := developer.OpenRoom([]client.Principal{{Kind: "user", ID: "bob"}}, "Run", "persisted")
+	if err != nil {
+		t.Fatalf("cannot open the run's room: %v", err)
+	}
+	t.Setenv("MINOS_PASSWORD", "bob")
+	dir := t.TempDir()
+	spec := filepath.Join(dir, "fake.json")
+	if err := os.WriteFile(spec, []byte(`{"name":"fake","resume":["--resume","{session}"],"type":"result","text":"text","session":"session_id"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cli := `session=s1; [ "$1" = --resume ] && session="$2 again"; ` +
+		`printf '{"type":"result","text":"%s","session_id":"s1"}\n' "$session"`
+	eventsPath := filepath.Join(dir, "events")
+
+	var out lockedBuffer
+	var stderr bytes.Buffer
+	exited := make(chan int, 1)
+	go func() {
+		exited <- run([]string{
+			"-server", server.Base, "-user", "bob", "-room", room.ID,
+			"-socket", testserver.SocketPath(t), "-events", eventsPath,
+			"-agent-spec", spec, "-task", "begin",
+			"--", "/bin/sh", "-c", cli, "fake", "{resume}",
+		}, &out, &stderr)
+	}()
+	waitForBody(t, developer, room.ID, "s1")
+	if err := developer.Send(room.ID, "more"); err != nil {
+		t.Fatal(err)
+	}
+	waitForBody(t, developer, room.ID, "s1 again")
+	if err := developer.Send(room.ID, "/end"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-exited:
+		if code != 0 {
+			t.Fatalf("minosb exited %d: %s", code, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the run did not end")
+	}
+	var names []string
+	for _, event := range eventsIn(t, eventsPath) {
+		names = append(names, fmt.Sprint(event["event"]))
+	}
+	if got := strings.Join(names, " "); got != "ready pushed session turn pushed turn closed exited stopped" {
+		t.Fatalf("the events were %s", got)
+	}
+	if got := strings.Count(out.String(), `"type":"result"`); got != 2 {
+		t.Fatalf("stdout held %d result records: %q", got, out.String())
+	}
+}
+
+// lockedBuffer is a stdout a test reads after minosb writes it from several
+// goroutines.
+type lockedBuffer struct {
+	mutex sync.Mutex
+	b     bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+	return l.b.String()
 }

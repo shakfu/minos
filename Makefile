@@ -1,6 +1,6 @@
 MEDIA := docs/media
 
-.PHONY: go install uninstall install-service uninstall-service serve tui user-demo user-alice demo sim host-run test conformance cover container diagrams clean-diagrams clean
+.PHONY: go install uninstall install-service uninstall-service acp-conformance serve tui user-demo user-alice demo sim host-run test conformance cover container diagrams clean-diagrams clean
 
 GO_SOURCES := $(shell find go -name '*.go' 2>/dev/null) go/go.mod go/go.sum
 
@@ -152,3 +152,8 @@ $(MEDIA)/integration.pdf: $(MEDIA)/integration.d2
 
 clean:
 	@rm -rf .run go/minosd go/minos go/minosb go/minosa go/minosg
+
+## The ACP conformance suite against ACP_AGENT, a command run by /bin/sh, or
+## against the scripted agent without one. See docs/acp.md.
+acp-conformance:
+	@cd go && ACP_AGENT='$(ACP_AGENT)' go test ./acpconformance -count=1 -v

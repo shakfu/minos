@@ -21,7 +21,9 @@
 // line that is not one is answered with `refused`. End of input ends nothing.
 //
 // Everything after `--` is the run command, which is `sanduk run` in a real
-// dispatch. -task writes the agent's task as its first stdin frame, so the run
+// dispatch. With -agent-spec it is a one-shot CLI, run once per turn
+// (docs/one-shot-agents.md). With -agent acp it speaks the Agent Client
+// Protocol for the whole run (docs/acp.md). -task writes the agent's task as its first stdin frame, so the run
 // command needs no wrapper that does it. Without one, the agent waits for the
 // room: a person-driven run, which a person ends with `/end`. -linger closes the agent's stdin once
 // it has been idle that long, so an agent that reads to end of input exits and
@@ -73,11 +75,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	window := flags.String("window", "all", "what this run may read, reported by status")
 	socket := flags.String("socket", "", "the unix socket the container reaches, outside the work mount")
 	mode := flags.Uint("mode", 0o600, "the socket's file mode; the socket is the credential")
-	agent := flags.String("agent", "claude", "whose stream the run command speaks")
+	agent := flags.String("agent", "claude", "whose stream the run command speaks: claude, or acp for an Agent Client Protocol agent")
+	agentSpec := flags.String("agent-spec", "",
+		"a one-shot CLI's spec file: the run command runs once per turn, with {text} and {resume}")
 	interrupters := flags.String("interrupters", "", "comma-separated users whose /interrupt in the room stops a turn")
 	eventsPath := flags.String("events", "", "append control events to this file; stdout then carries the agent's stream")
 	task := flags.String("task", "", "the agent's task, written as its first stdin frame")
 	linger := flags.Duration("linger", 0, "close the agent's stdin after this long idle between turns; 0 never closes it")
+	permission := flags.String("permission", "deny", "how an ACP agent's permission requests are answered: deny or allow")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -99,10 +104,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, "minosb needs MINOS_PASSWORD in the environment")
 	case *task != "" && flags.NArg() == 0:
 		return fail(stderr, "-task needs a run command after --")
+	case *permission != "deny" && *permission != "allow":
+		return fail(stderr, "-permission is deny or allow, not %q", *permission)
 	case *linger < 0:
 		return fail(stderr, "-linger cannot be negative")
 	case *linger > 0 && flags.NArg() == 0:
 		return fail(stderr, "-linger needs a run command after --")
+	}
+	var spec *broker.Spec
+	if *agentSpec != "" {
+		loaded, err := broker.LoadSpec(*agentSpec)
+		if err != nil {
+			return fail(stderr, "cannot use -agent-spec: %v", err)
+		}
+		if flags.NArg() == 0 {
+			return fail(stderr, "-agent-spec needs a run command after --")
+		}
+		spec = &loaded
 	}
 	if err := link.CheckPath(*socket); err != nil {
 		return fail(stderr, "cannot use -socket %s: %v", *socket, err)
@@ -147,21 +165,26 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// nothing else, which is what a dispatcher that starts the agent itself
 	// wants. With one, the broker owns its pipes.
 	done := make(chan int, 1)
-	var command *exec.Cmd
+	var command process
 	var relay *broker.Relay
 	if argv := flags.Args(); len(argv) > 0 {
-		adapter, err := broker.AdapterFor(*agent)
-		if err != nil {
-			return fail(stderr, "%v", err)
-		}
 		var drained <-chan struct{}
-		if command, relay, drained, err = start(run, adapter, argv, *task, *linger, report, passthrough); err != nil {
+		var err error
+		switch {
+		case spec != nil:
+			command, relay, drained, err = startOneShot(run, *spec, argv, *task, *linger, report, passthrough)
+		case *agent == "acp":
+			command, relay, drained, err = startACP(run, argv, *permission == "allow", *task, *linger, report, passthrough)
+		default:
+			command, relay, drained, err = startStream(run, *agent, argv, *task, *linger, report, passthrough)
+		}
+		if err != nil {
 			return fail(stderr, "%v", err)
 		}
 		go control(os.Stdin, relay.Interrupt, report)
 		go func() {
 			<-drained
-			done <- wait(command)
+			done <- command.Wait()
 		}()
 	}
 
@@ -198,14 +221,34 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-// start runs the agent with its stdio on the broker's pipes. The channel
-// closes once stdout is read and relayed; Wait closes the pipe, so it must
-// not run before then or the last turn is lost. A non-empty task is the first
-// frame on stdin. A positive linger closes stdin once the agent idles that
-// long. A non-nil passthrough gets every byte of the agent's stdout
-// as it is read.
-func start(run *broker.Broker, adapter broker.Adapter, argv []string, task string, linger time.Duration,
-	report func(map[string]any), passthrough io.Writer) (*exec.Cmd, *broker.Relay, <-chan struct{}, error) {
+// process is the run command, as the main loop waits on and stops it.
+type process interface {
+	// Wait is its exit status, once its output is relayed.
+	Wait() int
+	// Kill stops it and claims nothing more: the container it started is
+	// the dispatcher's to delete.
+	Kill()
+}
+
+// streamed is a stream agent: one process for the whole run.
+type streamed struct{ *exec.Cmd }
+
+func (s streamed) Wait() int { return wait(s.Cmd) }
+
+func (s streamed) Kill() {
+	if s.Process != nil {
+		_ = s.Process.Kill()
+	}
+}
+
+// startStream runs a stream agent with its stdio on the broker's pipes. A
+// non-nil passthrough gets every byte of its stdout as it is read.
+func startStream(run *broker.Broker, agent string, argv []string, task string, linger time.Duration,
+	report func(map[string]any), passthrough io.Writer) (process, *broker.Relay, <-chan struct{}, error) {
+	adapter, err := broker.AdapterFor(agent)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	command := exec.Command(argv[0], argv[1:]...)
 	command.Env = childEnv(os.Environ())
 	// The run command's own notes are a person's to read, not the room's.
@@ -222,7 +265,47 @@ func start(run *broker.Broker, adapter broker.Adapter, argv []string, task strin
 	if err := command.Start(); err != nil {
 		return nil, nil, nil, fmt.Errorf("cannot start %s: %w", argv[0], err)
 	}
+	var stream io.Reader = stdout
+	if passthrough != nil {
+		stream = io.TeeReader(stdout, passthrough)
+	}
+	return relayed(run, adapter, streamed{command}, stdin, stream, task, linger, report)
+}
 
+// startOneShot runs a one-shot agent once per turn. Its passthrough is the
+// CLIs' own stdout; the relay reads the turn lines OneShot writes apart.
+func startOneShot(run *broker.Broker, spec broker.Spec, argv []string, task string, linger time.Duration,
+	report func(map[string]any), passthrough io.Writer) (process, *broker.Relay, <-chan struct{}, error) {
+	agent, err := broker.NewOneShot(spec, argv, childEnv(os.Environ()), os.Stderr, passthrough)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	agent.Start()
+	return relayed(run, agent, agent, agent.Stdin, agent.Stdout, task, linger, report)
+}
+
+// startACP runs an ACP agent for the run, in a session at the broker's own
+// working directory. Its passthrough is the agent's ACP messages.
+func startACP(run *broker.Broker, argv []string, allow bool, task string, linger time.Duration,
+	report func(map[string]any), passthrough io.Writer) (process, *broker.Relay, <-chan struct{}, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	agent, err := broker.NewACP(argv, childEnv(os.Environ()), cwd, os.Stderr, passthrough, report, allow)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	agent.Start()
+	return relayed(run, agent, agent, agent.Stdin, agent.Stdout, task, linger, report)
+}
+
+// relayed puts a started agent behind the relay. The channel closes once its
+// stdout is read and relayed; Wait closes the pipe, so it must not run before
+// then or the last turn is lost. A non-empty task is the first frame on stdin.
+// A positive linger closes stdin once the agent idles that long.
+func relayed(run *broker.Broker, adapter broker.Adapter, command process, stdin io.WriteCloser, stdout io.Reader,
+	task string, linger time.Duration, report func(map[string]any)) (process, *broker.Relay, <-chan struct{}, error) {
 	// Before Deliver starts, so nothing reaches stdin ahead of the task. The
 	// relay starts inside a turn, which this frame begins.
 	if task != "" {
@@ -231,9 +314,10 @@ func start(run *broker.Broker, adapter broker.Adapter, argv []string, task strin
 			_, err = stdin.Write(frame)
 		}
 		if err != nil {
-			_ = command.Process.Kill()
-			_ = command.Wait()
-			return nil, nil, nil, fmt.Errorf("cannot give %s its task: %w", argv[0], err)
+			command.Kill()
+			_ = stdin.Close()
+			command.Wait()
+			return nil, nil, nil, fmt.Errorf("cannot give the agent its task: %w", err)
 		}
 		report(map[string]any{"event": "pushed", "messages": 1})
 	}
@@ -244,14 +328,10 @@ func start(run *broker.Broker, adapter broker.Adapter, argv []string, task strin
 	}
 	relay.Linger(linger)
 	go relay.Deliver()
-	var stream io.Reader = stdout
-	if passthrough != nil {
-		stream = io.TeeReader(stdout, passthrough)
-	}
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		if err := relay.Read(stream); err != nil {
+		if err := relay.Read(stdout); err != nil {
 			report(map[string]any{"event": "unread", "error": err.Error()})
 		}
 	}()
@@ -326,9 +406,9 @@ func wait(command *exec.Cmd) int {
 
 // stop ends the run command. The container it started is the dispatcher's to
 // delete: this kills what this process spawned and claims nothing more.
-func stop(command *exec.Cmd, code int) int {
-	if command != nil && command.Process != nil {
-		_ = command.Process.Kill()
+func stop(command process, code int) int {
+	if command != nil {
+		command.Kill()
 	}
 	return code
 }
