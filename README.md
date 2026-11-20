@@ -37,7 +37,7 @@ The design is in [design.md](docs/dev/design.md) and [recommended-architecture.m
 
 - **Tears stop the run.** If the broker falls further behind than the history limit, it reports `torn` and exits rather than skip messages.
 
-- **Control events for the dispatcher.** `minosb` writes `ready`, `held`, `turn`, `interrupt`, `refused`, `closed`, `undelivered`, `torn`, `unseated`, `exited` and `stopped` to stdout as JSON lines. With `-events FILE` they go to that file, and stdout carries the agent's stream unchanged, for a dispatcher that reads it.
+- **Control events for the dispatcher.** `minosb` writes `ready`, `session`, `pushed`, `held`, `turn`, `interrupt`, `refused`, `closed`, `undelivered`, `torn`, `unseated`, `exited` and `stopped` to stdout as JSON lines. With `-events FILE` they go to that file, and stdout carries the agent's stream unchanged, for a dispatcher that reads it. [minosb-events.md](docs/minosb-events.md) gives each event's fields, the agent state they imply, and each `stopped` reason with its exit status.
 
 - **Interrupts.** A turn stops on `{"op":"interrupt","id":"..."}` on `minosb`'s stdin, or on `/interrupt [correction]` in the room from a user named in `-interrupters`. The correction is pushed when the stopped turn ends.
 
@@ -195,6 +195,9 @@ curl http://127.0.0.1:8100/.well-known/agent-card.json
 
 ```text
 ./go/minos -user alice -password alice    # log in directly; make tui prompts instead
+./go/minos -room ID -exit-with worker     # open in room ID; return when worker leaves it
+./go/minos ping                           # exit 0 ok, 3 no server, 4 MINOS_USER/MINOS_PASSWORD refused
+make install-service                      # minosd as a launchd or systemd user service, data in ~/.local/share/minos
 ```
 
 `<who>` is a username, or `@name` for a group.

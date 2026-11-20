@@ -298,13 +298,16 @@ func Do(path string, request Request, timeout time.Duration) (Reply, error) {
 	if err != nil {
 		return Reply{}, err
 	}
-	if _, err := conn.Write(append(raw, '\n')); err != nil {
-		return Reply{}, fmt.Errorf("cannot send to the broker: %w", err)
-	}
+	// A broker refusing the connection may answer and close before the
+	// request is written. The write then fails, but its refusal is readable.
+	_, sendErr := conn.Write(append(raw, '\n'))
 
 	reader := bufio.NewReader(io.LimitReader(conn, MaxRequest))
 	line, err := reader.ReadBytes('\n')
 	if err != nil && len(line) == 0 {
+		if sendErr != nil {
+			return Reply{}, fmt.Errorf("cannot send to the broker: %w", sendErr)
+		}
 		return Reply{}, fmt.Errorf("the broker answered nothing: %w", err)
 	}
 	var reply Reply

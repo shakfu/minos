@@ -33,7 +33,11 @@ const transportTimeout = 15 * time.Second
 const readLimit = 16 << 20
 
 // TransportError is a request the server refused, or a connection that would not open.
-type TransportError struct{ Message string }
+type TransportError struct {
+	Message string
+	// Status is the HTTP status of a refusal, 0 when nothing answered.
+	Status int
+}
 
 func (e *TransportError) Error() string { return e.Message }
 
@@ -71,7 +75,7 @@ func (h *HTTP) request(method, path string, payload any) (json.RawMessage, error
 	}
 	request, err := http.NewRequest(method, h.base+path, body)
 	if err != nil {
-		return nil, &TransportError{fmt.Sprintf("Cannot reach %s: %v", h.base, err)}
+		return nil, &TransportError{Message: fmt.Sprintf("Cannot reach %s: %v", h.base, err)}
 	}
 	if payload != nil {
 		request.Header.Set("Content-Type", "application/json")
@@ -79,12 +83,12 @@ func (h *HTTP) request(method, path string, payload any) (json.RawMessage, error
 
 	response, err := h.client.Do(request)
 	if err != nil {
-		return nil, &TransportError{fmt.Sprintf("Cannot reach %s: %v", h.base, err)}
+		return nil, &TransportError{Message: fmt.Sprintf("Cannot reach %s: %v", h.base, err)}
 	}
 	defer response.Body.Close()
 	raw, err := io.ReadAll(response.Body)
 	if err != nil {
-		return nil, &TransportError{fmt.Sprintf("Cannot reach %s: %v", h.base, err)}
+		return nil, &TransportError{Message: fmt.Sprintf("Cannot reach %s: %v", h.base, err)}
 	}
 
 	if response.StatusCode >= 400 {
@@ -95,7 +99,7 @@ func (h *HTTP) request(method, path string, payload any) (json.RawMessage, error
 		if json.Unmarshal(raw, &refusal) == nil && refusal.Error != "" {
 			detail = refusal.Error
 		}
-		return nil, &TransportError{fmt.Sprintf("%d: %s", response.StatusCode, printable(detail))}
+		return nil, &TransportError{Message: fmt.Sprintf("%d: %s", response.StatusCode, printable(detail)), Status: response.StatusCode}
 	}
 	return raw, nil
 }
@@ -129,9 +133,21 @@ func (h *HTTP) Login(username, password string) (Profile, error) {
 		return profile, err
 	}
 	if err := json.Unmarshal(raw, &profile); err != nil {
-		return profile, &TransportError{fmt.Sprintf("Unreadable login reply: %v", err)}
+		return profile, &TransportError{Message: fmt.Sprintf("Unreadable login reply: %v", err)}
 	}
 	return profile, nil
+}
+
+// Ping is whether a minos server answers at the base URL.
+func (h *HTTP) Ping() error {
+	raw, err := h.request("GET", "/ping", nil)
+	if err != nil {
+		return err
+	}
+	if string(raw) != "ok" {
+		return &TransportError{Message: fmt.Sprintf("%s answered /ping with %q, not ok", h.base, printable(string(raw)))}
+	}
+	return nil
 }
 
 func (h *HTTP) Logout() error {
@@ -183,7 +199,7 @@ func (s *Socket) Connect() error {
 	defer cancel()
 	ws, _, err := websocket.Dial(ctx, s.url, &websocket.DialOptions{HTTPClient: s.client})
 	if err != nil {
-		return &TransportError{fmt.Sprintf("Cannot open a socket to %s: %v", s.url, err)}
+		return &TransportError{Message: fmt.Sprintf("Cannot open a socket to %s: %v", s.url, err)}
 	}
 	ws.SetReadLimit(readLimit)
 
@@ -243,13 +259,13 @@ func (s *Socket) Send(name string, params ...any) error {
 	ws, live := s.ws, s.ws != nil && !s.closing
 	s.mutex.Unlock()
 	if !live {
-		return &TransportError{"Not connected"}
+		return &TransportError{Message: "Not connected"}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), transportTimeout)
 	defer cancel()
 	if err := ws.Write(ctx, websocket.MessageText, raw); err != nil {
-		return &TransportError{fmt.Sprintf("Cannot send: %v", err)}
+		return &TransportError{Message: fmt.Sprintf("Cannot send: %v", err)}
 	}
 	return nil
 }

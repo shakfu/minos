@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -193,6 +194,11 @@ type Ui struct {
 	running bool
 	colours map[string]tcell.Color
 
+	// exitWith is the account whose leaving room ends the session, once it
+	// was seen there: a dispatcher's run, so its person's foreground returns.
+	exitWith, exitRoom string
+	exitSeen           atomic.Bool
+
 	// now is the clock the activity window is measured against; tests replace it.
 	now func() time.Time
 	// keyHandler handles one key, off the loop; tests replace it to hold a key
@@ -211,19 +217,61 @@ type Ui struct {
 	notices []string
 }
 
-// Run takes the terminal and runs until the user stops.
-func Run(c *client.Client, profile client.Profile) error {
+// Options are where a session starts, and what ends it besides the user.
+type Options struct {
+	// Room is entered at start, in place of the overview.
+	Room string
+	// ExitWith ends the session once that account, seen in Room, leaves it.
+	ExitWith string
+}
+
+// Run takes the terminal and runs until the user stops, or until ExitWith
+// leaves the room; it answers whether the second ended it.
+func Run(c *client.Client, profile client.Profile, options Options) (bool, error) {
 	screen, err := tcell.NewScreen()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := screen.Init(); err != nil {
-		return err
+		return false, err
 	}
 	defer screen.Fini()
 	screen.EnablePaste()
-	newUi(screen, c, profile).loop()
-	return nil
+	u := newUi(screen, c, profile)
+	u.start(options)
+	u.loop()
+	return u.exitWith != "" && u.exitSeen.Load() && !u.occupied(), nil
+}
+
+// start applies options to a new interface. The room must be one the user can
+// read; the caller checks that before taking the screen.
+func (u *Ui) start(options Options) {
+	if options.Room == "" {
+		return
+	}
+	u.exitWith, u.exitRoom = options.ExitWith, options.Room
+	if room, ok := u.client.Rooms()[options.Room]; ok {
+		u.showTab(tabRooms)
+		u.openSpace(room)
+	}
+}
+
+// occupied is whether exitWith is in exitRoom now.
+func (u *Ui) occupied() bool {
+	room, ok := u.client.Rooms()[u.exitRoom]
+	return ok && slices.Contains(room.Occupants, u.exitWith)
+}
+
+// ended is whether exitWith was in the room and has left it.
+func (u *Ui) ended() bool {
+	if u.exitWith == "" {
+		return false
+	}
+	if u.occupied() {
+		u.exitSeen.Store(true)
+		return false
+	}
+	return u.exitSeen.Load()
 }
 
 // newUi builds the interface. A nil screen is one that is never drawn, for tests.
@@ -812,6 +860,9 @@ func (u *Ui) loop() {
 	for u.running {
 		u.ensureSelection()
 		u.watch()
+		if u.ended() {
+			break
+		}
 		u.draw()
 		var next tcell.Event
 		if len(backlog) > 0 {

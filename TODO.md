@@ -8,11 +8,11 @@ Items marked `pma backend` make minos the place pma's agents run, in place of he
 
 ## High
 
-- [ ] pma backend: person-driven runs, for pma's `I`. `minosb` runs the agent with or without `-task`, with no linger and no timeout. The person ends the run from the room: `/end` closes stdin, the agent exits, and `stopped` reports reason `ended`. Done when a scripted fake agent takes a person's message, then `/end`, and exits 0.
+- [x] pma backend: person-driven runs, for pma's `I`. `minosb` runs the agent with or without `-task`, with no linger and no timeout. The person ends the run from the room: `/end` closes stdin, the agent exits, and `stopped` reports reason `ended`. Done when a scripted fake agent takes a person's message, then `/end`, and exits 0.
 
-- [ ] pma backend: take over a finished run, for pma's `T`. This is a person-driven run in the earlier run's room, whose command resumes the agent's session (`claude --resume ID`). minos reports each run's session id in a `session` event from the adapter: claude's `system` `init` record carries `session_id`. pma then does not parse it from each agent's stream. The room shows the earlier run's messages above the take-over. Done when a run and its take-over share a room and a session.
+- [x] pma backend: take over a finished run, for pma's `T`. minos reports the `session` event; a clean exit frees the seat at once. pma's first `T` uses a take-over prompt in `runs.room` rather than `--resume`.
 
-- [ ] pma backend: agent state. pma's TUI and web show each run's state and say when an agent needs a person; herdr reports `idle`, `working`, `blocked` and `done`. `minosb` writes a `state` event to `-events` on each change: `working` when a frame is pushed, `waiting` when a person-driven turn ends, `done` on exit. The client lists a `waiting` room under what waits on you in `OVERVIEW`. Check first how much the `idle` and `turn` events already give.
+- [ ] pma backend: agent state in the client. pma reads state from `-events` (`pushed`, `turn` with `delivering: 0`, `stopped`; `docs/minosb-events.md`), so pma needs nothing more. Open: the client lists a `waiting` room under what waits on you in `OVERVIEW`. Clients never see `-events`, so this needs the state on the wire. herdr's `blocked` waits for permission requests.
 
 - [ ] pma backend: adapters for pma's workers (decided 2026-11-20: minos runs agents other than Claude). Replaces the Medium item that asked whether to. There are two kinds:
   - stream: one long-lived process that takes stdin frames, as `claudeAdapter`;
@@ -20,9 +20,9 @@ Items marked `pma backend` make minos the place pma's agents run, in place of he
 
   pma ships `claude`, `codex` (`exec`, `exec resume`), `opencode` (`run --session`), `pi`, `omp`, `gilda`, `minima`, `hax`, `myra` and `hilda`. Each adapter states how a turn's text is passed, what ends a turn, the session id, the resume flag, and the cost where reported. [agentpipe](https://github.com/kevinelliott/agentpipe) `pkg/adapters/` records these for 15 CLIs. A worker without an adapter keeps today's side broker and `minosa`.
 
-- [ ] pma backend: open a room for its person, for pma's `H` and an `I` started in front. `minos -room ID` starts the terminal client in that room. `-exit-on-close` returns when the run stops, so pma can run the client in the foreground as it runs an editor. When a client is already open elsewhere, a server request moves it into the room, so `H` in pma's web needs no new terminal.
+- [ ] pma backend: move an open client into a room, for pma's `H` from its web. Done: `minos -room ID [-exit-with USER]`. Open: when a client is already open elsewhere, a server request moves it into the room, so `H` needs no new terminal. Only the user's own sessions may be moved.
 
-- [ ] pma backend: the server as a service, and a check. With `minosd` down, every pma run starts without a room or fails. Add a launchd plist and a systemd unit (`make install-service`). Add `minos ping`, whose exit status tells pma one of: no server, refused credentials, or a server too old for the flags pma passes.
+- [x] pma backend: the server as a service, and a check. With `minosd` down, every pma run starts without a room or fails. Add a launchd plist and a systemd unit (`make install-service`). Add `minos ping`, whose exit status tells pma one of: no server, refused credentials, or a server too old for the flags pma passes.
 
 ## Medium
 
@@ -40,7 +40,7 @@ Items marked `pma backend` make minos the place pma's agents run, in place of he
 
 ## Low
 
-- [ ] pma backend: the contract pma reads, written down. Document each `stopped` reason (`signal`, `exited`, `torn`, `unseated`, `ended`) and each `minosb` exit code, so pma maps each to a run outcome. Today pma assumes `unseated` means failed, untested.
+- [x] pma backend: the contract pma reads, written down (`docs/minosb-events.md`). Document each `stopped` reason (`signal`, `exited`, `torn`, `unseated`, `ended`) and each `minosb` exit code, so pma maps each to a run outcome. Today pma assumes `unseated` means failed, untested.
 
 - [ ] pma backend: a check of each mode pma uses. Drive headless, person-driven and take-over runs through `minosb`, as pma does, with the scripted fake agent: `make pma-backend`. pma's `make minos-check` covers headless only.
 

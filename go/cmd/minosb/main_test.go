@@ -425,3 +425,131 @@ func TestALingerIsRefusedWithoutARunCommandOrBelowZero(t *testing.T) {
 		}
 	}
 }
+
+// eventsIn is each control event in the file at path, in order.
+func eventsIn(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var events []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var event map[string]any
+		if json.Unmarshal([]byte(line), &event) == nil {
+			events = append(events, event)
+		}
+	}
+	return events
+}
+
+// A person-driven run: no task, no linger. The agent waits for the room, takes
+// a person's message, and exits when the person sends `/end`.
+func TestAPersonDrivenRunTakesAMessageAndEndsFromTheRoom(t *testing.T) {
+	server := testserver.Start(t, 200)
+	_, developer, _, err := client.Connect(server.Base, "demo", "demo")
+	if err != nil {
+		t.Fatalf("the developer cannot connect: %v", err)
+	}
+	t.Cleanup(developer.Stop)
+	room, err := developer.OpenRoom([]client.Principal{{Kind: "user", ID: "bob"}}, "Run", "persisted")
+	if err != nil {
+		t.Fatalf("cannot open the run's room: %v", err)
+	}
+	t.Setenv("MINOS_PASSWORD", "bob")
+	eventsPath := filepath.Join(t.TempDir(), "events")
+
+	agent := `while read -r line; do echo '{"type":"result","result":"got it"}'; done; exit 0`
+	exited := make(chan int, 1)
+	var stderr bytes.Buffer
+	go func() {
+		exited <- run([]string{
+			"-server", server.Base, "-user", "bob", "-room", room.ID,
+			"-socket", testserver.SocketPath(t), "-events", eventsPath,
+			"--", "/bin/sh", "-c", agent,
+		}, io.Discard, &stderr)
+	}()
+
+	await := func(what string, predicate func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for !predicate() {
+			if time.Now().After(deadline) {
+				t.Fatalf("never saw %s: %s", what, stderr.String())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	has := func(name, field string, value any) func() bool {
+		return func() bool {
+			for _, event := range eventsIn(t, eventsPath) {
+				if event["event"] == name && (field == "" || event[field] == value) {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	await("ready", has("ready", "", nil))
+	if err := developer.Send(room.ID, "fix the test"); err != nil {
+		t.Fatal(err)
+	}
+	await("the reply", func() bool {
+		for _, message := range developer.Log(room.ID) {
+			if message.Author == "bob" && message.Body == "got it" {
+				return true
+			}
+		}
+		return false
+	})
+	if err := developer.Send(room.ID, "/end"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case code := <-exited:
+		if code != 0 {
+			t.Fatalf("minosb exited %d: %s", code, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the run did not end")
+	}
+	// The person's message is pushed, not held: no turn was running.
+	var names []string
+	for _, event := range eventsIn(t, eventsPath) {
+		names = append(names, fmt.Sprint(event["event"]))
+	}
+	if got := strings.Join(names, " "); got != "ready pushed turn closed exited stopped" {
+		t.Fatalf("the events were %s", got)
+	}
+	if !has("stopped", "reason", "ended")() {
+		t.Fatalf("the events were %v", eventsIn(t, eventsPath))
+	}
+}
+
+// A run that ends cleanly gives its seat up on the way out, so a take-over in
+// the same room starts at once rather than being refused by the agent limit.
+func TestARunThatEndsCleanlyFreesItsSeatForTheNext(t *testing.T) {
+	server := testserver.Start(t, 200)
+	_, developer, _, err := client.Connect(server.Base, "demo", "demo")
+	if err != nil {
+		t.Fatalf("the developer cannot connect: %v", err)
+	}
+	t.Cleanup(developer.Stop)
+	room, err := developer.OpenRoom([]client.Principal{{Kind: "user", ID: "worker"}}, "Run", "persisted")
+	if err != nil {
+		t.Fatalf("cannot open the run's room: %v", err)
+	}
+	t.Setenv("MINOS_PASSWORD", "worker")
+
+	for n := range 5 {
+		var stderr bytes.Buffer
+		code := run([]string{
+			"-server", server.Base, "-user", "worker", "-room", room.ID,
+			"-socket", testserver.SocketPath(t), "--", "/bin/echo", `{"type":"result","result":"done"}`,
+		}, io.Discard, &stderr)
+		if code != 0 {
+			t.Fatalf("run %d exited %d: %s", n, code, stderr.String())
+		}
+	}
+}

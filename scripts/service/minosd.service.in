@@ -1,0 +1,13 @@
+# minosd as a systemd user unit. `make install-service` fills @BINDIR@ and @STATE@.
+[Unit]
+Description=minos server
+
+[Service]
+ExecStart=@BINDIR@/minosd
+WorkingDirectory=@STATE@
+Environment=MINOS_RUN=@STATE@/.run
+Environment=MINOS_VFS=@STATE@/vfs
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

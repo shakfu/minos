@@ -60,6 +60,10 @@ const payloadFence = "minos-payload"
 // pushed once the stopped turn ends.
 const interruptCommand = "/interrupt"
 
+// The room's spelling of the end of a run: the agent's stdin closes once its
+// turn ends, and nothing more is pushed.
+const endCommand = "/end"
+
 // How long a run that lost its place in the room keeps asking for it back. A
 // reconnect can reach the server before it has released the dead connection's
 // place, and the room's agent limit then refuses the run its own seat. A
@@ -84,8 +88,10 @@ type Config struct {
 	// makes it a rule.
 	Window string
 
-	// Interrupters may stop a turn from the room with `/interrupt`. Anyone
-	// else's `/interrupt` is pushed as text.
+	// Interrupters may stop a turn from the room with `/interrupt`, and end
+	// the run with `/end`. Anyone else's `/interrupt` is pushed as text. With
+	// no interrupters, anyone in the room may `/end`: a person-driven run
+	// would otherwise have no way to end.
 	Interrupters []string
 }
 
@@ -280,19 +286,20 @@ type held struct {
 	correction bool
 }
 
-// forPush is what the agent has not been told over its stdin, and the
-// interrupts asked for in the room since. Text from others only: a room event
-// is the server's bookkeeping, and the worker's own messages are not news to it.
-func (b *Broker) forPush() ([]held, []Ask) {
+// forPush is what the agent has not been told over its stdin, the
+// interrupts asked for in the room since, and the `/end`s. Text from others
+// only: a room event is the server's bookkeeping, and the worker's own
+// messages are not news to it.
+func (b *Broker) forPush() ([]held, []Ask, []Ask) {
 	b.mutex.Lock()
 	since, torn := b.pushed, b.torn
 	b.mutex.Unlock()
 	if torn {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	var texts []held
-	var asks []Ask
+	var asks, ends []Ask
 	last := since
 	for _, message := range b.chat.Log(b.config.Room) {
 		if message.Seq <= since {
@@ -303,6 +310,10 @@ func (b *Broker) forPush() ([]held, []Ask) {
 			continue
 		}
 		body, corrects := message.Body, false
+		if strings.TrimSpace(body) == endCommand && b.mayEnd(message.Author) {
+			ends = append(ends, Ask{By: message.Author, ID: fmt.Sprintf("seq-%d", message.Seq)})
+			continue
+		}
 		if correction, ok := interruptBody(body); ok && slices.Contains(b.config.Interrupters, message.Author) {
 			asks = append(asks, Ask{By: message.Author, ID: fmt.Sprintf("seq-%d", message.Seq)})
 			if correction == "" {
@@ -320,7 +331,13 @@ func (b *Broker) forPush() ([]held, []Ask) {
 		b.pushed = last
 	}
 	b.mutex.Unlock()
-	return texts, asks
+	return texts, asks, ends
+}
+
+// mayEnd is whether author's `/end` ends the run: an interrupter's, or
+// anyone's when there are none.
+func (b *Broker) mayEnd(author string) bool {
+	return len(b.config.Interrupters) == 0 || slices.Contains(b.config.Interrupters, author)
 }
 
 // unread is the text of what the socket has not delivered, and how many it

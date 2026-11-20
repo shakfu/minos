@@ -50,6 +50,9 @@ type Adapter interface {
 	// Interrupt encodes a request to stop the current turn. id is the
 	// caller's, unique among its requests; the agent's reply echoes it.
 	Interrupt(id string) ([]byte, error)
+	// Session reads one line of the agent's stdout for the agent's session
+	// id, which a dispatcher passes back to resume the session.
+	Session(line []byte) (string, bool)
 }
 
 // Claude Code's stream-json, in both directions.
@@ -86,6 +89,20 @@ func (claudeAdapter) Turn(line []byte) (string, bool) {
 		return "", false
 	}
 	return record.Result, true
+}
+
+// Session is the `session_id` of the `system` `init` record, which opens the
+// stream.
+func (claudeAdapter) Session(line []byte) (string, bool) {
+	var record struct {
+		Type    string `json:"type"`
+		Subtype string `json:"subtype"`
+		Session string `json:"session_id"`
+	}
+	if json.Unmarshal(line, &record) != nil || record.Type != "system" || record.Subtype != "init" || record.Session == "" {
+		return "", false
+	}
+	return record.Session, true
 }
 
 // Interrupt is the control request the Agent SDK's `interrupt()` sends. On
@@ -143,7 +160,8 @@ type Relay struct {
 
 	mutex sync.Mutex
 	// A turn is under way until the agent's stream says it ended. The run
-	// starts inside one: the dispatcher gave the agent its task. A boolean
+	// starts inside one, as the dispatcher gave the agent its task, unless
+	// Untasked says it did not. A boolean
 	// suffices because only Deliver queues a frame, one per turn, between turns.
 	inTurn bool
 	held   []held
@@ -162,6 +180,10 @@ type Relay struct {
 	// Deliver's alone.
 	linger time.Duration
 	closed bool
+	// ending is the `/end` that will close stdin once the turn ends; endedBy
+	// is who sent it, once it has.
+	ending  *Ask
+	endedBy string
 }
 
 // The room's last word from a run that stopped reading it.
@@ -186,7 +208,12 @@ func NewRelay(b *Broker, adapter Adapter, stdin io.WriteCloser, control func(map
 func (r *Relay) Read(stdout io.Reader) error {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64<<10), 8<<20)
+	session := ""
 	for scanner.Scan() {
+		if id, ok := r.adapter.Session(scanner.Bytes()); ok && id != session {
+			session = id
+			r.control(map[string]any{"event": "session", "id": id, "agent": r.adapter.Name()})
+		}
 		final, ended := r.adapter.Turn(scanner.Bytes())
 		if !ended {
 			continue
@@ -203,6 +230,10 @@ func (r *Relay) Read(stdout io.Reader) error {
 	}
 	return scanner.Err()
 }
+
+// Untasked marks the agent as between turns at the start: it was given no
+// task, so it waits for the room. Call it before Deliver.
+func (r *Relay) Untasked() { r.inTurn = false }
 
 // Linger sets how long the relay waits, idle, before closing the agent's
 // stdin. An agent that reads stdin to its end then exits, and so does the
@@ -232,10 +263,15 @@ func (r *Relay) Deliver() {
 			continue
 		}
 		r.deliver(ended)
+		if ask, ok := r.endable(); ok {
+			r.close(map[string]any{"event": "closed", "by": ask.By, "id": ask.ID})
+			idle = nil
+			continue
+		}
 		if r.linger == 0 || !r.idle() {
 			idle = nil
 		} else if expired {
-			r.close()
+			r.close(map[string]any{"event": "closed", "linger": r.linger.String()})
 			idle = nil
 		} else if idle == nil {
 			idle = time.After(r.linger)
@@ -250,17 +286,36 @@ func (r *Relay) idle() bool {
 	return !r.inTurn && len(r.held) == 0
 }
 
+// endable is the `/end` to act on now: one was sent, and no turn is running.
+func (r *Relay) endable() (Ask, bool) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if r.ending == nil || r.inTurn {
+		return Ask{}, false
+	}
+	r.endedBy = r.ending.By
+	return *r.ending, true
+}
+
+// Ended is who ended the run with `/end`, once its stdin is closing; empty
+// otherwise.
+func (r *Relay) Ended() string {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return r.endedBy
+}
+
 // close tells the room, then ends the agent's input. The notice and the
 // `closed` event both go first: the agent may exit at once, and the run with
 // it, before a later report is written. The writer closes stdin after the
 // frames queued before it.
-func (r *Relay) close() {
+func (r *Relay) close(event map[string]any) {
 	r.closed = true
 	if err := r.broker.relay(closedNotice); err != nil {
 		r.control(map[string]any{"event": "unrelayed", "error": err.Error()})
 	}
 	r.enqueue(func() {
-		r.control(map[string]any{"event": "closed", "linger": r.linger.String()})
+		r.control(event)
 		if err := r.stdin.Close(); err != nil {
 			r.control(map[string]any{"event": "unclosed", "error": err.Error()})
 		}
@@ -270,7 +325,7 @@ func (r *Relay) close() {
 // refuse answers what arrives after close, so no message or ask goes
 // unreported.
 func (r *Relay) refuse() {
-	arrived, asked := r.broker.forPush()
+	arrived, asked, _ := r.broker.forPush()
 	r.mutex.Lock()
 	asks := append(r.asks, asked...)
 	r.asks = nil
@@ -294,13 +349,22 @@ func (r *Relay) Interrupt(ask Ask) {
 
 // deliver holds what arrived mid-turn, and between turns writes everything
 // held as one frame. An ask stops a running turn; between turns it does
-// nothing, and its correction starts the next one.
+// nothing, and its correction starts the next one. After an `/end`, nothing
+// more is pushed: what is held, and what arrives, is reported undelivered.
 func (r *Relay) deliver(ended bool) {
-	arrived, asked := r.broker.forPush()
+	arrived, asked, ends := r.broker.forPush()
 
 	r.mutex.Lock()
 	if ended {
 		r.inTurn, r.interrupting = false, false
+	}
+	if r.ending == nil && len(ends) > 0 {
+		r.ending = &ends[0]
+	}
+	dropped := 0
+	if r.ending != nil {
+		dropped = len(r.held) + len(arrived)
+		r.held, arrived = nil, nil
 	}
 	r.held = append(r.held, arrived...)
 	asks := append(r.asks, asked...)
@@ -321,6 +385,9 @@ func (r *Relay) deliver(ended bool) {
 	}
 	r.mutex.Unlock()
 
+	if dropped > 0 {
+		r.control(map[string]any{"event": "undelivered", "messages": dropped})
+	}
 	if inTurn {
 		for i := range arrived {
 			r.control(map[string]any{"event": "held", "waiting": depth - len(arrived) + i + 1})
@@ -411,10 +478,15 @@ func (r *Relay) interrupt(asks []Ask, send bool, id string) {
 	}
 }
 
+// write pushes texts as one frame and reports it as `pushed`: a turn starts,
+// which a dispatcher reads as the agent working.
 func (r *Relay) write(texts []string) {
 	frame, err := r.adapter.Push(texts)
 	if err == nil {
 		_, err = r.stdin.Write(frame)
+	}
+	if err == nil {
+		r.control(map[string]any{"event": "pushed", "messages": len(texts)})
 	}
 	if err != nil {
 		// Nothing reached the agent, so no turn started. Deliver must hear it,

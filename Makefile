@@ -1,6 +1,6 @@
 MEDIA := docs/media
 
-.PHONY: go install uninstall serve tui user-demo user-alice demo sim host-run test conformance cover container diagrams clean-diagrams clean
+.PHONY: go install uninstall install-service uninstall-service serve tui user-demo user-alice demo sim host-run test conformance cover container diagrams clean-diagrams clean
 
 GO_SOURCES := $(shell find go -name '*.go' 2>/dev/null) go/go.mod go/go.sum
 
@@ -30,6 +30,33 @@ install: go
 
 uninstall:
 	@rm -f $(addprefix $(BINDIR)/,minosd minos minosb minosa minosg)
+
+## minosd as a user service: launchd on macOS, systemd elsewhere. Data goes to
+## $(STATE), not the repository's .run and vfs that `make serve` uses.
+STATE ?= $(HOME)/.local/share/minos
+LAUNCHD := $(HOME)/Library/LaunchAgents/net.minos.minosd.plist
+SYSTEMD := $(HOME)/.config/systemd/user/minosd.service
+install-service: install
+	@install -d $(STATE)
+	@if [ "$$(uname)" = Darwin ]; then \
+		install -d $(dir $(LAUNCHD)); \
+		sed -e 's|@BINDIR@|$(BINDIR)|g' -e 's|@STATE@|$(STATE)|g' scripts/service/minosd.plist.in > $(LAUNCHD); \
+		launchctl bootout gui/$$(id -u) $(LAUNCHD) 2>/dev/null; \
+		launchctl bootstrap gui/$$(id -u) $(LAUNCHD); \
+	else \
+		install -d $(dir $(SYSTEMD)); \
+		sed -e 's|@BINDIR@|$(BINDIR)|g' -e 's|@STATE@|$(STATE)|g' scripts/service/minosd.service.in > $(SYSTEMD); \
+		systemctl --user daemon-reload; \
+		systemctl --user enable --now minosd; \
+	fi
+	@echo "minosd runs as a service, with data in $(STATE). Check it with: minos ping"
+
+uninstall-service:
+	@if [ "$$(uname)" = Darwin ]; then \
+		launchctl bootout gui/$$(id -u) $(LAUNCHD) 2>/dev/null; rm -f $(LAUNCHD); \
+	else \
+		systemctl --user disable --now minosd 2>/dev/null; rm -f $(SYSTEMD); systemctl --user daemon-reload; \
+	fi
 
 ## Static, because it runs in a container that carries nothing else.
 go/minosa: $(GO_SOURCES)

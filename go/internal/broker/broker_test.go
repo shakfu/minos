@@ -218,7 +218,7 @@ func TestARunAttachedToARoomWithHistoryStartsAtWhatIsRetained(t *testing.T) {
 	}
 	t.Cleanup(worker.Stop)
 
-	if pushed, _ := worker.forPush(); len(pushed) != 0 {
+	if pushed, _, _ := worker.forPush(); len(pushed) != 0 {
 		t.Fatalf("history went to stdin: %+v", pushed)
 	}
 	reply := worker.Handle(link.Request{Op: link.OpMessages})
@@ -235,7 +235,7 @@ func TestARunAttachedToARoomWithHistoryStartsAtWhatIsRetained(t *testing.T) {
 
 	say(t, developer, room.ID, "now this")
 	waitFor(t, "the new message on stdin", func() bool {
-		pushed, _ := worker.forPush()
+		pushed, _, _ := worker.forPush()
 		return len(pushed) == 1 && pushed[0].text == "demo: now this"
 	})
 }

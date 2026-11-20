@@ -5,11 +5,12 @@
 // container handle for itself, so stopping a run never goes through here.
 //
 // Control output is one JSON object per line on stdout, or in the file -events
-// names, for the dispatcher to read: `ready` once the socket is answering, `held` and `turn` as the push
+// names, for the dispatcher to read: `ready` once the socket is answering, `pushed` for each frame on the agent's stdin, `held` and `turn` as the push
 // lane fills and drains, `interrupt` with each request's outcome, `torn` when
 // delivery gives up, `unseated` when the run lost its place in the room and
 // could not take it back, `exited` when the run command ends, `stopped` on the way
-// out. Anything a person should read goes to stderr.
+// out, with reason `ended` when the agent exited after an `/end` from the
+// room. Anything a person should read goes to stderr.
 //
 // With -events, stdout carries the agent's own stream instead, byte for byte.
 // A dispatcher that reads the agent's output, as pma reads cost and progress
@@ -21,7 +22,8 @@
 //
 // Everything after `--` is the run command, which is `sanduk run` in a real
 // dispatch. -task writes the agent's task as its first stdin frame, so the run
-// command needs no wrapper that does it. -linger closes the agent's stdin once
+// command needs no wrapper that does it. Without one, the agent waits for the
+// room: a person-driven run, which a person ends with `/end`. -linger closes the agent's stdin once
 // it has been idle that long, so an agent that reads to end of input exits and
 // the run ends without a signal. The broker owns its stdin and stdout: stdin is the only lane that
 // reaches a model that never calls the shim, and stdout is the broker's only
@@ -146,13 +148,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// wants. With one, the broker owns its pipes.
 	done := make(chan int, 1)
 	var command *exec.Cmd
+	var relay *broker.Relay
 	if argv := flags.Args(); len(argv) > 0 {
 		adapter, err := broker.AdapterFor(*agent)
 		if err != nil {
 			return fail(stderr, "%v", err)
 		}
 		var drained <-chan struct{}
-		var relay *broker.Relay
 		if command, relay, drained, err = start(run, adapter, argv, *task, *linger, report, passthrough); err != nil {
 			return fail(stderr, "%v", err)
 		}
@@ -175,7 +177,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return stop(command, 0)
 		case code := <-done:
 			report(map[string]any{"event": "exited", "code": code})
-			report(map[string]any{"event": "stopped", "reason": "exited"})
+			reason := "exited"
+			if relay.Ended() != "" {
+				reason = "ended"
+			}
+			report(map[string]any{"event": "stopped", "reason": reason})
 			return code
 		case <-ticker.C:
 			if torn, missing := run.Torn(); torn {
@@ -229,9 +235,13 @@ func start(run *broker.Broker, adapter broker.Adapter, argv []string, task strin
 			_ = command.Wait()
 			return nil, nil, nil, fmt.Errorf("cannot give %s its task: %w", argv[0], err)
 		}
+		report(map[string]any{"event": "pushed", "messages": 1})
 	}
 
 	relay := broker.NewRelay(run, adapter, stdin, report)
+	if task == "" {
+		relay.Untasked()
+	}
 	relay.Linger(linger)
 	go relay.Deliver()
 	var stream io.Reader = stdout

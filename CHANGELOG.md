@@ -20,6 +20,18 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 - `minosb -linger DUR` closes the agent's stdin once it has been idle between turns for DUR, and tells the room. `claude --input-format stream-json` reads stdin until it closes, and nothing closed it, so a run under a dispatcher ended only at the dispatcher's timeout. The idle time counts from the last turn's end. Presence and other rooms' traffic do not restart it; they did at first, so a busy server kept a run open. A message or interrupt after the close is reported as `undelivered`, or as outcome `closed`. Idle time over an exit after the first turn, because a correction between turns must still reach the agent. `make host-run` checks that a real `claude` exits 0.
 
+- `minos ping` exits 0 when a server answers, 3 when none does, and 4 when it refuses `MINOS_USER` and `MINOS_PASSWORD`; without them, the login is not checked. It prints one JSON line with this build's `capabilities`, such as `minosb.end`. A dispatcher matches names rather than a version, because the server reports no version and its wire is frozen, so "server too old" cannot be told apart. The names cover `minosb` too, which `make install` installs alongside.
+
+- `make install-service` runs `minosd` as a launchd user agent on macOS, or a systemd user unit elsewhere; `make uninstall-service` removes it. Data goes to `STATE` (default `~/.local/share/minos`). `make serve` keeps using the repository's `.run` and `vfs`, so rooms founded there are not in the service's database.
+
+- `minosb` reports `{"event":"session","id":...,"agent":"claude"}` once per session id, read from claude's `system` `init` record. A dispatcher resumes the session with it, and no longer parses each agent's stream to find it.
+
+- `minos -room ID` opens the terminal client in that room. `-exit-with USER` returns once USER, seen in the room, leaves it, so a dispatcher can run the client in the foreground for a person-driven run. Keyed on the run's occupancy rather than the broker's `[closed: ...]` post, because that post is missing when a run is signalled, torn, unseated or crashes, and any room member can write the same text. The account is named because the client cannot tell an agent from a person.
+
+- `minosb` reports `pushed`, with a message count, for each frame written to the agent's stdin. A push between turns had no event, so a dispatcher could not tell an agent that went back to work from one still waiting. [minosb-events.md](docs/minosb-events.md) documents every event, the agent state they imply, and each `stopped` reason with its exit status.
+
+- `/end` in a run's room closes the agent's stdin once its turn ends, and `stopped` then reports reason `ended`. It is how a person ends a person-driven run, which has no task and no linger. An interrupter may send it; with no `-interrupters`, anyone in the room may, since pma passes none by default and `minosb`'s stdin is `/dev/null` under pma's watchdog, so there is no control-lane alternative. What is held or said after it is reported `undelivered`. A run with no `-task` now starts between turns: it started inside one, so the person's first message was held for a turn that never began.
+
 - `make host-run` keeps the agent's stream as `agent.jsonl` beside the transcript, with control events read from `minosb -events`. On Claude Code 2.1.299, `total_cost_usd` in each `result` record is cumulative for the session, so a dispatcher reading the last record gets the run's total. An interrupted turn ends with `error_during_execution` and adds nothing to it. Consequences for pma are in [pma-integration.md](docs/dev/pma-integration.md) open question 5.
 
 - `minosb -events FILE` appends control events to FILE, and stdout then carries the agent's stream byte for byte. pma reads cost, summary and progress from its worker's output, and that output was consumed by `minosb`. A flag over always passing the stream through, because `make host-run` and any dispatcher reading events on stdout keep working.
@@ -39,6 +51,8 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 - The Python tree: `server/`, `messaging/`, `tui/`, the pytest suite, `pyproject.toml`, the uv venv, and the `install`, `serve-go` and `conformance-go` make targets. A second implementation of the core cost about 55% more code per feature, and it described behaviour `go/` already had. Three parts were ported rather than dropped: the conformance suite, the only black-box test of the server; the terminal client, its only client; and the audience demo.
 
 ### Fixed
+
+- A shim refused for the broker's connection limit reported `cannot send to the broker: broken pipe` in place of the refusal. The broker can answer and close before the shim writes its request, so the write fails while the refusal sits unread. The shim now reads the reply after a failed write. Seen as a 1-in-400 failure of `TestAConnectionPastTheLimitIsRefused`.
 
 - The terminal client keeps a message's line breaks. Wrapping collapsed every newline, so an agent's paragraphs and list items ran together as one paragraph. Runs of blank lines keep one.
 

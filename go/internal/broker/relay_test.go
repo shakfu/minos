@@ -355,7 +355,7 @@ func TestATornRunPushesNothingMore(t *testing.T) {
 	run.worker.tear(run.room, 3)
 
 	say(t, run.developer, run.room, "this must not arrive")
-	if pushed, _ := run.worker.forPush(); pushed != nil {
+	if pushed, _, _ := run.worker.forPush(); pushed != nil {
 		t.Fatalf("a torn run offered %v", pushed)
 	}
 }
@@ -805,5 +805,161 @@ func TestACorrectionReadOverTheSocketIsStillPushed(t *testing.T) {
 	worker.endInterrupted(t)
 	if got := texts(t, worker.read(t)); strings.Join(got, "|") != "demo: use vfs.go" {
 		t.Fatalf("the correction arrived as %q", got)
+	}
+}
+
+// -- the end -----------------------------------------------------------------
+
+// last is the last event reported under name.
+func (c *control) last(name string) map[string]any {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	for i := len(c.events) - 1; i >= 0; i-- {
+		if c.events[i]["event"] == name {
+			return c.events[i]
+		}
+	}
+	return nil
+}
+
+// rest is everything pushed onto the agent's stdin until it closes.
+func (a *agent) rest(t *testing.T, wait time.Duration) string {
+	t.Helper()
+	done := make(chan []byte, 1)
+	go func() {
+		all, _ := io.ReadAll(a.stdin)
+		done <- all
+	}()
+	select {
+	case all := <-done:
+		return string(all)
+	case <-time.After(wait):
+		t.Fatal("the agent's stdin stayed open")
+		return ""
+	}
+}
+
+// With no interrupters, anyone in the room ends the run. Between turns the
+// agent's stdin closes at once, and the room is told.
+func TestAnEndBetweenTurnsClosesTheAgentsStdin(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	worker, events := scripted(t, run)
+	worker.endTurn(t, "done")
+
+	say(t, run.developer, run.room, "/end")
+	if pushed := worker.rest(t, 5*time.Second); pushed != "" {
+		t.Fatalf("the agent was pushed %q", pushed)
+	}
+	if closed := events.last("closed"); closed == nil || closed["by"] != "demo" {
+		t.Fatalf("the close was reported as %v", closed)
+	}
+	if by := worker.relay.Ended(); by != "demo" {
+		t.Fatalf("Ended is %q", by)
+	}
+	waitFor(t, "the notice", func() bool {
+		for _, message := range run.developer.Log(run.room) {
+			if message.Body == closedNotice {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// An end never cuts a turn short. What is said after it is reported, not
+// pushed, and stdin closes when the turn ends.
+func TestAnEndMidTurnWaitsForTheTurnAndPushesNothingMore(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	worker, events := scripted(t, run)
+
+	say(t, run.developer, run.room, "/end", "one more thing")
+	waitFor(t, "the undelivered report", func() bool { return events.seen("undelivered") == 1 })
+	if events.seen("closed") != 0 {
+		t.Fatal("stdin was closed during a turn")
+	}
+	worker.endTurn(t, "done")
+	if pushed := worker.rest(t, 5*time.Second); pushed != "" {
+		t.Fatalf("the agent was pushed %q", pushed)
+	}
+	if got := events.last("undelivered")["messages"]; got != 1 {
+		t.Fatalf("undelivered reported %v messages", got)
+	}
+}
+
+// With interrupters named, only they end the run; anyone else's `/end` is
+// text. So is `/end` with words after it, from anyone.
+func TestAnEndFromOutsideTheInterruptersIsText(t *testing.T) {
+	for name, interrupters := range map[string][]string{"stranger": {"alice"}, "worded": nil} {
+		t.Run(name, func(t *testing.T) {
+			run := dispatch(t, config.HistoryLimit, false, interrupters...)
+			worker, _ := scripted(t, run)
+			worker.endTurn(t, "done")
+
+			body := "/end"
+			if interrupters == nil {
+				body = "/end please"
+			}
+			say(t, run.developer, run.room, body)
+			if got := text(t, worker.read(t)); got != "demo: "+body {
+				t.Fatalf("the agent was pushed %q", got)
+			}
+			if by := worker.relay.Ended(); by != "" {
+				t.Fatalf("the run was ended by %q", by)
+			}
+		})
+	}
+}
+
+// -- agent state -------------------------------------------------------------
+
+// A dispatcher reads working from `pushed` and waiting from a `turn` that
+// delivers nothing. Held messages pushed at a turn's end follow its `turn`.
+func TestEveryFrameOnStdinIsReportedAsPushed(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	worker, events := scripted(t, run)
+
+	say(t, run.developer, run.room, "one", "two")
+	waitFor(t, "both held", func() bool { return events.seen("held") == 2 })
+	worker.endTurn(t, "done")
+	worker.read(t)
+	waitFor(t, "the push", func() bool { return events.seen("pushed") == 1 })
+	if got := events.last("pushed")["messages"]; got != 2 {
+		t.Fatalf("pushed reported %v messages", got)
+	}
+	if got := events.lastTurn()["delivering"]; got != 2 {
+		t.Fatalf("the turn reported delivering %v", got)
+	}
+
+	worker.endTurn(t, "done again")
+	waitFor(t, "a waiting turn", func() bool { return events.lastTurn()["delivering"] == 0 })
+	say(t, run.developer, run.room, "three")
+	worker.read(t)
+	waitFor(t, "the second push", func() bool { return events.seen("pushed") == 2 })
+}
+
+// -- the session -------------------------------------------------------------
+
+// The agent's session id is reported once, from claude's `system` `init`
+// record, so a dispatcher can resume it without parsing the stream itself.
+func TestTheAgentsSessionIsReportedOncePerId(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	worker, events := scripted(t, run)
+
+	for _, line := range []string{
+		`{"type":"system","subtype":"init","session_id":"s-1","model":"m"}`,
+		`{"type":"system","subtype":"init","session_id":"s-1"}`,
+		`{"type":"system","subtype":"status","session_id":"s-9"}`,
+	} {
+		if _, err := worker.stdout.Write([]byte(line + "\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	worker.endTurn(t, "done")
+	waitFor(t, "the turn", func() bool { return events.seen("turn") == 1 })
+	if events.seen("session") != 1 {
+		t.Fatalf("session was reported %d times", events.seen("session"))
+	}
+	if got := events.last("session"); got["id"] != "s-1" || got["agent"] != "claude" {
+		t.Fatalf("the session was reported as %v", got)
 	}
 }

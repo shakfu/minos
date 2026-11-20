@@ -618,3 +618,47 @@ func quitOnF1(ui *Ui) {
 		handle(event)
 	}
 }
+
+// -room opens the session in that room. With -exit-with, the session returns
+// once that account, seen in the room, leaves: a dispatcher's run stopping.
+func TestASessionOpensInItsRoomAndEndsWhenTheRunLeaves(t *testing.T) {
+	server := testserver.Start(t, config.HistoryLimit)
+	demo, bob := connect(t, server.Base, "demo"), connect(t, server.Base, "bob")
+	room, err := demo.OpenRoom([]client.Principal{{Kind: "user", ID: "bob"}}, "Run", "persisted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "demo's copy of the room", func() bool { _, ok := demo.Rooms()[room.ID]; return ok })
+
+	ui := newUi(simulated(t, 80, 24), demo, client.Profile{Username: "demo"})
+	ui.start(Options{Room: room.ID, ExitWith: "bob"})
+	if ui.view != viewSpace || ui.selected != room.ID || ui.occupancy == "" {
+		t.Fatalf("the session opened on view %v, space %q, occupancy %q", ui.view, ui.selected, ui.occupancy)
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		ui.loop()
+		close(returned)
+	}()
+	// Not yet seen, so its absence ends nothing: the run may not have started.
+	select {
+	case <-returned:
+		t.Fatal("the session ended before the run was seen")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	occupancy, err := bob.Enter(room.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the run seen", ui.exitSeen.Load)
+	if err := bob.Exit(occupancy); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the session outlived the run")
+	}
+}
