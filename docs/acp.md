@@ -22,6 +22,18 @@ The events only ACP agents emit are listed in [minosb-events.md](minosb-events.m
 make acp-conformance ACP_AGENT='myra --acp'
 ```
 
-A MUST rule from the spec fails a test; a SHOULD rule is logged, and fails with `ACP_STRICT=1`. Prompts reach a model, so run the agent against its own test mock. `ACP_PROMPT`, `ACP_SLOW_PROMPT` and `ACP_PERMISSION_PROMPT` name the prompts; a test whose prompt is unset is skipped. Without `ACP_AGENT`, the suite runs against the scripted agent in `internal/acp/acpfake`, so `make test` checks the suite itself.
+A MUST rule from the spec fails a test; a SHOULD rule is logged, and fails with `ACP_STRICT=1`. Prompts reach a model, so run the agent against its own test mock. `ACP_PROMPT`, `ACP_SLOW_PROMPT` and `ACP_PERMISSION_PROMPT` name the prompts; a test whose prompt is unset is skipped. The usage test sends `ACP_PROMPT` twice and checks each `usage_update`: `used` and `size` present, a cost with `amount` and `currency`, and a cost that never falls. It skips an agent that sends none, unless `ACP_EXPECT_USAGE=1`. A second usage test loads the session in a new process after two prompts, prompts once more, and checks the cost did not fall. Each test gives the agent a new `HOME` and `XDG_*_HOME`, so its sessions and config stay out of yours; an assignment in `ACP_AGENT` overrides them. Without `ACP_AGENT`, the suite runs against the scripted agent in `internal/acp/acpfake`, so `make test` checks the suite itself.
 
-On 2026-11-20 `myra --acp`, against a mock provider, passed every test it could run. The cancel and permission tests were skipped for want of a slow and a permission-asking mock reply, and session/load because myra does not advertise `loadSession`.
+Agents checked on 2026-11-21, each against its own offline mock:
+
+| Agent | Result | Mock | Asks permission for |
+|-|-|-|-|
+| `myra --acp` | passed what it could run; cancel and permission skipped, no `loadSession` | `scratchpad` SSE server | its `--permissions` mode |
+| `gilda --acp --context 200000` | 12/12, also under `ACP_STRICT=1` | `gilda/mock/acp-conformance.json` | its `--permissions` mode |
+| `hax --acp` | 12/12, also under `ACP_STRICT=1` | `hax/scripts/mock/acp.txt` | `bash`, `edit`, `write` |
+| `minima --acp` | 12/12, also under `ACP_STRICT=1` | `minima/mock/acp.json` | every tool but `read` |
+| `hilda --acp --context-window 128000` | 12/12, also under `ACP_STRICT=1` | `hilda/test/acp-mock.py` | `write`, `edit`, `bash`; `ask` is its `--acp` default |
+
+With `ACP_EXPECT_USAGE=1`, all four sent a cumulative cost. All four mocks above report cost on two prompts. `gilda`, `hax` and `hilda` send `usage_update` only once they know the model's context window, which a mock lacks: pass `--context N` to `gilda`, `HAX_CONTEXT_LIMIT=N` to `hax` and `--context-window N` to `hilda`. With a real provider, the price list that gives the cost also gives the window.
+
+`hax`, `minima` and `hilda` ask by default in ACP mode. Under `minosb`'s default `-permission deny`, they can then only read; a run that should write needs `-permission allow`.

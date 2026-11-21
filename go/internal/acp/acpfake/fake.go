@@ -1,7 +1,8 @@
 // Package acpfake is a scripted ACP agent, for tests of the client and of the
 // conformance suite itself. It needs no model.
 //
-// A prompt is echoed as "you said: TEXT" in two chunks. A prompt holding
+// A prompt is echoed as "you said: TEXT" in two chunks, then a usage_update
+// whose cost grows by 0.001 USD a turn. A prompt holding
 // "slow" waits for session/cancel. One holding "permission" asks the client
 // first and reports its answer. History is kept in Dir, so session/load in a
 // new process replays it.
@@ -30,6 +31,7 @@ type Agent struct {
 	initialized bool
 	sessions    int
 	cancels     map[string]chan struct{}
+	// Each session's cost so far, in USD.
 }
 
 // Serve answers r on w until r ends.
@@ -109,7 +111,13 @@ func (a *Agent) Request(method string, params json.RawMessage, reply func(any, *
 			reply(nil, &acp.Error{Code: acp.CodeNotFound, Message: "no session " + p.SessionID})
 			return
 		}
-		go a.prompt(p.SessionID, p.Prompt, history, reply)
+		// The cancel channel exists before the next line is read, so a cancel
+		// in the prompt's own write still finds it.
+		cancel := make(chan struct{})
+		a.mutex.Lock()
+		a.cancels[p.SessionID] = cancel
+		a.mutex.Unlock()
+		go a.prompt(p.SessionID, p.Prompt, history, cancel, reply)
 	default:
 		reply(nil, &acp.Error{Code: acp.CodeMethodNotFound, Message: "Method not found: " + method})
 	}
@@ -131,7 +139,7 @@ func (a *Agent) Notification(method string, params json.RawMessage) {
 	a.mutex.Unlock()
 }
 
-func (a *Agent) prompt(session string, blocks []acp.ContentBlock, history []turn, reply func(any, *acp.Error)) {
+func (a *Agent) prompt(session string, blocks []acp.ContentBlock, history []turn, cancel chan struct{}, reply func(any, *acp.Error)) {
 	var texts []string
 	for _, block := range blocks {
 		if block.Type == "text" {
@@ -139,10 +147,6 @@ func (a *Agent) prompt(session string, blocks []acp.ContentBlock, history []turn
 		}
 	}
 	text := strings.Join(texts, "\n")
-	cancel := make(chan struct{})
-	a.mutex.Lock()
-	a.cancels[session] = cancel
-	a.mutex.Unlock()
 	defer func() {
 		a.mutex.Lock()
 		if a.cancels[session] == cancel {
@@ -177,6 +181,12 @@ func (a *Agent) prompt(session string, blocks []acp.ContentBlock, history []turn
 				{OptionID: "no", Name: "Reject", Kind: "reject_once"},
 			},
 		}, &result)
+		select {
+		case <-cancel:
+			reply(map[string]string{"stopReason": "cancelled"}, nil)
+			return
+		default:
+		}
 		switch {
 		case err != nil:
 			answer = "permission failed: " + err.Error()
@@ -189,6 +199,15 @@ func (a *Agent) prompt(session string, blocks []acp.ContentBlock, history []turn
 	half := len(answer) / 2
 	a.update(session, "agent_message_chunk", answer[:half])
 	a.update(session, "agent_message_chunk", answer[half:])
+	// 0.001 a turn, from the stored history, so the cost survives a load.
+	cost := 0.001 * float64(len(history)+1)
+	_ = a.conn.Notify("session/update", map[string]any{
+		"sessionId": session,
+		"update": map[string]any{
+			"sessionUpdate": "usage_update", "used": 100 * (len(history) + 1), "size": 200000,
+			"cost": map[string]any{"amount": cost, "currency": "USD"},
+		},
+	})
 	if err := a.save(session, append(history, turn{User: text, Agent: answer})); err != nil {
 		reply(nil, &acp.Error{Code: acp.CodeInternal, Message: err.Error()})
 		return

@@ -37,8 +37,8 @@ type InitializeResult struct {
 // Update is the `update` of a session/update notification. Raw keeps the
 // fields a caller wants beyond these.
 type Update struct {
-	SessionUpdate string        `json:"sessionUpdate"`
-	Content       *ContentBlock `json:"-"`
+	SessionUpdate string          `json:"sessionUpdate"`
+	Content       *ContentBlock   `json:"-"`
 	ToolCallID    string          `json:"toolCallId"`
 	Title         string          `json:"title"`
 	Kind          string          `json:"kind"`

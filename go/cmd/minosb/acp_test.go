@@ -71,7 +71,7 @@ func TestAnACPAgentRunsUnderMinosb(t *testing.T) {
 	for _, event := range eventsIn(t, eventsPath) {
 		names = append(names, fmt.Sprint(event["event"]))
 	}
-	if got := strings.Join(names, " "); got != "ready pushed result session turn pushed result turn closed exited stopped" {
+	if got := strings.Join(names, " "); got != "ready pushed usage result session turn pushed usage result turn closed exited stopped" {
 		t.Fatalf("the events were %s", got)
 	}
 }

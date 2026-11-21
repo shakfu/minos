@@ -17,7 +17,7 @@ Items marked `pma backend` make minos the place pma's agents run, in place of he
 - [ ] pma backend: adapters for pma's workers (decided 2026-11-20: minos runs agents other than Claude).
   - Done: the one-shot kind, `minosb -agent-spec FILE` (`docs/one-shot-agents.md`), with specs for `gilda`, `hax`, `minima`, `hilda` and `myra` in `agents/`.
   - Done: the ACP kind, `minosb -agent acp`, and the conformance suite `go/acpconformance` (`docs/acp.md`). `myra --acp` passes it.
-  - Next: an ACP server in gilda, hax, minima and hilda, each passing `make acp-conformance`.
+  - Done 2026-11-20: `--acp` in gilda, hax, minima and hilda, each passing `make acp-conformance` under `ACP_STRICT=1` (`docs/acp.md`).
   - Not covered: codex, opencode, pi, omp. Their output was never read.
 
 - [ ] pma backend: move an open client into a room, for pma's `H` from its web. Done: `minos -room ID [-exit-with USER]`. Open: when a client is already open elsewhere, a server request moves it into the room, so `H` needs no new terminal. Only the user's own sessions may be moved.

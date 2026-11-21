@@ -8,6 +8,14 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 ### Added
 
+- The ACP conformance suite checks `usage_update`: `used` and `size` present, a cost with `amount` and `currency`, and a session cost that never falls across turns. `ACP_EXPECT_USAGE=1` fails an agent that sends none. The scripted agent now reports a cost, so `make test` covers the `usage` event.
+
+- The ACP conformance suite cancels a prompt while its permission request is pending. The prompt must end `cancelled`; under `ACP_STRICT=1`, the agent must also not run the tool or ask again. The scripted agent ended such a prompt `end_turn`, and now ends it `cancelled`.
+
+- Two more ACP conformance tests. A cancel in the same write as its prompt must still end it `cancelled`: an agent that started the turn before it could take a cancel lost it, and so did the scripted agent. A session's cost must not fall across a `session/load` in a new process; the usage test runs `ACP_PROMPT` three times for it. The scripted agent now derives its cost from the stored history.
+
+- The ACP conformance suite sends twenty prompts, each with its cancel in the same write, and each must be answered. One such prompt passed in hilda; twenty found a cancel landing before the turn started, after which hilda never answered and refused every later prompt with -32600.
+
 - A room admits one agent run by default, enforcing D10 of [design.md](docs/dev/design.md). `MINOS_AGENTS` (default `worker`) names the accounts runs speak as. `MINOS_ROOM_AGENTS` (default 1, 0 for no limit) caps the occupancies they hold in one room. `minosb` enters its room on start and fails if refused. A run that loses its place on a reconnect asks for it back for 45 s, then reports `unseated` and stops; the retry covers a reconnect that reaches the server before it has released the dead connection's place. 45 s outlasts the server's keepalive, 30 s of silence and a 10 s write; at 10 s, a server that missed the close still held the seat, and a brief network fault ended the run. Agent accounts are exempt from one room per person: under that rule, a `worker` run entering a second room released its first, and a third run could then enter that one. The limit is server-wide; a per-room override was deferred.
 
 - `make sim` runs three scripted agents through `minosd`, `minosb` and `minosa`, with no model. They share one room, stream progress with `say`, and wait on each other's findings over `messages`. Each submits a proposal and awaits the decision. A scripted moderator approves two and rejects one; `-manual` leaves the decisions to a person in the terminal client. `-server URL` runs against a running server, so the terminal client can watch, and `-pace F` slows the script. The agents run as `alice`, `bob` and `worker`. A broker drops its own account's messages, so agents sharing `worker` could not read each other.
@@ -55,6 +63,8 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 - The Python tree: `server/`, `messaging/`, `tui/`, the pytest suite, `pyproject.toml`, the uv venv, and the `install`, `serve-go` and `conformance-go` make targets. A second implementation of the core cost about 55% more code per feature, and it described behaviour `go/` already had. Three parts were ported rather than dropped: the conformance suite, the only black-box test of the server; the terminal client, its only client; and the audience demo.
 
 ### Fixed
+
+- Each ACP conformance test gives the agent a new `HOME` and `XDG_*_HOME`. The agent inherited the person's, so a run left one session file per test in `~/.local/state/hax`, and minima's README command wrote them into minima's checkout.
 
 - A shim refused for the broker's connection limit reported `cannot send to the broker: broken pipe` in place of the refusal. The broker can answer and close before the shim writes its request, so the write fails while the refusal sits unread. The shim now reads the reply after a failed write. Seen as a 1-in-400 failure of `TestAConnectionPastTheLimitIsRefused`.
 

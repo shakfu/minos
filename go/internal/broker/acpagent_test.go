@@ -113,6 +113,11 @@ func TestEachACPTurnIsReportedAsAResult(t *testing.T) {
 	if got == nil || got["text"] != "you said: demo: hello" || got["stop_reason"] != "end_turn" || got["error"] != nil {
 		t.Fatalf("the result was reported as %v", got)
 	}
+	// The agent's cumulative cost, as it gave it.
+	usage := events.last("usage")
+	if usage == nil || usage["cost"] != 0.001 || usage["currency"] != "USD" {
+		t.Fatalf("the usage was reported as %v", usage)
+	}
 }
 
 // Closing the relay's stdin ends the agent, and Wait is its exit status.
