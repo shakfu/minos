@@ -64,6 +64,8 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 ### Fixed
 
+- An ACP turn's text after a tool call starts a new paragraph. ACP text chunks mark no message boundary, and `minosb` joined them as sent, so gilda posted "then waiting.Done." for two messages around a tool call.
+
 - Each ACP conformance test gives the agent a new `HOME` and `XDG_*_HOME`. The agent inherited the person's, so a run left one session file per test in `~/.local/state/hax`, and minima's README command wrote them into minima's checkout.
 
 - A shim refused for the broker's connection limit reported `cannot send to the broker: broken pipe` in place of the refusal. The broker can answer and close before the shim writes its request, so the write fails while the refusal sits unread. The shim now reads the reply after a failed write. Seen as a 1-in-400 failure of `TestAConnectionPastTheLimitIsRefused`.

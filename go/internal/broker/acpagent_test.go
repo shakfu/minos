@@ -64,6 +64,18 @@ func TestAnACPAgentAnswersEachTurnInOneSession(t *testing.T) {
 	}
 }
 
+// ACP chunks mark no message boundary, so the text after a tool call starts
+// a new paragraph rather than running into the text before it.
+func TestTextAfterAnACPToolCallStartsAParagraph(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	acpRun(t, run)
+
+	say(t, run.developer, run.room, "tool")
+	if got, want := posted(t, run, "you said"), "reading x.txt\n\nyou said: demo: tool"; got != want {
+		t.Fatalf("the turn said %q, want %q", got, want)
+	}
+}
+
 // An interrupt is session/cancel. The turn ends cancelled, with what the
 // agent had said, and the session goes on.
 func TestAnInterruptCancelsTheACPPrompt(t *testing.T) {

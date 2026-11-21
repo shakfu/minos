@@ -5,7 +5,7 @@
 ## What minosb does
 
 - At start, it sends `initialize` with protocol version 1 and no client capabilities, then `session/new` in its own working directory with no MCP servers. An agent that answers neither within 30 s, or answers another version, fails the start with exit 2.
-- Each turn is one `session/prompt`. The room gets the turn's `agent_message_chunk` text. A turn that stops for a reason other than `end_turn` or `cancelled` adds `[stopped: REASON]`; a JSON-RPC error adds `[turn failed: ERROR]`.
+- Each turn is one `session/prompt`. The room gets the turn's `agent_message_chunk` text, with a paragraph break where text follows a tool call. A turn that stops for a reason other than `end_turn` or `cancelled` adds `[stopped: REASON]`; a JSON-RPC error adds `[turn failed: ERROR]`.
 - An interrupt is `session/cancel`.
 - It advertises no file system and no terminal, so the agent uses its own. A call to either is answered `-32601`.
 - Each `session/request_permission` is answered by `-permission`: `deny` (the default) picks the agent's `reject_once` option, and `allow` its `allow_once`. Once, never always, so the next request is asked again. A request with no option of that kind is cancelled.
@@ -28,12 +28,12 @@ Agents checked on 2026-11-21, each against its own offline mock:
 
 | Agent | Result | Mock | Asks permission for |
 |-|-|-|-|
-| `myra --acp` | passed what it could run; cancel and permission skipped, no `loadSession` | `scratchpad` SSE server | its `--permissions` mode |
+| `myra --acp --context-window 8000` | passed what it could run, usage too; cancel and permission skipped, no `loadSession` | `scratchpad` SSE server | its `--permissions` mode |
 | `gilda --acp --context 200000` | 12/12, also under `ACP_STRICT=1` | `gilda/mock/acp-conformance.json` | its `--permissions` mode |
 | `hax --acp` | 12/12, also under `ACP_STRICT=1` | `hax/scripts/mock/acp.txt` | `bash`, `edit`, `write` |
 | `minima --acp` | 12/12, also under `ACP_STRICT=1` | `minima/mock/acp.json` | every tool but `read` |
 | `hilda --acp --context-window 128000` | 12/12, also under `ACP_STRICT=1` | `hilda/test/acp-mock.py` | `write`, `edit`, `bash`; `ask` is its `--acp` default |
 
-With `ACP_EXPECT_USAGE=1`, all four sent a cumulative cost. All four mocks above report cost on two prompts. `gilda`, `hax` and `hilda` send `usage_update` only once they know the model's context window, which a mock lacks: pass `--context N` to `gilda`, `HAX_CONTEXT_LIMIT=N` to `hax` and `--context-window N` to `hilda`. With a real provider, the price list that gives the cost also gives the window.
+With `ACP_EXPECT_USAGE=1`, all five sent a cumulative cost. `gilda`, `hax`, `myra` and `hilda` send `usage_update` only once they know the model's context window, which a mock lacks: pass `--context N` to `gilda`, `HAX_CONTEXT_LIMIT=N` to `hax` and `--context-window N` to `myra` and `hilda`. With a real provider, the price list that gives the cost also gives the window.
 
 `hax`, `minima` and `hilda` ask by default in ACP mode. Under `minosb`'s default `-permission deny`, they can then only read; a run that should write needs `-permission allow`.

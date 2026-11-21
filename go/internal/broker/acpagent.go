@@ -44,6 +44,8 @@ type ACPAgent struct {
 
 	mutex sync.Mutex
 	text  strings.Builder
+	// A tool call came after the turn's text: the next text is a new message.
+	split bool
 	code  int
 	done  chan struct{}
 }
@@ -178,6 +180,7 @@ func (a *ACPAgent) Kill() {
 func (a *ACPAgent) prompt(text string) {
 	a.mutex.Lock()
 	a.text.Reset()
+	a.split = false
 	a.mutex.Unlock()
 	stop, err := a.client.Prompt(a.session, text)
 	a.mutex.Lock()
@@ -212,9 +215,13 @@ func (a *ACPAgent) update(session string, update acp.Update) {
 	case "agent_message_chunk":
 		if update.Content != nil && update.Content.Type == "text" {
 			a.mutex.Lock()
-			a.text.WriteString(update.Content.Text)
+			a.say(update.Content.Text)
 			a.mutex.Unlock()
 		}
+	case "tool_call", "tool_call_update":
+		a.mutex.Lock()
+		a.split = a.text.Len() > 0
+		a.mutex.Unlock()
 	case "usage_update":
 		var usage struct {
 			Cost *struct {
@@ -226,6 +233,23 @@ func (a *ACPAgent) update(session string, update acp.Update) {
 			a.report(map[string]any{"event": "usage", "cost": usage.Cost.Amount, "currency": usage.Cost.Currency})
 		}
 	}
+}
+
+// say adds a chunk to the turn's text, as a new paragraph after a tool call.
+// ACP marks no message boundary, so the two messages would run together.
+// Call it with the mutex held.
+func (a *ACPAgent) say(chunk string) {
+	if !a.split {
+		a.text.WriteString(chunk)
+		return
+	}
+	if chunk = strings.TrimLeft(chunk, "\n"); chunk == "" {
+		return
+	}
+	before := strings.TrimRight(a.text.String(), " \n")
+	a.text.Reset()
+	a.text.WriteString(before + "\n\n" + chunk)
+	a.split = false
 }
 
 // How much of a tool call's input a permission event carries.

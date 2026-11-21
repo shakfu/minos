@@ -195,6 +195,16 @@ func (a *Agent) prompt(session string, blocks []acp.ContentBlock, history []turn
 		default:
 			answer = "permission: " + result.Outcome.Outcome
 		}
+	case strings.Contains(text, "tool"):
+		// Text, then a tool call, then the answer: two model messages.
+		a.update(session, "agent_message_chunk", "reading x.txt")
+		for _, status := range []string{"pending", "completed"} {
+			kind := map[string]string{"pending": "tool_call", "completed": "tool_call_update"}[status]
+			_ = a.conn.Notify("session/update", map[string]any{
+				"sessionId": session,
+				"update":    map[string]any{"sessionUpdate": kind, "toolCallId": "call-2", "title": "read x.txt", "kind": "read", "status": status},
+			})
+		}
 	}
 	half := len(answer) / 2
 	a.update(session, "agent_message_chunk", answer[:half])
