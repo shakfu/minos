@@ -8,6 +8,10 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 ### Added
 
+- `minosb`'s `usage` event carries the agent's `used` and `size`, the context fill and window from ACP's `usage_update`. It is now sent for every `usage_update`, with `cost` and `currency` only when the update has a cost; before, an update without a cost sent nothing. A dispatcher wanting the total takes the last event with a cost.
+
+- `make acp-run` runs one ACP agent under `minosb` against a server of its own, posts each `-say` as `demo`, and prints the replies and ACP events. `-hold` keeps it up for the terminal client. It ran gilda, hax, minima, hilda and myra against `openai/gpt-6-luna`. See [acp.md](docs/acp.md).
+
 - The ACP conformance suite checks `usage_update`: `used` and `size` present, a cost with `amount` and `currency`, and a session cost that never falls across turns. `ACP_EXPECT_USAGE=1` fails an agent that sends none. The scripted agent now reports a cost, so `make test` covers the `usage` event.
 
 - The ACP conformance suite cancels a prompt while its permission request is pending. The prompt must end `cancelled`; under `ACP_STRICT=1`, the agent must also not run the tool or ask again. The scripted agent ended such a prompt `end_turn`, and now ends it `cancelled`.

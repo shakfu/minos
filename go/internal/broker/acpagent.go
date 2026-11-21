@@ -205,8 +205,7 @@ func (a *ACPAgent) prompt(text string) {
 	_, _ = a.turns.Write(append(raw, '\n'))
 }
 
-// update gathers the running turn's reply, and reports the cost the agent
-// gives in a usage_update.
+// update gathers the running turn's reply, and reports each usage_update.
 func (a *ACPAgent) update(session string, update acp.Update) {
 	if session != a.session {
 		return
@@ -224,13 +223,28 @@ func (a *ACPAgent) update(session string, update acp.Update) {
 		a.mutex.Unlock()
 	case "usage_update":
 		var usage struct {
+			Used *int64 `json:"used"`
+			Size *int64 `json:"size"`
 			Cost *struct {
 				Amount   float64 `json:"amount"`
 				Currency string  `json:"currency"`
 			} `json:"cost"`
 		}
-		if json.Unmarshal(update.Raw, &usage) == nil && usage.Cost != nil {
-			a.report(map[string]any{"event": "usage", "cost": usage.Cost.Amount, "currency": usage.Cost.Currency})
+		if json.Unmarshal(update.Raw, &usage) != nil {
+			return
+		}
+		event := map[string]any{"event": "usage"}
+		if usage.Used != nil {
+			event["used"] = *usage.Used
+		}
+		if usage.Size != nil {
+			event["size"] = *usage.Size
+		}
+		if usage.Cost != nil {
+			event["cost"], event["currency"] = usage.Cost.Amount, usage.Cost.Currency
+		}
+		if len(event) > 1 {
+			a.report(event)
 		}
 	}
 }

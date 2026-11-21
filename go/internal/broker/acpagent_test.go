@@ -125,10 +125,26 @@ func TestEachACPTurnIsReportedAsAResult(t *testing.T) {
 	if got == nil || got["text"] != "you said: demo: hello" || got["stop_reason"] != "end_turn" || got["error"] != nil {
 		t.Fatalf("the result was reported as %v", got)
 	}
-	// The agent's cumulative cost, as it gave it.
+	// The agent's context fill and cumulative cost, as it gave them.
 	usage := events.last("usage")
-	if usage == nil || usage["cost"] != 0.001 || usage["currency"] != "USD" {
+	if usage == nil || usage["used"] != int64(100) || usage["size"] != int64(200000) || usage["cost"] != 0.001 || usage["currency"] != "USD" {
 		t.Fatalf("the usage was reported as %v", usage)
+	}
+}
+
+// A usage_update without a cost is still reported, with no cost.
+func TestAnACPUsageWithoutACostIsReported(t *testing.T) {
+	run := dispatch(t, config.HistoryLimit, false)
+	_, _, events := acpRun(t, run)
+
+	say(t, run.developer, run.room, "free")
+	posted(t, run, "you said: demo: free")
+	usage := events.last("usage")
+	if usage == nil || usage["used"] != int64(100) || usage["size"] != int64(200000) {
+		t.Fatalf("the usage was reported as %v", usage)
+	}
+	if _, ok := usage["cost"]; ok {
+		t.Fatalf("a usage without a cost was reported with one: %v", usage)
 	}
 }
 

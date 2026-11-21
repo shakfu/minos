@@ -138,6 +138,7 @@ The server does not need `dist/`. If it is empty, the server warns and serves th
 | `make demo` | Narrate the channel audience rule, against a server and database of its own. |
 | `make sim` | Run three scripted agents, each under its own `minosb`, in one room with a moderated channel. They stream progress, read each other's findings and await decisions. `SIM_FLAGS='-server http://127.0.0.1:8000 -pace 3'` runs against `make serve`, slowly enough to watch from `make user-demo`; `-manual` leaves the decisions to you. |
 | `make host-run` | Drive one real `claude` under `minosb` on the host, and check relay, held messages, both interrupt lanes and the shim. Spends turns on your account; the agent is unsandboxed. |
+| `make acp-run` | Run one ACP agent, `ACP_AGENT`, under `minosb` against a server of its own, and print its replies and events. `ACP_RUN_FLAGS` takes `-say TEXT` (repeatable), `-permission allow`, `-isolate` and `-hold`. See [acp.md](docs/acp.md). |
 | `make test` | `go test -race ./...`, the wire contract included. |
 | `make conformance` | The wire contract alone. |
 | `make cover` | The server's coverage under the wire contract. |

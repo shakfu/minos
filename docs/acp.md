@@ -14,6 +14,14 @@
 
 The events only ACP agents emit are listed in [minosb-events.md](minosb-events.md): `result`, `usage` and `permission`.
 
+## A run by hand
+
+```text
+make acp-run ACP_AGENT='myra --acp' ACP_RUN_FLAGS="-say 'write hello.txt' -permission allow"
+```
+
+`go/cmd/acprun` starts a server and `minosb -agent acp`, posts each `-say` as `demo`, and prints the replies and the `turn`, `result`, `usage` and `permission` events. `-isolate` gives the agent a new `HOME` and `XDG_*_HOME`. `-hold` keeps the run up and prints the `minos` command that joins its room. The output directory holds `events.jsonl`, `agent.jsonl`, `minosb.stderr` and the agent's `work/`.
+
 ## Conformance
 
 `go/acpconformance` checks an agent's end of the protocol, as minosb uses it:

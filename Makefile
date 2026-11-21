@@ -1,6 +1,6 @@
 MEDIA := docs/media
 
-.PHONY: go install uninstall install-service uninstall-service acp-conformance serve tui user-demo user-alice demo sim host-run test conformance cover container diagrams clean-diagrams clean
+.PHONY: go install uninstall install-service uninstall-service acp-conformance serve tui user-demo user-alice demo sim host-run acp-run test conformance cover container diagrams clean-diagrams clean
 
 GO_SOURCES := $(shell find go -name '*.go' 2>/dev/null) go/go.mod go/go.sum
 
@@ -94,6 +94,13 @@ sim: go
 ## messages, both interrupt lanes, the shim. Spends turns on your account.
 host-run: go
 	@cd go && go run ./cmd/hostrun
+
+## One ACP agent under go/minosb, against a server of its own. demo posts each
+## -say; the run prints the replies and the ACP events. -hold waits for the
+## terminal client. A real agent spends turns on its provider. See docs/acp.md.
+##   make acp-run ACP_AGENT='myra --acp' ACP_RUN_FLAGS="-say 'hello' -permission allow"
+acp-run: go
+	@cd go && go run ./cmd/acprun $(ACP_RUN_FLAGS) -- $(ACP_AGENT)
 
 ## Unit tests, then the wire contract against the built server. -count=1
 ## because go test cannot see that the binary under test changed. -race covers

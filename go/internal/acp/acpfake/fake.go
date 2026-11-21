@@ -2,9 +2,9 @@
 // conformance suite itself. It needs no model.
 //
 // A prompt is echoed as "you said: TEXT" in two chunks, then a usage_update
-// whose cost grows by 0.001 USD a turn. A prompt holding
-// "slow" waits for session/cancel. One holding "permission" asks the client
-// first and reports its answer. History is kept in Dir, so session/load in a
+// whose cost grows by 0.001 USD a turn; a prompt holding "free" gets no
+// cost. A prompt holding "slow" waits for session/cancel. One holding
+// "permission" asks the client first and reports its answer. History is kept in Dir, so session/load in a
 // new process replays it.
 package acpfake
 
@@ -31,7 +31,6 @@ type Agent struct {
 	initialized bool
 	sessions    int
 	cancels     map[string]chan struct{}
-	// Each session's cost so far, in USD.
 }
 
 // Serve answers r on w until r ends.
@@ -211,12 +210,14 @@ func (a *Agent) prompt(session string, blocks []acp.ContentBlock, history []turn
 	a.update(session, "agent_message_chunk", answer[half:])
 	// 0.001 a turn, from the stored history, so the cost survives a load.
 	cost := 0.001 * float64(len(history)+1)
+	usage := map[string]any{"sessionUpdate": "usage_update", "used": 100 * (len(history) + 1), "size": 200000,
+		"cost": map[string]any{"amount": cost, "currency": "USD"}}
+	if strings.Contains(text, "free") {
+		delete(usage, "cost")
+	}
 	_ = a.conn.Notify("session/update", map[string]any{
 		"sessionId": session,
-		"update": map[string]any{
-			"sessionUpdate": "usage_update", "used": 100 * (len(history) + 1), "size": 200000,
-			"cost": map[string]any{"amount": cost, "currency": "USD"},
-		},
+		"update":    usage,
 	})
 	if err := a.save(session, append(history, turn{User: text, Agent: answer})); err != nil {
 		reply(nil, &acp.Error{Code: acp.CodeInternal, Message: err.Error()})
