@@ -8,10 +8,6 @@ Items marked `pma backend` make minos the place pma's agents run, in place of he
 
 ## High
 
-- [x] pma backend: person-driven runs, for pma's `I`. `minosb` runs the agent with or without `-task`, with no linger and no timeout. The person ends the run from the room: `/end` closes stdin, the agent exits, and `stopped` reports reason `ended`. Done when a scripted fake agent takes a person's message, then `/end`, and exits 0.
-
-- [x] pma backend: take over a finished run, for pma's `T`. minos reports the `session` event; a clean exit frees the seat at once. pma's first `T` uses a take-over prompt in `runs.room` rather than `--resume`.
-
 - [ ] pma backend: agent state in the client. pma reads state from `-events` (`pushed`, `turn` with `delivering: 0`, `stopped`; `docs/minosb-events.md`), so pma needs nothing more. Open: the client lists a `waiting` room under what waits on you in `OVERVIEW`. Clients never see `-events`, so this needs the state on the wire. herdr's `blocked` waits for permission requests.
 
 - [ ] pma backend: adapters for pma's workers (decided 2026-11-20: minos runs agents other than Claude).
@@ -21,8 +17,6 @@ Items marked `pma backend` make minos the place pma's agents run, in place of he
   - Not covered: codex, opencode, pi, omp. Their output was never read.
 
 - [ ] pma backend: move an open client into a room, for pma's `H` from its web. Done: `minos -room ID [-exit-with USER]`. Open: when a client is already open elsewhere, a server request moves it into the room, so `H` needs no new terminal. Only the user's own sessions may be moved.
-
-- [x] pma backend: the server as a service, and a check. With `minosd` down, every pma run starts without a room or fails. Add a launchd plist and a systemd unit (`make install-service`). Add `minos ping`, whose exit status tells pma one of: no server, refused credentials, or a server too old for the flags pma passes.
 
 ## Medium
 
@@ -39,8 +33,6 @@ Items marked `pma backend` make minos the place pma's agents run, in place of he
 - [ ] pma backend: a person-driven run outlives a server restart. `unseated` stops the agent after 45 s. In a person-driven run, keep the agent, reconnect, and hold the person's messages on the server until it does. Headless runs keep the 45 s rule.
 
 ## Low
-
-- [x] pma backend: the contract pma reads, written down (`docs/minosb-events.md`). Document each `stopped` reason (`signal`, `exited`, `torn`, `unseated`, `ended`) and each `minosb` exit code, so pma maps each to a run outcome. Today pma assumes `unseated` means failed, untested.
 
 - [ ] pma backend: a check of each mode pma uses. Drive headless, person-driven and take-over runs through `minosb`, as pma does, with the scripted fake agent: `make pma-backend`. pma's `make minos-check` covers headless only.
 
