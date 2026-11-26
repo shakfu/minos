@@ -207,3 +207,29 @@ func TestAMistypedFlagIsNotIgnored(t *testing.T) {
 		}
 	}
 }
+
+// An agent's words are marked as an agent's, and its progress and handoffs as
+// such, so a worker tells a person's instruction from another run's.
+func TestAnAgentsRecordIsMarked(t *testing.T) {
+	reply := link.Reply{Code: link.CodeOK, Records: []link.Record{
+		{Kind: link.KindMessage, Seq: 1, Author: "demo", AuthorKind: "user", Body: "stop"},
+		{Kind: link.KindMessage, Seq: 2, Author: "worker", AuthorKind: "agent", Body: "go"},
+		{Kind: link.KindHandoff, Seq: 3, Author: "worker", AuthorKind: "agent", Body: "start here"},
+	}}
+	_, stdout, _, _ := run(t, []string{"messages"}, "", reply)
+	want := "[1] demo: stop\n[2] worker (agent): go\n[3] worker (agent, handoff): start here\n"
+	if stdout != want {
+		t.Fatalf("stdout reads %q", stdout)
+	}
+}
+
+func TestSayCarriesItsKind(t *testing.T) {
+	code, _, _, seen := run(t, []string{"say", "-kind", "progress", "Edit x.go"}, "", link.Reply{Code: link.CodeOK})
+	if code != link.CodeOK || seen.Kind != "progress" || seen.Body != "Edit x.go" {
+		t.Fatalf("exit %d after sending %+v", code, seen)
+	}
+	if code, _, stderr, _ := run(t, []string{"submit", "-kind", "progress", "x"}, "", link.Reply{}); code != link.CodeLocal ||
+		!strings.Contains(stderr, "-kind is for say") {
+		t.Fatalf("submit -kind exited %d: %q", code, stderr)
+	}
+}

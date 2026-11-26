@@ -384,6 +384,9 @@ func (r *Relay) deliver(ended bool) {
 		r.held, r.inTurn = nil, len(batch) > 0
 	}
 	r.mutex.Unlock()
+	// Between turns everything seen so far is in the frame, or was not for
+	// the agent: what a person sent is no longer held.
+	through := r.broker.pushedThrough()
 
 	if dropped > 0 {
 		r.control(map[string]any{"event": "undelivered", "messages": dropped})
@@ -409,10 +412,13 @@ func (r *Relay) deliver(ended bool) {
 		if read > 0 {
 			event["read"] = read
 		}
+		if len(batch) == 0 {
+			event["through"] = through
+		}
 		r.control(event)
 	}
 	if len(batch) > 0 {
-		r.enqueue(func() { r.write(batch) })
+		r.enqueue(func() { r.write(batch, through) })
 	}
 }
 
@@ -479,14 +485,15 @@ func (r *Relay) interrupt(asks []Ask, send bool, id string) {
 }
 
 // write pushes texts as one frame and reports it as `pushed`: a turn starts,
-// which a dispatcher reads as the agent working.
-func (r *Relay) write(texts []string) {
+// which a dispatcher reads as the agent working. through is the room's highest
+// sequence number the frame covers.
+func (r *Relay) write(texts []string, through int64) {
 	frame, err := r.adapter.Push(texts)
 	if err == nil {
 		_, err = r.stdin.Write(frame)
 	}
 	if err == nil {
-		r.control(map[string]any{"event": "pushed", "messages": len(texts)})
+		r.control(map[string]any{"event": "pushed", "messages": len(texts), "through": through})
 	}
 	if err != nil {
 		// Nothing reached the agent, so no turn started. Deliver must hear it,

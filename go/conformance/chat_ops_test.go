@@ -17,7 +17,7 @@ const systemChannel = "system"
 func TestSyncDescribesTheWholeOfWhatAClientNeeds(t *testing.T) {
 	reply := connect(t, admin).Call("sync")
 	keySet(t, reply, "me", "isAdmin", "users", "groups", "projects", "rooms", "channels",
-		"read", "visited", "submissions")
+		"read", "visited", "submissions", "queue", "agents")
 	same(t, reply["me"], "demo")
 	same(t, reply["isAdmin"], true)
 }
@@ -412,9 +412,10 @@ func TestAMessageCarriesTheWholeShape(t *testing.T) {
 	alice.Call("send", "room", room["id"], "body", "hello")
 
 	message := obj(list(alice.Call("history", "room", room["id"], "since", 0)["messages"])[0])
-	keySet(t, message, "room", "seq", "author", "kind", "subject", "body", "at")
+	keySet(t, message, "room", "seq", "author", "authorKind", "kind", "subject", "body", "at")
 	null(t, message, "subject")
 	same(t, message["author"], "alice")
+	same(t, message["authorKind"], "user")
 	same(t, message["kind"], "text")
 	same(t, message["body"], "hello")
 	truth(t, num(message["at"]) > 0, "at is %v", message["at"])

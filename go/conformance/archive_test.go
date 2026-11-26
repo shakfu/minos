@@ -126,7 +126,7 @@ func TestTheAdministratorPagesThroughTheArchive(t *testing.T) {
 	same(t, []any{obj(messages[0])["seq"], obj(messages[199])["seq"], page["after"], page["more"]},
 		[]any{1, 200, 0, true})
 	// Archived unchanged: the message shape, subject included.
-	keySet(t, obj(messages[0]), "room", "seq", "author", "kind", "subject", "body", "at")
+	keySet(t, obj(messages[0]), "room", "seq", "author", "authorKind", "kind", "subject", "body", "at")
 
 	last := demo.Call("archive.read", "room", channel, "after", 200)
 	same(t, []any{pluck(last["messages"], "body"), last["more"]}, []any{[]string{"m201"}, false})

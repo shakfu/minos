@@ -110,7 +110,11 @@ type Message struct {
 	Room   string `json:"room"`
 	Seq    int64  `json:"seq"`
 	Author string `json:"author"`
-	Kind   string `json:"kind"`
+	// "user", "agent" or "system": who the author is, as the server knows it.
+	// Empty from a server that predates author kinds.
+	AuthorKind string `json:"authorKind"`
+	// "text", "event", or from an agent run "progress" or "handoff".
+	Kind string `json:"kind"`
 	// A channel message's headline, and nil in a room.
 	Subject *string `json:"subject"`
 	Body    string  `json:"body"`
@@ -151,6 +155,32 @@ type Submission struct {
 	At      float64 `json:"at"`
 	State   string  `json:"state"`
 	Comment *string `json:"comment"`
+	// The room it was raised from, or empty.
+	Room string `json:"room"`
+}
+
+// AgentState is what an agent run in a room last reported: idle, working,
+// interrupting, closing or stopped. Through is the highest sequence number
+// the run has been handed; a later message is held or not yet delivered.
+type AgentState struct {
+	Room     string  `json:"room"`
+	Username string  `json:"username"`
+	State    string  `json:"state"`
+	Turn     int64   `json:"turn"`
+	Held     int64   `json:"held"`
+	Through  int64   `json:"through"`
+	Detail   string  `json:"detail"`
+	Since    float64 `json:"since"`
+	At       float64 `json:"at"`
+}
+
+// AgentReport is what a run says of itself with ReportAgent.
+type AgentReport struct {
+	State   string
+	Turn    int64
+	Held    int64
+	Through int64
+	Detail  string
 }
 
 type SyncReply struct {
@@ -164,6 +194,8 @@ type SyncReply struct {
 	Read        map[string]int64 `json:"read"`
 	Visited     []string         `json:"visited"`
 	Submissions []Submission     `json:"submissions"`
+	Queue       []Submission     `json:"queue"`
+	Agents      []AgentState     `json:"agents"`
 }
 
 // Client is protocol state: who exists, what spaces there are, and what was said.
@@ -186,6 +218,9 @@ type Client struct {
 	// decision as a moderator.
 	submissions map[string]Submission
 	queued      map[string]Submission
+
+	// What each agent run last reported, by room and then account.
+	agents map[string]map[string]AgentState
 
 	// Highest sequence applied per room: what a gap is measured against, and a
 	// different fact from read.
@@ -238,6 +273,7 @@ func NewClient(socket *Socket) *Client {
 		read:         map[string]int64{},
 		submissions:  map[string]Submission{},
 		queued:       map[string]Submission{},
+		agents:       map[string]map[string]AgentState{},
 		cursors:      map[string]int64{},
 		repairing:    map[string]chan struct{}{},
 		opened:       map[string]map[int64]bool{},
@@ -610,6 +646,16 @@ func (c *Client) dispatch(raw json.RawMessage) {
 			c.trackSubmission(*event.Submission, true)
 		}
 		c.changed()
+	case "agent":
+		var event struct {
+			Agent *AgentState `json:"agent"`
+		}
+		if json.Unmarshal(raw, &event) == nil && event.Agent != nil {
+			c.mutex.Lock()
+			c.trackAgentLocked(*event.Agent)
+			c.mutex.Unlock()
+		}
+		c.changed()
 	case "opened":
 		var event struct {
 			Channel string `json:"channel"`
@@ -819,6 +865,17 @@ func (c *Client) Sync() (*SyncReply, error) {
 	for _, room := range reply.Visited {
 		c.visited[room] = true
 	}
+	// A sync from a server that predates the queue leaves what was known.
+	if reply.Queue != nil {
+		c.queued = map[string]Submission{}
+		for _, submission := range reply.Queue {
+			c.queued[submission.ID] = submission
+		}
+	}
+	c.agents = map[string]map[string]AgentState{}
+	for _, state := range reply.Agents {
+		c.trackAgentLocked(state)
+	}
 	c.connected = true
 
 	var behind []string
@@ -841,6 +898,21 @@ func (c *Client) Sync() (*SyncReply, error) {
 
 func (c *Client) Send(room, body string) error {
 	return c.call("send", map[string]any{"room": room, "body": body}, nil)
+}
+
+// SendKind says something of a kind other than text: an agent run's progress
+// or handoff.
+func (c *Client) SendKind(room, body, kind string) error {
+	return c.call("send", map[string]any{"room": room, "body": body, "kind": kind}, nil)
+}
+
+// ReportAgent tells a room what this agent run is doing. The run must hold a
+// place in the room.
+func (c *Client) ReportAgent(room string, report AgentReport) error {
+	return c.call("agent.state", map[string]any{
+		"room": room, "state": report.State, "turn": report.Turn, "held": report.Held,
+		"through": report.Through, "detail": report.Detail,
+	}, nil)
 }
 
 // OpenRoom raises an ad-hoc room. An empty title lets the server derive one.
@@ -1114,8 +1186,17 @@ func (c *Client) rule(op, channel, field, value string) (Room, error) {
 }
 
 func (c *Client) Submit(channel, subject, body string) (Submission, error) {
+	return c.SubmitFrom(channel, subject, body, "")
+}
+
+// SubmitFrom proposes a message to a channel on behalf of a room: the room is
+// shown the request and its decision. An empty room is Submit.
+func (c *Client) SubmitFrom(channel, subject, body, room string) (Submission, error) {
 	var submission Submission
 	fields := map[string]any{"channel": channel, "subject": subject, "body": body}
+	if room != "" {
+		fields["room"] = room
+	}
 	if err := c.call("channel.submit", fields, &submission); err != nil {
 		return submission, err
 	}
@@ -1350,6 +1431,30 @@ func (c *Client) forget(space string) {
 	delete(c.cursors, space)
 	delete(c.read, space)
 	delete(c.opened, space)
+	delete(c.agents, space)
+}
+
+func (c *Client) trackAgentLocked(state AgentState) {
+	if c.agents[state.Room] == nil {
+		c.agents[state.Room] = map[string]AgentState{}
+	}
+	// Pushes may be reordered; an older report does not replace a newer one.
+	if known, ok := c.agents[state.Room][state.Username]; ok && known.At > state.At {
+		return
+	}
+	c.agents[state.Room][state.Username] = state
+}
+
+// Agents is what each agent run in a room last reported, by account.
+func (c *Client) Agents(room string) []AgentState {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	found := make([]AgentState, 0, len(c.agents[room]))
+	for _, state := range c.agents[room] {
+		found = append(found, state)
+	}
+	sort.Slice(found, func(i, j int) bool { return found[i].Username < found[j].Username })
+	return found
 }
 
 // -- reading state -----------------------------------------------------------

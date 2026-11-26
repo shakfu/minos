@@ -9,10 +9,10 @@ Events are JSON objects, one per line. They go to stdout, or to the file `-event
 | Event | Fields | When |
 |-|-|-|
 | `ready` | `room`, `channel`, `socket` | The socket answers. The agent has not started yet. |
-| `pushed` | `messages` | A frame was written to the agent's stdin: the task, or the room's messages. A turn starts. |
+| `pushed` | `messages`, `through` (optional) | A frame was written to the agent's stdin: the task, or the room's messages. A turn starts. `through` is the room's highest sequence number the frame covers; the task's frame has none. |
 | `session` | `id`, `agent` | The agent reported its session id, which resumes the session (`claude --resume ID`). Once per id; from claude's `system` `init` record. |
 | `held` | `waiting` | A message arrived mid-turn. `waiting` is how many are held now. |
-| `turn` | `delivering`, `read` (optional) | A turn ended. `delivering` is how many held messages go in the next frame. `read` counts those left out because the agent read them over the socket. |
+| `turn` | `delivering`, `read` (optional), `through` (optional) | A turn ended. `delivering` is how many held messages go in the next frame. `read` counts those left out because the agent read them over the socket. With `delivering: 0`, `through` is the room's highest sequence number the run has seen: nothing up to it waits for the agent. |
 | `interrupt` | `by`, `id`, `outcome`, `error` (optional) | The outcome of a request to stop a turn: `sent`, `merged` (into one already sent), `idle` (no turn to stop), `closed` (stdin is closed), or `failed`. |
 | `closed` | `linger`, or `by` and `id` | The agent's stdin is closing: after `-linger` idle time, or after an `/end` from `by` (message `id`). |
 | `undelivered` | `messages` | Messages that will never be pushed: they came after `closed` or after an `/end`. |
@@ -37,6 +37,8 @@ A dispatcher reads the agent's state from the event stream alone:
 | done | `stopped` |
 
 A `turn` with `delivering` above 0 is followed by `pushed`, so the agent stays working.
+
+The room is told the same state, so a person need not read the events ([wire-contract.md](wire-contract.md) section 15). `minosb` reports `idle` on `ready` and on a `turn` with `delivering: 0`, `working` on `pushed`, `interrupting` on an `interrupt` sent, `closing` on `closed`, and `stopped` on `stopped` with its reason, along with the turn count, the messages held and the highest sequence number handed over by either lane. A run whose broker dies is reported `stopped` by the server when its connection closes.
 
 `ready` means neither state. With `-task`, `pushed` follows at once. Without it, the agent waits for the room, and its first `turn` comes only after the first message.
 

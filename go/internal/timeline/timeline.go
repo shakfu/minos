@@ -32,10 +32,23 @@ import (
 )
 
 // Message kinds. Text is what a person typed; Event is what happened to the
-// room or, in a channel, to the system.
+// room or, in a channel, to the system. Progress and Handoff are an agent
+// run's: a line of work in progress that a client shows muted and notifies
+// nobody of, and the framing message one stage leaves for the next.
 const (
-	Text  = "text"
-	Event = "event"
+	Text     = "text"
+	Event    = "event"
+	Progress = "progress"
+	Handoff  = "handoff"
+)
+
+// Author kinds (design.md D11). Fixed when a message is stored, so a reader
+// can tell an agent's text from a person's decision and either from a fact the
+// server reports.
+const (
+	AuthorUser   = "user"
+	AuthorAgent  = "agent"
+	AuthorSystem = "system"
 )
 
 // What the row is. A channel shares the storage and the sequence; only its door
@@ -96,7 +109,7 @@ const (
 // SchemaVersion is stamped in PRAGMA user_version and checked on open. The
 // retired Python server wrote versions 1 and 2, plus presence and occupants
 // tables that no version covers.
-const SchemaVersion = 7
+const SchemaVersion = 8
 
 // SubjectLimit is the most characters a channel message's subject may have.
 const SubjectLimit = 200
@@ -149,6 +162,21 @@ var migrations = map[int][]string{
 		"ALTER TABLE rooms ADD COLUMN scope TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE rooms ADD COLUMN task TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE rooms ADD COLUMN state TEXT NOT NULL DEFAULT 'open'",
+	},
+	// Author kinds, and the room a submission was raised from. An existing
+	// message keeps an empty kind, which is read as the author's kind now;
+	// events are the server's whenever they were written.
+	// archived_messages is created here first because a database from before
+	// version 4 has none until schema runs, after these.
+	8: {
+		"CREATE TABLE IF NOT EXISTS archived_messages (room_id TEXT NOT NULL, seq INTEGER NOT NULL," +
+			" author TEXT NOT NULL, kind TEXT NOT NULL, subject TEXT, body TEXT NOT NULL," +
+			" at REAL NOT NULL, PRIMARY KEY (room_id, seq))",
+		"ALTER TABLE messages ADD COLUMN author_kind TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE archived_messages ADD COLUMN author_kind TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE submissions ADD COLUMN room TEXT NOT NULL DEFAULT ''",
+		"UPDATE messages SET author_kind = 'system' WHERE kind = 'event'",
+		"UPDATE archived_messages SET author_kind = 'system' WHERE kind = 'event'",
 	},
 }
 
@@ -276,7 +304,10 @@ CREATE TABLE IF NOT EXISTS submissions (
     body       TEXT NOT NULL,
     at         REAL NOT NULL,
     state      TEXT NOT NULL,
-    comment    TEXT
+    comment    TEXT,
+    -- The room it was raised from, where its card is shown and its decision
+    -- told; '' for none.
+    room       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -288,6 +319,8 @@ CREATE TABLE IF NOT EXISTS messages (
     subject TEXT,
     body    TEXT NOT NULL,
     at      REAL NOT NULL,
+    -- 'user', 'agent' or 'system', fixed when it was written; '' before then.
+    author_kind TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (room_id, seq)
 );
 
@@ -327,6 +360,7 @@ CREATE TABLE IF NOT EXISTS archived_messages (
     subject TEXT,
     body    TEXT NOT NULL,
     at      REAL NOT NULL,
+    author_kind TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (room_id, seq)
 );
 
@@ -388,7 +422,9 @@ type Message struct {
 	Room   string `json:"room"`
 	Seq    int64  `json:"seq"`
 	Author string `json:"author"`
-	Kind   string `json:"kind"`
+	// Whether the author is a person, an agent run or the server.
+	AuthorKind string `json:"authorKind"`
+	Kind       string `json:"kind"`
 	// A channel message's headline, and nil in a room.
 	Subject *string `json:"subject"`
 	Body    string  `json:"body"`
@@ -406,6 +442,9 @@ type Submission struct {
 	At      float64 `json:"at"`
 	State   string  `json:"state"`
 	Comment *string `json:"comment"`
+	// The room it was raised from, or empty: where a moderator is shown it,
+	// and where its decision is told.
+	Room string `json:"room"`
 }
 
 // Group is a lasting set of users, named where access is decided.
@@ -435,11 +474,40 @@ type Timeline struct {
 	live        sync.Mutex
 	presence    map[string]string
 	occupancies map[string]seat
+
+	// agent says which accounts are agent runs, for a message's author kind.
+	agent func(string) bool
 }
 
 type seat struct {
 	room string
 	user string
+}
+
+// SetAgents names the accounts whose messages are an agent's. Call it before
+// serving.
+func (t *Timeline) SetAgents(agent func(string) bool) { t.agent = agent }
+
+// AuthorKind is what a message's author is: the server for an event, an agent
+// run for an account SetAgents names, and a person otherwise.
+func (t *Timeline) AuthorKind(author, kind string) string {
+	switch {
+	case kind == Event:
+		return AuthorSystem
+	case t.agent != nil && t.agent(author):
+		return AuthorAgent
+	}
+	return AuthorUser
+}
+
+// classify fills an author kind written before kinds were stored.
+func (t *Timeline) classify(messages []Message) []Message {
+	for index := range messages {
+		if messages[index].AuthorKind == "" {
+			messages[index].AuthorKind = t.AuthorKind(messages[index].Author, messages[index].Kind)
+		}
+	}
+	return messages
 }
 
 func now() float64 { return float64(time.Now().UnixNano()) / float64(time.Second) }
@@ -1293,7 +1361,7 @@ func (t *Timeline) Unsubscribe(channelID, username string) (bool, error) {
 // detectable, which is the point.
 func (t *Timeline) History(roomID string, since int64) ([]Message, error) {
 	rows, err := t.db.Query(`
-        SELECT room_id, seq, author, kind, subject, body, at FROM (
+        SELECT room_id, seq, author, kind, subject, body, at, author_kind FROM (
             SELECT * FROM messages
              WHERE room_id = ? AND seq > ?
              ORDER BY seq DESC
@@ -1302,7 +1370,8 @@ func (t *Timeline) History(roomID string, since int64) ([]Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	return scanMessages(rows)
+	messages, err := scanMessages(rows)
+	return t.classify(messages), err
 }
 
 // HasMessage reports whether seq is a live message in a room.
@@ -1329,7 +1398,7 @@ func (t *Timeline) Append(roomID, author, subject, body, kind string) (Message, 
 	}
 	defer transaction.Rollback()
 
-	message, err := appendIn(transaction, roomID, author, subject, body, kind)
+	message, err := appendIn(transaction, roomID, author, t.AuthorKind(author, kind), subject, body, kind)
 	if err != nil {
 		return Message{}, err
 	}
@@ -1345,7 +1414,7 @@ func (t *Timeline) Append(roomID, author, subject, body, kind string) (Message, 
 // In a channel the message takes a subject (see Subject), and a text message is
 // opened for its author: they wrote it, so it was never pending for them. In a
 // room the subject is dropped.
-func appendIn(transaction *sql.Tx, roomID, author, subject, body, kind string) (Message, error) {
+func appendIn(transaction *sql.Tx, roomID, author, authorKind, subject, body, kind string) (Message, error) {
 	var seq int64
 	var roomKind string
 	err := transaction.QueryRow(
@@ -1370,9 +1439,9 @@ func appendIn(transaction *sql.Tx, roomID, author, subject, body, kind string) (
 		return Message{}, err
 	}
 	if _, err := transaction.Exec(
-		"INSERT INTO messages (room_id, seq, author, kind, subject, body, at)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?)",
-		roomID, seq, author, kind, headline, body, at); err != nil {
+		"INSERT INTO messages (room_id, seq, author, kind, subject, body, at, author_kind)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		roomID, seq, author, kind, headline, body, at, authorKind); err != nil {
 		return Message{}, err
 	}
 	if headline != nil && kind == Text {
@@ -1383,7 +1452,8 @@ func appendIn(transaction *sql.Tx, roomID, author, subject, body, kind string) (
 		}
 	}
 	return Message{
-		Room: roomID, Seq: seq, Author: author, Kind: kind, Subject: headline, Body: body, At: at,
+		Room: roomID, Seq: seq, Author: author, AuthorKind: authorKind, Kind: kind,
+		Subject: headline, Body: body, At: at,
 	}, nil
 }
 
@@ -1441,6 +1511,12 @@ func (t *Timeline) Appoint(channelID, username string) (bool, error) {
 			" VALUES (?, ?, ?)", channelID, username, now())
 }
 
+// ModeratedBy is every channel this user is appointed to moderate.
+func (t *Timeline) ModeratedBy(username string) ([]string, error) {
+	return t.strings(
+		"SELECT channel_id FROM channel_moderators WHERE username = ? ORDER BY channel_id", username)
+}
+
 func (t *Timeline) Dismiss(channelID, username string) (bool, error) {
 	return t.changed(
 		"DELETE FROM channel_moderators WHERE channel_id = ? AND username = ?",
@@ -1450,16 +1526,16 @@ func (t *Timeline) Dismiss(channelID, username string) (bool, error) {
 // Submit stores a pending submission, or returns nil when the channel has no
 // moderator to decide it. The check is part of the insert, so a submission
 // cannot land after the last moderator was dismissed and wait where nobody sees.
-func (t *Timeline) Submit(channelID, author, subject, body string) (*Submission, error) {
+func (t *Timeline) Submit(channelID, author, subject, body, room string) (*Submission, error) {
 	submission := Submission{
 		ID: uuid.NewString(), Channel: channelID, Author: author,
-		Subject: subject, Body: body, At: now(), State: Pending,
+		Subject: subject, Body: body, At: now(), State: Pending, Room: room,
 	}
 	stored, err := t.changed(
-		"INSERT INTO submissions (id, channel_id, author, subject, body, at, state)"+
-			" SELECT ?, ?, ?, ?, ?, ?, ?"+
+		"INSERT INTO submissions (id, channel_id, author, subject, body, at, state, room)"+
+			" SELECT ?, ?, ?, ?, ?, ?, ?, ?"+
 			" WHERE EXISTS (SELECT 1 FROM channel_moderators WHERE channel_id = ?)",
-		submission.ID, channelID, author, subject, body, submission.At, Pending, channelID)
+		submission.ID, channelID, author, subject, body, submission.At, Pending, room, channelID)
 	if err != nil || !stored {
 		return nil, err
 	}
@@ -1508,7 +1584,7 @@ func (t *Timeline) Approve(id string) (Message, error) {
 		return Message{}, err
 	}
 
-	message, err := appendIn(transaction, channelID, author, subject, body, Text)
+	message, err := appendIn(transaction, channelID, author, t.AuthorKind(author, Text), subject, body, Text)
 	if err != nil {
 		return Message{}, err
 	}
@@ -1539,7 +1615,7 @@ func (t *Timeline) RejectAll(channelID, comment string) ([]Submission, error) {
 	defer transaction.Rollback()
 
 	rows, err := transaction.Query(
-		"SELECT id, channel_id, author, subject, body, at, state, comment FROM submissions"+
+		"SELECT id, channel_id, author, subject, body, at, state, comment, room FROM submissions"+
 			" WHERE channel_id = ? AND state = ? ORDER BY at, id", channelID, Pending)
 	if err != nil {
 		return nil, err
@@ -1846,8 +1922,8 @@ func (t *Timeline) ArchiveAged(roomID string) (int64, error) {
 	}
 
 	for _, statement := range []string{
-		"INSERT OR IGNORE INTO archived_messages (room_id, seq, author, kind, subject, body, at)" +
-			" SELECT room_id, seq, author, kind, subject, body, at FROM messages" +
+		"INSERT OR IGNORE INTO archived_messages (room_id, seq, author, kind, subject, body, at, author_kind)" +
+			" SELECT room_id, seq, author, kind, subject, body, at, author_kind FROM messages" +
 			" WHERE room_id = ? AND seq <= ?",
 		"DELETE FROM messages WHERE room_id = ? AND seq <= ?",
 		"DELETE FROM opened WHERE room_id = ? AND seq <= ?",
@@ -1866,7 +1942,7 @@ func (t *Timeline) ArchiveAged(roomID string) (int64, error) {
 // whether more follows. A page is as long as a backfill.
 func (t *Timeline) Archived(roomID string, after int64) ([]Message, bool, error) {
 	rows, err := t.db.Query(
-		"SELECT room_id, seq, author, kind, subject, body, at FROM archived_messages"+
+		"SELECT room_id, seq, author, kind, subject, body, at, author_kind FROM archived_messages"+
 			" WHERE room_id = ? AND seq > ? ORDER BY seq LIMIT ?", roomID, after, t.historyLimit+1)
 	if err != nil {
 		return nil, false, err
@@ -1875,6 +1951,7 @@ func (t *Timeline) Archived(roomID string, after int64) ([]Message, bool, error)
 	if err != nil {
 		return nil, false, err
 	}
+	t.classify(messages)
 	if len(messages) > t.historyLimit {
 		return messages[:t.historyLimit], true, nil
 	}
@@ -1885,7 +1962,7 @@ func (t *Timeline) Archived(roomID string, after int64) ([]Message, bool, error)
 // query, compared without case, newest first. SQLite's lower() folds ASCII only.
 func (t *Timeline) SearchArchive(roomID, query string, limit int) ([]Message, error) {
 	rows, err := t.db.Query(`
-        SELECT room_id, seq, author, kind, subject, body, at FROM archived_messages
+        SELECT room_id, seq, author, kind, subject, body, at, author_kind FROM archived_messages
          WHERE room_id = ?
            AND (instr(lower(coalesce(subject, '')), lower(?)) > 0
                 OR instr(lower(body), lower(?)) > 0)
@@ -1894,7 +1971,8 @@ func (t *Timeline) SearchArchive(roomID, query string, limit int) ([]Message, er
 	if err != nil {
 		return nil, err
 	}
-	return scanMessages(rows)
+	messages, err := scanMessages(rows)
+	return t.classify(messages), err
 }
 
 // -- helpers -----------------------------------------------------------------
@@ -1907,7 +1985,7 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 		var message Message
 		var subject sql.NullString
 		if err := rows.Scan(&message.Room, &message.Seq, &message.Author,
-			&message.Kind, &subject, &message.Body, &message.At); err != nil {
+			&message.Kind, &subject, &message.Body, &message.At, &message.AuthorKind); err != nil {
 			return nil, err
 		}
 		if subject.Valid {
@@ -1947,7 +2025,7 @@ func (t *Timeline) changed(query string, args ...any) (bool, error) {
 
 func (t *Timeline) submissions(clause string, args ...any) ([]Submission, error) {
 	rows, err := t.db.Query(
-		"SELECT id, channel_id, author, subject, body, at, state, comment FROM submissions "+clause,
+		"SELECT id, channel_id, author, subject, body, at, state, comment, room FROM submissions "+clause,
 		args...)
 	if err != nil {
 		return nil, err
@@ -1964,7 +2042,7 @@ func scanSubmissions(rows *sql.Rows) ([]Submission, error) {
 		var comment sql.NullString
 		if err := rows.Scan(&submission.ID, &submission.Channel, &submission.Author,
 			&submission.Subject, &submission.Body, &submission.At, &submission.State,
-			&comment); err != nil {
+			&comment, &submission.Room); err != nil {
 			return nil, err
 		}
 		if comment.Valid {

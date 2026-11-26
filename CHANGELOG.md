@@ -8,6 +8,14 @@ Both web front ends and the Python server are gone. `go/` holds the server and t
 
 ### Added
 
+- Every message carries `authorKind`, `user`, `agent` or `system`, fixed when it is stored (design.md D11; wire-contract section 14). An account in `MINOS_AGENTS` is an agent. The terminal client marks each message `◆` agent, `●` person or `■` server, and `minosa messages` marks an agent's as `worker (agent)`. Schema version 8 adds the column; older messages take their author's kind as it is now.
+
+- Two message kinds for agent runs: `progress`, a line of work in progress, and `handoff`, the framing one stage leaves the next (`send` takes `kind`; `minosa say -kind`). Anyone else's is refused. The terminal client mutes progress and folds a run of it into one line, ^E to unfold; a handoff is ruled off. `minosb` pushes a handoff to its agent as text, and another run's progress not at all.
+
+- The run's state in its room. `minosb` reports `idle`, `working`, `interrupting`, `closing` or `stopped`, with its turn, the messages held and the highest sequence number handed over, through a new `agent.state` operation; the room's audience gets an `agent` push and `sync` carries `agents` (wire-contract section 15). A run that leaves its room, by a closed connection or otherwise, is reported stopped by the server. The terminal client shows each run under the room's header, marks a message you sent as held until the turn ends or as handed over, shows the state in the rooms list, counts runs in the overview, and ^X starts an `/interrupt`. `pushed` and `turn` events carry `through`.
+
+- Decision cards. `channel.submit` takes the `room` it is raised from; the room is told of the request and of its decision, and `sync` carries a moderator's `queue` (wire-contract section 16). `minosb` raises every submission from its room. The terminal client draws a pending request as a card in its room and in its channel's feed: ^Y approves, ^R rejects with the composer's text as the reason, ^F or Up and Down move between cards. The author sees their own as waiting. See [UI_REVIEW.md](UI_REVIEW.md).
+
 - `minosb`'s `usage` event carries the agent's `used` and `size`, the context fill and window from ACP's `usage_update`. It is now sent for every `usage_update`, with `cost` and `currency` only when the update has a cost; before, an update without a cost sent nothing. A dispatcher wanting the total takes the last event with a cost.
 
 - `make acp-run` runs one ACP agent under `minosb` against a server of its own, posts each `-say` as `demo`, and prints the replies and ACP events. `-hold` keeps it up for the terminal client. It ran gilda, hax, minima, hilda and myra against `openai/gpt-6-luna`. See [acp.md](docs/acp.md).

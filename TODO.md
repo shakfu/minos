@@ -8,7 +8,7 @@ Items marked `pma backend` make minos the place pma's agents run, in place of he
 
 ## High
 
-- [ ] pma backend: agent state in the client. pma reads state from `-events` (`pushed`, `turn` with `delivering: 0`, `stopped`; `docs/minosb-events.md`), so pma needs nothing more. Open: the client lists a `waiting` room under what waits on you in `OVERVIEW`. Clients never see `-events`, so this needs the state on the wire. herdr's `blocked` waits for permission requests.
+- [ ] pma backend: agent state in the client. pma reads state from `-events` (`pushed`, `turn` with `delivering: 0`, `stopped`; `docs/minosb-events.md`), so pma needs nothing more. Done: the state is on the wire (`agent.state`, wire-contract section 15); a room shows each run's state under its header, the rooms list shows it, and the overview counts working and idle runs. Open: the overview lists each `idle` room under what waits on you. herdr's `blocked` waits for permission requests.
 
 - [ ] pma backend: adapters for pma's workers (decided 2026-11-20: minos runs agents other than Claude).
   - Done: the one-shot kind, `minosb -agent-spec FILE` (`docs/one-shot-agents.md`), with specs for `gilda`, `hax`, `minima`, `hilda` and `myra` in `agents/`.
@@ -22,9 +22,9 @@ Items marked `pma backend` make minos the place pma's agents run, in place of he
 
 - [ ] Per-turn usage in the `turn` event. `claudeAdapter.Turn` (`go/internal/broker/relay.go`) reads only `type` and `result`. The `result` record also carries `total_cost_usd`, cumulative for the session on Claude Code 2.1.299 (CHANGELOG, `make host-run`), so a turn's cost is the difference from the previous record. `usage`, `duration_ms` and `num_turns` are probably there too; check whether each is per turn or cumulative in `agent.jsonl` from `make host-run`. This gives quotas a measured number to enforce. Use the CLI's reported figures. [agentpipe](https://github.com/kevinelliott/agentpipe) estimates tokens from text length instead (`pkg/utils/tokens.go`).
 
-- [ ] pma backend: progress in the room. A herdr pane shows tool calls, edits and test output; a room shows only each turn's reply. `minosb -progress` posts one line per tool use (`Edit src/x.rs`, `Bash cargo test`), rate-limited. They are posted as a kind that clients show muted and that notifies nobody, so it needs author or message kinds.
+- [ ] pma backend: progress in the room. A herdr pane shows tool calls, edits and test output; a room shows only each turn's reply. `minosb -progress` posts one line per tool use (`Edit src/x.rs`, `Bash cargo test`), rate-limited. Done: the `progress` message kind (wire-contract section 14), which the terminal client shows muted and folds, and `minosa say -kind progress`. Open: `minosb` posting them from the agent's stream.
 
-- [ ] pma backend: permission requests in the room. In a person-driven run, `claude` asks before a tool its permission mode does not allow, and stream-json has no terminal to ask on. `minosb` serves the `--permission-prompt-tool` MCP tool and posts each request to the room; the person allows or denies it. Until then pma runs `I` only under `auto` or `acceptEdits`.
+- [ ] pma backend: permission requests in the room. In a person-driven run, `claude` asks before a tool its permission mode does not allow, and stream-json has no terminal to ask on. `minosb` serves the `--permission-prompt-tool` MCP tool and posts each request to the room; the person allows or denies it. A submission raised from the room is already a card the person decides with ^Y or ^R (wire-contract section 16), so a permission request can be one. Until then pma runs `I` only under `auto` or `acceptEdits`.
 
 - [ ] pma backend: a credential per run. Every pma run now goes through minos, so the shared `worker` password matters for all of them: an agent with the same uid can read it from `minosb`'s environment. pma records this as issues 5 and 6. `room ensure` returns a token for that one room, which `minosb` uses in place of `MINOS_PASSWORD`. It also tells runs apart (the gap "every phase 0 run speaks as the one `worker` account").
 

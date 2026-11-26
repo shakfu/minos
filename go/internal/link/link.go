@@ -65,7 +65,10 @@ type Request struct {
 	Since int64 `json:"since,omitempty"`
 
 	// say and submit: the text, and an optional JSON payload beside it.
-	Body    string          `json:"body,omitempty"`
+	Body string `json:"body,omitempty"`
+	// say: text, or progress for a line of work in progress, or handoff for
+	// the framing message one stage leaves the next. Empty is text.
+	Kind    string          `json:"kind,omitempty"`
 	Subject string          `json:"subject,omitempty"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 
@@ -106,13 +109,17 @@ type Reply struct {
 }
 
 // Record is one item of delivery. Kind is `message` for what was said, `event`
-// for what the server reported, and `gap` for what cannot be recovered.
+// for what the server reported, `progress` and `handoff` for what an agent run
+// posted as such, and `gap` for what cannot be recovered.
 type Record struct {
-	Kind   string  `json:"kind"`
-	Seq    int64   `json:"seq"`
-	Author string  `json:"author,omitempty"`
-	Body   string  `json:"body,omitempty"`
-	At     float64 `json:"at,omitempty"`
+	Kind   string `json:"kind"`
+	Seq    int64  `json:"seq"`
+	Author string `json:"author,omitempty"`
+	// AuthorKind is user, agent or system: whether a person, an agent run or
+	// the server wrote it. A person's instruction outranks an agent's.
+	AuthorKind string  `json:"authorKind,omitempty"`
+	Body       string  `json:"body,omitempty"`
+	At         float64 `json:"at,omitempty"`
 
 	// Missing counts the messages a gap swallowed.
 	Missing int64 `json:"missing,omitempty"`
@@ -120,9 +127,11 @@ type Record struct {
 
 // Kinds a record carries.
 const (
-	KindMessage = "message"
-	KindEvent   = "event"
-	KindGap     = "gap"
+	KindMessage  = "message"
+	KindEvent    = "event"
+	KindProgress = "progress"
+	KindHandoff  = "handoff"
+	KindGap      = "gap"
 )
 
 // States a submission ends in. Timeout is the shim's wait ending, not a

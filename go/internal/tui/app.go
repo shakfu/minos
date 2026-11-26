@@ -135,6 +135,10 @@ var help = [][2]string{
 	{"Enter on an item", "open it and show its body, or close it"},
 	{"subject | body", "in a channel: a headline, then the text"},
 	{"PgUp / PgDn", "scroll this room"},
+	{"◆ ● ■", "an agent run wrote it, a person did, or the server reports it"},
+	{"^Y  ^R  ^F", "approve or reject the decision card in focus (typed text is the reason); next card"},
+	{"^E", "show each line of an agent's progress, or fold them"},
+	{"^X", "start an /interrupt for the run in this room"},
 }
 
 // Ui is the interface's state. Everything but notices belongs to the loop's goroutine.
@@ -175,6 +179,11 @@ type Ui struct {
 	item     int
 	itemSeq  int64
 	expanded int64
+
+	// Which of a space's decision cards ^Y and ^R act on, and whether an
+	// agent's progress lines are shown each, or folded into one per run.
+	card         int
+	showProgress bool
 
 	// Archive output, shown in place of the conversation until Esc or a move
 	// to another space.
@@ -287,6 +296,7 @@ func newUi(screen tcell.Screen, c *client.Client, profile client.Profile) *Ui {
 			u.colours = map[string]tcell.Color{
 				"dim": tcell.ColorNavy, "me": tcell.ColorTeal, "event": tcell.ColorOlive,
 				"bad": tcell.ColorMaroon, "good": tcell.ColorGreen,
+				"agent": tcell.ColorPurple, "decide": tcell.ColorYellow,
 			}
 		}
 		c.SetHandlers(u.wake, func(text string) {
@@ -990,6 +1000,18 @@ func (u *Ui) key(event *tcell.EventKey) {
 		u.move(-1)
 	case tcell.KeyDown:
 		u.move(1)
+	case tcell.KeyCtrlY:
+		u.decide(true)
+	case tcell.KeyCtrlR:
+		u.decide(false)
+	case tcell.KeyCtrlF:
+		u.cycleCard(1)
+	case tcell.KeyCtrlE:
+		u.showProgress = !u.showProgress
+	case tcell.KeyCtrlX:
+		if u.view == viewSpace && len(u.input) == 0 {
+			u.input = []rune("/interrupt ")
+		}
 	case tcell.KeyEscape:
 		u.back()
 	case tcell.KeyCtrlU:
@@ -1136,7 +1158,11 @@ func (u *Ui) feedOrder(space client.Room) []client.Message {
 func (u *Ui) move(step int) {
 	if u.view == viewSpace {
 		space, ok := u.client.Space(u.selected)
-		if !ok || !isFeed(space) {
+		if ok && !isFeed(space) {
+			u.cycleCard(step)
+			return
+		}
+		if !ok {
 			return
 		}
 		u.item += step
@@ -2492,7 +2518,20 @@ func (u *Ui) health() []string {
 		waiting = append(waiting, plural(int(unread), "unread message"))
 	}
 	if pending := len(u.client.Queued()); pending > 0 {
-		waiting = append(waiting, plural(pending, "submission")+" to decide")
+		waiting = append(waiting, plural(pending, "decision")+" to make")
+	}
+	working, idle := 0, 0
+	for _, space := range u.client.Rooms() {
+		for _, state := range live(u.client.Agents(space.ID)) {
+			if state.State == "idle" {
+				idle++
+			} else {
+				working++
+			}
+		}
+	}
+	if working+idle > 0 {
+		what += fmt.Sprintf("  ·  %s %d working, %d idle", markAgent, working, idle)
 	}
 	if len(waiting) == 0 {
 		waiting = append(waiting, "nothing waiting on you")
@@ -2638,8 +2677,20 @@ func (u *Ui) drawPlaces(top, width, bottom int) {
 	}, empty)
 }
 
-// placeState is the one thing most worth saying about a place right now.
+// placeState is the one thing most worth saying about a place right now, and
+// what its agent runs are doing.
 func (u *Ui) placeState(space client.Room) string {
+	said := u.placeFact(space)
+	for _, state := range live(u.client.Agents(space.ID)) {
+		if said != "" {
+			said += " · "
+		}
+		said += markAgent + " " + state.State
+	}
+	return said
+}
+
+func (u *Ui) placeFact(space client.Room) string {
 	switch {
 	case !space.Open():
 		return "closed"
@@ -2768,12 +2819,19 @@ func (u *Ui) drawPane(top, width, bottom int) {
 		return
 	}
 
+	// The runs in the room, under its header where they cannot scroll away.
+	head := u.agentLines(space)
+	for offset, line := range head {
+		u.drawLine(top+2+offset, left, line, pane)
+	}
+	start := top + 2 + len(head)
+
 	lines := u.paneLines(space, pane)
-	visible := max(0, bottom-(top+2))
+	visible := max(0, bottom-start)
 	u.scroll = max(0, min(u.scroll, max(0, len(lines)-visible)))
 	end := len(lines) - u.scroll
 	for offset, line := range lines[max(0, end-visible):end] {
-		u.drawLine(top+2+offset, left, line, pane)
+		u.drawLine(start+offset, left, line, pane)
 	}
 
 	// Only a room has a read cursor, and only one the user is in counts as seen: a
@@ -2790,7 +2848,11 @@ func (u *Ui) drawFeed(space client.Room, top, pane, bottom int) {
 	pending, opened := u.items(space)
 	u.item = max(0, min(u.item, len(pending)+len(opened)-1))
 
-	var lines []line
+	// What waits on this moderator comes before what there is to read.
+	lines := u.cardLines(space, pane)
+	if len(lines) > 0 {
+		lines = append(lines, line{"", plain, nil})
+	}
 	focus, focusEnd, index := 0, 0, 0
 	dim := u.tint(plain, "dim")
 	section := func(title string, messages []client.Message, style tcell.Style) {
@@ -2836,24 +2898,71 @@ func (u *Ui) drawFeed(space client.Room, top, pane, bottom int) {
 	}
 }
 
-// paneLines is every message in this space, wrapped, and then the notice log.
+// paneLines is every message in this space, wrapped, then what waits on a
+// decision here, then the notice log.
+//
+// Each message is marked with its author's kind. An agent's progress lines are
+// muted, and a run of them folds into one unless ^E unfolded them. A handoff
+// is ruled off, because it begins a stage. A message this user sent to a room
+// with a run in it says whether the run has it yet.
 func (u *Ui) paneLines(space client.Room, pane int) []line {
 	var lines []line
 	me := u.client.Me()
-	for _, message := range u.client.Log(space.ID) {
+	log := u.client.Log(space.ID)
+	dim := u.tint(plain, "dim")
+
+	states := u.client.Agents(space.ID)
+	newest := int64(0)
+	if len(states) > 0 {
+		for _, message := range log {
+			if message.Author == me && message.Kind == "text" {
+				newest = message.Seq
+			}
+		}
+	}
+
+	for index := 0; index < len(log); index++ {
+		message := log[index]
 		author := message.Author
 		if author == "" {
 			author = "?"
 		}
+		kind := authorKind(message)
 		style := plain
-		if message.Kind == "event" {
+		switch {
+		case message.Kind == "event":
 			style = u.tint(plain, "event")
-		} else if author == me {
+		case author == me:
 			style = u.tint(plain, "me")
+		case kind == "agent":
+			style = u.tint(plain, "agent")
 		}
 
-		prefix := fmt.Sprintf("%s %-*s ", stamp(message.At, "15:04"), authorWidth, client.Prefix(author, authorWidth))
+		prefix := fmt.Sprintf("%s %s %-*s ", stamp(message.At, "15:04"), markOf(kind),
+			authorWidth, client.Prefix(author, authorWidth))
 		indent := uniseg.StringWidth(prefix)
+		lead := strings.Repeat(" ", indent)
+
+		if message.Kind == "progress" {
+			last := index
+			for last+1 < len(log) && log[last+1].Kind == "progress" && log[last+1].Author == message.Author {
+				last++
+			}
+			run := log[index : last+1]
+			index = last
+			if !u.showProgress && len(run) > 1 {
+				lines = append(lines, line{text: prefix + foldProgress(run), style: dim})
+				continue
+			}
+			for _, step := range run {
+				text, _, _ := strings.Cut(strings.TrimSpace(step.Body), "\n")
+				head := fmt.Sprintf("%s %s %-*s ", stamp(step.At, "15:04"), markOf(kind),
+					authorWidth, client.Prefix(author, authorWidth))
+				lines = append(lines, line{text: head + "· " + text, style: dim})
+			}
+			continue
+		}
+
 		if message.Kind == "event" {
 			wrapped := wrap(message.Body, max(10, pane-indent))
 			if len(wrapped) == 0 {
@@ -2861,23 +2970,35 @@ func (u *Ui) paneLines(space client.Room, pane int) []line {
 			}
 			lines = append(lines, line{text: prefix + wrapped[0], style: style})
 			for _, extra := range wrapped[1:] {
-				lines = append(lines, line{text: strings.Repeat(" ", indent) + extra, style: style})
+				lines = append(lines, line{text: lead + extra, style: style})
 			}
 			continue
+		}
+		if message.Kind == "handoff" {
+			rule := fmt.Sprintf("── handoff from %s ", author)
+			lines = append(lines, line{text: rule + strings.Repeat("─", max(0, min(pane, 60)-cells(rule))), style: dim})
 		}
 		rendered := markdown(message.Body, max(10, pane-indent), style, u.tint(style, "dim"))
 		if len(rendered) == 0 {
 			rendered = [][]span{nil}
 		}
 		for i, part := range rendered {
-			lead := strings.Repeat(" ", indent)
+			first := lead
 			if i == 0 {
-				lead = prefix
+				first = prefix
 			}
-			lines = append(lines, line{style: style, spans: append([]span{{lead, style}}, part...)})
+			lines = append(lines, line{style: style, spans: append([]span{{first, style}}, part...)})
+		}
+		if author == me && message.Kind == "text" && len(states) > 0 {
+			if note := u.deliveryNote(message, states, newest); note != "" {
+				lines = append(lines, line{text: lead + "↳ " + note, style: dim})
+			}
 		}
 	}
 
+	if cards := u.cardLines(space, pane); len(cards) > 0 {
+		lines = append(append(lines, line{"", plain, nil}), cards...)
+	}
 	return append(lines, u.sessionLines(pane)...)
 }
 
@@ -2960,9 +3081,14 @@ func (u *Ui) drawComposer(height, width int) {
 		case readOnly:
 			prompt = "  (channel) "
 		}
+		_, deciding := u.focusedCard()
 		switch {
+		case deciding:
+			hint = " ^Y: approve  ^R: reject, typed text is why  ^F: next card  PgUp/PgDn: scroll  ^C: quit"
 		case ok && isFeed(space):
 			hint = " Up/Down: item  Enter: open or close  subject | body  Esc: back  ^C: quit"
+		case ok && u.occupancy != "" && len(live(u.client.Agents(space.ID))) > 0:
+			hint = " ^X: interrupt  ^E: progress  /exit: step out  PgUp/PgDn: scroll  /help  ^C: quit"
 		case ok && u.occupancy != "":
 			hint = " /exit: step out  /invite <who>  /leave  /help  PgUp/PgDn: scroll  ^C: quit"
 		default:

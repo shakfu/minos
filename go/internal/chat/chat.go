@@ -198,7 +198,7 @@ func (h *Handler) run(
 		return h.service.History(username, roomID(fields), cursor(fields, "since"))
 
 	case "send":
-		return h.service.Send(username, roomID(fields), text(fields, "body"))
+		return h.service.Send(username, roomID(fields), text(fields, "body"), text(fields, "kind"))
 
 	case "open":
 		invite, err := list(fields, "invite")
@@ -334,8 +334,14 @@ func (h *Handler) run(
 		return h.service.Dismiss(isAdmin, text(fields, "channel"), text(fields, "username"))
 
 	case "channel.submit":
-		return h.service.Submit(
-			username, text(fields, "channel"), text(fields, "subject"), text(fields, "body"))
+		return h.service.Submit(username, text(fields, "channel"), text(fields, "subject"),
+			text(fields, "body"), text(fields, "room"))
+
+	case "agent.state":
+		return h.service.ReportAgent(username, roomID(fields), messaging.AgentReport{
+			State: text(fields, "state"), Turn: cursor(fields, "turn"), Held: cursor(fields, "held"),
+			Through: cursor(fields, "through"), Detail: text(fields, "detail"),
+		})
 
 	case "channel.open":
 		// The machine channel is a log with nothing pending, and the host is where

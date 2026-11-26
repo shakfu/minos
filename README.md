@@ -31,7 +31,11 @@ The design is in [design.md](docs/dev/design.md) and [recommended-architecture.m
 
 - **One frame per turn.** Messages held during a turn go as one stdin frame, so one turn answers them. A message the agent read with `messages` during the turn is left out; the `turn` event counts it as `read`.
 
-- **Decisions through a channel.** `submit` posts to a moderated channel; `await` blocks until a moderator approves or rejects it, or the wait times out.
+- **Decisions through a channel.** `submit` posts to a moderated channel; `await` blocks until a moderator approves or rejects it, or the wait times out. The submission names the run's room, which is told of the request and of its decision.
+
+- **The run's state in its room.** `minosb` reports what the agent is doing, `idle`, `working`, `interrupting`, `closing` or `stopped`, with its turn, the messages held for the next turn and how far the room has been handed over. A run whose broker dies is reported stopped.
+
+- **Progress and handoffs.** `minosa say -kind progress` posts a line of work in progress, which clients show muted and fold; `-kind handoff` posts the framing one stage leaves the next, which is pushed to the agent as text is. Another run's progress is not.
 
 - **Payloads from a file or stdin.** No subcommand takes JSON on its command line. A payload travels in a fenced block beside the text.
 
@@ -69,6 +73,8 @@ The design is in [design.md](docs/dev/design.md) and [recommended-architecture.m
 
 - **Server-side read state.** Read cursors are the same on every device and never move backwards.
 
+- **Author kinds.** Every message says whether a person, an agent run or the server wrote it (`authorKind`), fixed when it is stored.
+
 - **The `system` channel.** The server announces each VFS write, mkdir and rename made through a request.
 
 - **OS.js wire format.** Routes, `osjs/*` websocket names and the `osjs:` mountpoint are frozen, so a front end can be replaced without changing the server.
@@ -89,6 +95,12 @@ The design is in [design.md](docs/dev/design.md) and [recommended-architecture.m
 
 - **Every action is a command.** `/help` lists them; the [cheatsheet](#cheatsheet) groups them.
 
+- **Who said it.** Each message is marked `◆` for an agent run, `●` for a person and `■` for the server. An agent's progress lines are muted and fold into one line per run of them.
+
+- **Agents in a room.** Under a room's header, each run's state, turn, how long, and how many messages it holds. A message you sent says whether the run has it, holds it until its turn ends, or never will. The rooms list and the overview count working and idle runs.
+
+- **Decision cards.** A request raised from a room, or waiting in a channel you moderate, is a card in that room or channel: ^Y approves it, ^R rejects it with what is typed as the reason. Your own request shows as waiting.
+
 - **Reconnect.** A dropped connection logs in again with backoff, syncs, backfills and re-enters its room.
 
 - **Bracketed paste.** A paste is text; a pasted newline or `/` line does not run.
@@ -106,8 +118,6 @@ The design is in [design.md](docs/dev/design.md) and [recommended-architecture.m
 Phase 0 of [implementation-plan.md](docs/dev/implementation-plan.md) is built on the minos side: the broker, the shim, and the broker taking the agent's pipes. Not built:
 
 - **Grants.** Every run speaks as the one `worker` account with an ordinary session. Isolation between runs is a convention, not a rule.
-
-- **Author kind.** A participant cannot tell an agent from a person.
 
 - **Read windows.** `-window` is reported by `status` and enforced by nothing.
 
@@ -173,7 +183,7 @@ Before starting the broker:
 | `minosa` | Does |
 |-|-|
 | `messages [-since N] [-json]` | What was said since the last drain. |
-| `say [-file F\|-stdin] [text]` | Post to the room. |
+| `say [-file F\|-stdin] [-kind progress\|handoff] [text]` | Post to the room: text, a line of progress, or a handoff. |
 | `submit -subject S [-file F]` | Propose something that needs a decision; prints its id. |
 | `await ID [-timeout SECONDS]` | Block until decided. Default 300, at most 3600. |
 | `progress N` | Record that N has been read. |
@@ -225,6 +235,10 @@ The server's other settings are in [wire-contract.md](docs/wire-contract.md), se
 | Esc | Back one level, or close archive results. |
 | ^A | In a list of places: show or hide closed ones. |
 | ^U | Clear the composer. |
+| ^Y, ^R | Approve or reject the decision card in focus; ^R's reason is what is typed. |
+| ^F, or Up and Down in a room | The next decision card. |
+| ^E | Show each of an agent's progress lines, or fold them. |
+| ^X | In a room, type `/interrupt ` to stop the run's turn. |
 | ^C, or ^D on an empty line | Quit. |
 
 ### Rooms

@@ -26,6 +26,7 @@ const usage = `minosa reaches this run's conversation. Six operations:
 
   minosa messages [-since N] [-json]     what was said, since the last drain
   minosa say [-file F|-stdin] [text]     post to the room
+      [-kind progress|handoff]           a line of progress, or a stage's handoff
   minosa submit -subject S [-file F]     propose something needing a decision
   minosa await ID [-timeout SECONDS]     block until it is decided
   minosa progress N                      record that N has been read
@@ -58,6 +59,7 @@ func shim(args []string, stdin io.Reader, stdout, stderr io.Writer, do call) int
 	file := set.String("file", "", "read the body from this file")
 	fromStdin := set.Bool("stdin", false, "read the body from stdin")
 	payload := set.String("payload", "", "read a JSON payload from this file")
+	kind := set.String("kind", "", "say: text, progress or handoff")
 	timeout := set.Float64("timeout", 0, "seconds to block in await; default 300, at most 3600")
 
 	flags, rest := split(set, args[1:])
@@ -94,6 +96,13 @@ func shim(args []string, stdin io.Reader, stdout, stderr io.Writer, do call) int
 		}
 		request.Body = body
 		request.Subject = *subject
+		if *kind != "" {
+			if args[0] != link.OpSay {
+				fmt.Fprintln(stderr, "minosa: -kind is for say.")
+				return link.CodeLocal
+			}
+			request.Kind = *kind
+		}
 		if *payload != "" {
 			raw, err := os.ReadFile(*payload)
 			if err != nil {
@@ -154,7 +163,7 @@ func shim(args []string, stdin io.Reader, stdout, stderr io.Writer, do call) int
 // tells a positional argument from a flag's value when the two are mixed.
 var takesValue = map[string]bool{
 	"socket": true, "since": true, "subject": true,
-	"file": true, "payload": true, "timeout": true,
+	"file": true, "payload": true, "timeout": true, "kind": true,
 }
 
 // split separates flags from positional arguments, in any order. The flag
@@ -240,7 +249,7 @@ func show(stdout, stderr io.Writer, op string, reply link.Reply, asJSON bool) {
 			case link.KindEvent:
 				fmt.Fprintf(stdout, "[%d] %s\n", record.Seq, link.Line(record.Body))
 			default:
-				fmt.Fprintf(stdout, "[%d] %s: %s\n", record.Seq, record.Author, link.Line(record.Body))
+				fmt.Fprintf(stdout, "[%d] %s: %s\n", record.Seq, author(record), link.Line(record.Body))
 			}
 		}
 	case link.OpSubmit:
@@ -257,4 +266,21 @@ func show(stdout, stderr io.Writer, op string, reply link.Reply, asJSON bool) {
 			fmt.Fprintln(stdout, string(raw))
 		}
 	}
+}
+
+// author names who wrote a record, marking an agent run's and what kind of
+// message it posted, so an instruction from a person is told from one from
+// another agent.
+func author(record link.Record) string {
+	var marks []string
+	if record.AuthorKind == "agent" {
+		marks = append(marks, "agent")
+	}
+	if record.Kind == link.KindProgress || record.Kind == link.KindHandoff {
+		marks = append(marks, record.Kind)
+	}
+	if len(marks) == 0 {
+		return record.Author
+	}
+	return record.Author + " (" + strings.Join(marks, ", ") + ")"
 }

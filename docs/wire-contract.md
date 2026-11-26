@@ -183,7 +183,7 @@ An application with no handler produces no reply at all. A client must therefore
 |-|-|-|
 | `sync` | -- | the sync object |
 | `history` | `room`, `since` | `{room, since, lastSeq, messages}` |
-| `send` | `room`, `body` | `{ok: true, seq}` |
+| `send` | `room`, `body`, `kind` | `{ok: true, seq}` |
 | `open` | `invite`, `title`, `retention` | a room |
 | `create` | `title`, `invite`, `project`, `scope`, `task` | a room |
 | `invite` | `room`, `principal` | `{ok: true, room}` |
@@ -223,7 +223,7 @@ A message:
  "body": "hello", "at": 1757030400.0}
 ```
 
-`kind` is `text` for what a person typed, `event` for what happened to the room. An `event` has author `system`. `at` is a Unix timestamp as a float. Section 10 adds `subject`.
+`kind` is `text` for what a person typed, `event` for what happened to the room. An `event` has author `system`. `at` is a Unix timestamp as a float. Section 10 adds `subject`, and section 14 adds `authorKind` and two more kinds.
 
 A group: `{"id": "<hex>", "name": "Team", "members": ["alice"]}`.
 
@@ -236,7 +236,7 @@ Sync:
  "read": {"<room id>": 4}, "visited": ["<room id>"]}
 ```
 
-`users` is every account, sorted; `groups` sorted by name. `visited` is every room the caller has ever entered, sorted. `read` omits rooms with no cursor. Section 9 adds `submissions`, section 10 removes channels from `read`, and section 12 adds `projects`.
+`users` is every account, sorted; `groups` sorted by name. `visited` is every room the caller has ever entered, sorted. `read` omits rooms with no cursor. Section 9 adds `submissions`, section 10 removes channels from `read`, section 12 adds `projects`, section 15 adds `agents` and section 16 adds `queue`.
 
 ### Rules a reimplementation must reproduce
 
@@ -583,7 +583,91 @@ A room and a channel gain `state`: `open` or `closed`. Everything is created ope
 
 - **A change posts an event** to the room, `<user> closed this room` or `<user> reopened this room`, and pushes the room to its audience. Closing a room that is already closed posts nothing.
 
-## 14. Not part of the contract
+## 14. Author kinds and message kinds
+
+[design.md](dev/design.md) D11. A reader must be able to tell an agent's text from a person's decision, and either from a fact the server reports.
+
+### Fields added to core shapes
+
+A message carries `authorKind`: `user`, `agent` or `system`. An `event` is `system`'s. A message from an account in `MINOS_AGENTS` is `agent`'s, and any other is `user`'s. The kind is fixed when the message is stored, so a later change to `MINOS_AGENTS` does not rewrite what was said. A message stored before kinds existed takes the kind its author has now.
+
+### Message kinds
+
+`send` takes an optional `kind`. Absent, empty or `text` is text. Two more are an agent run's:
+
+| Kind | Is |
+|-|-|
+| `progress` | one line of work in progress. A client shows it muted and notifies nobody. |
+| `handoff` | the framing message one stage leaves the next ([design.md](dev/design.md) D19). |
+
+### Rules
+
+- `progress` and `handoff` from an account not in `MINOS_AGENTS` are refused with `Only an agent run posts <kind>`.
+
+- Any other kind is refused with `No such message kind: <kind>; there is: text, progress, handoff`. `event` is the server's alone.
+
+## 15. Agent state
+
+What an agent run in a room is doing, as its broker reports it. It is not a message: it takes no sequence number and is not kept across a restart. The latest report from a run replaces the one before it.
+
+### Objects
+
+```json
+{"room": "<id>", "username": "worker", "state": "working", "turn": 4, "held": 1,
+ "through": 37, "detail": "", "since": 1757030400.0, "at": 1757030472.0}
+```
+
+`state` is `idle`, `working`, `interrupting`, `closing` or `stopped`. `turn` counts turns started, `held` the messages held for the next one, and `through` is the highest sequence number the run has been handed: a later message from a person is not yet with the agent. `detail` is a note, such as why it stopped. `since` is when the state began and `at` when it was last reported, both by the server's clock.
+
+### Operations
+
+| Op | Request fields | Reply |
+|-|-|-|
+| `agent.state` | `room`, `state`, `turn`, `held`, `through`, `detail` | `{ok: true, agent}` |
+
+### Rules
+
+- Only an account in `MINOS_AGENTS` reports, refused otherwise with `Only an agent run reports its state`. It needs access to the room, as `send` does, and must hold a place in it, refused otherwise with `Enter the room before reporting a state in it`.
+
+- An unknown state is refused with `No such agent state: <state>; there is: idle, working, interrupting, closing, stopped`. A detail over 200 characters is refused with `A detail is at most 200 characters`.
+
+- Counts parse as `seq` does; a negative one is zero. `through` past the room's last sequence is the last sequence.
+
+- A report in the state already reported keeps `since`.
+
+- A run that no longer holds a place in the room, by `exit`, a closed connection or lost access, is reported `stopped` with detail `left the room`, `held` zero, and everything else as last reported.
+
+- `sync` carries `agents`: the last report of every run in the caller's rooms, by room and then username.
+
+### Pushes
+
+| Type | Payload | Sent to |
+|-|-|-|
+| `agent` | `{"agent": <agent state>}` | the room's audience |
+
+## 16. Decisions raised from a room
+
+A run's conversation is in its room, and the decision it waits on is a submission to a channel. Naming the room ties the two together.
+
+### Fields added to core shapes
+
+- A submission carries `room`: the room it was raised from, or `""`.
+
+- `sync` carries `queue`: the pending submissions of every channel the caller moderates and is in the audience of, oldest first. A moderator need not subscribe.
+
+### Operations
+
+`channel.submit` takes an optional `room`.
+
+### Rules
+
+- `channel.submit` with a `room` needs access to that room, refused as `history` refuses.
+
+- A submission raised from a room posts an event there: `<author> asked <channel> for a decision: <subject>`.
+
+- Approving one posts `<moderator> approved <author>'s request: <subject>` to that room, and rejecting one `<moderator> rejected <author>'s request: <subject>`, followed by ` -- <comment>` when there is a comment. A room that no longer exists is not told.
+
+## 17. Not part of the contract
 
 An implementation may do any of this differently:
 

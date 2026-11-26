@@ -134,6 +134,9 @@ type Broker struct {
 	// first found lost, zero while it is held. Seated's alone.
 	occupancy string
 	unseated  time.Time
+
+	// presence reports the run's state to its room; nil until Watch.
+	presence *watcher
 }
 
 // Open logs in, syncs, and checks that the run's spaces are reachable. A run
@@ -239,6 +242,8 @@ func (b *Broker) Seated() bool {
 	if b.chat.Connected() {
 		if occupancy, err := b.chat.Enter(b.config.Room); err == nil {
 			b.occupancy, b.unseated = occupancy, time.Time{}
+			// Losing the place reported the run stopped; it is not.
+			b.presence.again()
 			return true
 		}
 	}
@@ -251,6 +256,9 @@ func (b *Broker) Seated() bool {
 // Stop releases the session. The container's socket is closed by its owner.
 func (b *Broker) Stop() {
 	b.once.Do(func() {
+		// The last state goes before the connection does, or the room is told
+		// only that the run left.
+		b.presence.flush(time.Second)
 		close(b.stopped)
 		b.chat.Stop()
 		_ = b.session.Logout()
@@ -306,7 +314,7 @@ func (b *Broker) forPush() ([]held, []Ask, []Ask) {
 			continue
 		}
 		last = message.Seq
-		if message.Author == b.me || message.Kind != "text" {
+		if !pushable(message, b.me) {
 			continue
 		}
 		body, corrects := message.Body, false
@@ -332,6 +340,28 @@ func (b *Broker) forPush() ([]held, []Ask, []Ask) {
 	}
 	b.mutex.Unlock()
 	return texts, asks, ends
+}
+
+// pushedThrough is the highest sequence number the stdin lane has taken in.
+func (b *Broker) pushedThrough() int64 {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return b.pushed
+}
+
+// deliveredThrough is the highest the socket lane has handed over.
+func (b *Broker) deliveredThrough() int64 {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return b.delivered
+}
+
+// pushable is whether a message goes onto the agent's stdin. Text from
+// others, and a handoff, the framing a stage leaves the next. Not the run's
+// own words, the room's events, or another run's progress, which is running
+// commentary rather than news.
+func pushable(message client.Message, me string) bool {
+	return message.Author != me && (message.Kind == "text" || message.Kind == "handoff")
 }
 
 // mayEnd is whether author's `/end` ends the run: an interrupter's, or
@@ -502,15 +532,21 @@ func (b *Broker) messages(request link.Request) link.Reply {
 			continue
 		}
 		kind := link.KindMessage
-		if message.Kind == "event" {
+		switch message.Kind {
+		case "event":
 			kind = link.KindEvent
+		case "progress":
+			kind = link.KindProgress
+		case "handoff":
+			kind = link.KindHandoff
 		}
 		records = append(records, link.Record{
-			Kind:   kind,
-			Seq:    message.Seq,
-			Author: message.Author,
-			Body:   message.Body,
-			At:     message.At,
+			Kind:       kind,
+			Seq:        message.Seq,
+			Author:     message.Author,
+			AuthorKind: message.AuthorKind,
+			Body:       message.Body,
+			At:         message.At,
 		})
 	}
 
@@ -524,11 +560,23 @@ func (b *Broker) messages(request link.Request) link.Reply {
 
 // say posts to the room, with an optional payload beside the text.
 func (b *Broker) say(request link.Request) link.Reply {
+	kind := request.Kind
+	switch kind {
+	case "", "text":
+		kind = ""
+	case "progress", "handoff":
+	default:
+		return link.Refuse("", "There is no kind %q to say. There are three: text, progress, handoff.", kind)
+	}
 	body, refusal := b.compose(request.Body, request.Payload)
 	if refusal != nil {
 		return *refusal
 	}
-	if err := b.chat.Send(b.config.Room, body); err != nil {
+	send := func() error { return b.chat.Send(b.config.Room, body) }
+	if kind != "" {
+		send = func() error { return b.chat.SendKind(b.config.Room, body, kind) }
+	}
+	if err := send(); err != nil {
 		return link.Refuse("", "%s", sentence(err))
 	}
 	return link.Reply{Code: link.CodeOK}
@@ -545,7 +593,8 @@ func (b *Broker) submit(request link.Request) link.Reply {
 	if refusal != nil {
 		return *refusal
 	}
-	submission, err := b.chat.Submit(b.config.Channel, request.Subject, body)
+	// From the room, so the people watching the run see what it waits on.
+	submission, err := b.chat.SubmitFrom(b.config.Channel, request.Subject, body, b.config.Room)
 	if err != nil {
 		return link.Refuse("", "%s", sentence(err))
 	}

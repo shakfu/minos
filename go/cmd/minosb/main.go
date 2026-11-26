@@ -148,6 +148,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, "%v", err)
 	}
 	defer run.Stop()
+	// The room is told the run's state as the dispatcher is.
+	report = run.Watch(report)
 
 	listener, err := link.Listen(*socket, os.FileMode(*mode))
 	if err != nil {

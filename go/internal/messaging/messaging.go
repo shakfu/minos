@@ -105,10 +105,15 @@ type Messaging struct {
 	// creates cannot both find it free. A lock over a unique index, because a
 	// database that already holds duplicates would then refuse to open.
 	naming sync.Mutex
+
+	// What each agent run in a room last reported. In memory: a restart ends
+	// every run's place, and so every state.
+	agentMutex sync.Mutex
+	agents     map[agentKey]*AgentState
 }
 
 func New(store *timeline.Timeline, deliver Deliver, roster func() []string) *Messaging {
-	return &Messaging{store: store, deliver: deliver, roster: roster}
+	return &Messaging{store: store, deliver: deliver, roster: roster, agents: map[agentKey]*AgentState{}}
 }
 
 func (m *Messaging) Store() *timeline.Timeline { return m.store }
@@ -117,6 +122,7 @@ func (m *Messaging) Store() *timeline.Timeline { return m.store }
 // Call it before serving.
 func (m *Messaging) LimitAgents(agent func(string) bool, limit int) {
 	m.agent, m.agentLimit = agent, limit
+	m.store.SetAgents(agent)
 }
 
 func (m *Messaging) isAgent(username string) bool { return m.agent != nil && m.agent(username) }
@@ -208,6 +214,11 @@ type SyncReply struct {
 	// Here rather than only on a push, so an author who was offline for the
 	// decision still learns it.
 	Submissions []timeline.Submission `json:"submissions"`
+	// What waits on the caller as a moderator: the pending submissions of
+	// every channel they moderate, oldest first.
+	Queue []timeline.Submission `json:"queue"`
+	// What each agent run in the caller's rooms last reported.
+	Agents []AgentState `json:"agents"`
 }
 
 // HistoryReply carries the backfill and where the room actually ends.
@@ -388,6 +399,29 @@ func (m *Messaging) Sync(username string, isAdmin bool) (*SyncReply, error) {
 		return nil, err
 	}
 
+	// A moderator need not subscribe to decide, so the queue is read from
+	// the appointments rather than from the channels in this sync.
+	moderated, err := m.store.ModeratedBy(username)
+	if err != nil {
+		return nil, err
+	}
+	queue := []timeline.Submission{}
+	for _, channelID := range moderated {
+		channel, err := m.store.Room(channelID)
+		if err != nil {
+			return nil, err
+		}
+		if channel == nil || m.requireModerator(channel, username) != nil {
+			continue
+		}
+		pending, err := m.store.Queue(channelID)
+		if err != nil {
+			return nil, err
+		}
+		queue = append(queue, pending...)
+	}
+	sort.SliceStable(queue, func(i, j int) bool { return queue[i].At < queue[j].At })
+
 	online := m.store.Online()
 	names := m.roster()
 	sort.Strings(names)
@@ -400,7 +434,7 @@ func (m *Messaging) Sync(username string, isAdmin bool) (*SyncReply, error) {
 	return &SyncReply{
 		Me: username, IsAdmin: isAdmin, Users: users,
 		Groups: groups, Projects: projects, Rooms: rooms, Channels: channels, Read: cursors,
-		Visited: visited, Submissions: submissions,
+		Visited: visited, Submissions: submissions, Queue: queue, Agents: m.agentsIn(rooms),
 	}, nil
 }
 
@@ -431,7 +465,19 @@ func (m *Messaging) History(username, roomID string, since int64) (*HistoryReply
 	return reply, nil
 }
 
-func (m *Messaging) Send(username, roomID, body string) (*SendReply, error) {
+// Send says something in a room. kind is text, or for an agent run progress
+// or handoff; empty is text.
+func (m *Messaging) Send(username, roomID, body, kind string) (*SendReply, error) {
+	switch kind {
+	case "", timeline.Text:
+		kind = timeline.Text
+	case timeline.Progress, timeline.Handoff:
+		if !m.isAgent(username) {
+			return nil, refuse("Only an agent run posts %s", kind)
+		}
+	default:
+		return nil, refuse("No such message kind: %s; there is: text, progress, handoff", kind)
+	}
 	room, err := m.requireAccess(roomID, username, "")
 	if err != nil {
 		return nil, err
@@ -451,7 +497,7 @@ func (m *Messaging) Send(username, roomID, body string) (*SendReply, error) {
 		return nil, err
 	}
 
-	message, err := m.store.Append(roomID, username, "", body, timeline.Text)
+	message, err := m.store.Append(roomID, username, "", body, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -767,6 +813,7 @@ func (m *Messaging) release(roomID string, usernames []string) error {
 			return err
 		}
 	}
+	m.vacated(roomID)
 	return nil
 }
 
@@ -870,6 +917,7 @@ func (m *Messaging) Exit(occupancyID string) (*Ok, error) {
 		if room, err := m.store.Room(roomID); err == nil && room != nil {
 			m.announceRoom(room, nil)
 		}
+		m.vacated(roomID)
 	}
 	return &Ok{Ok: true}, nil
 }
@@ -903,6 +951,7 @@ func (m *Messaging) Sweep() ([]string, error) {
 			continue // entered since it was listed
 		}
 		m.deliver(audience, roomGoneEvent{Type: RoomGonePush, Room: roomID})
+		m.forgetAgents(roomID)
 		gone = append(gone, roomID)
 	}
 	return gone, errors.Join(append(failed, m.archiveAged())...)
@@ -1078,6 +1127,7 @@ func (m *Messaging) UnassignGroup(isAdmin bool, groupID, username string) (*time
 			if updated, err := m.store.Room(room.ID); err == nil {
 				m.announceRoom(updated, nil)
 			}
+			m.vacated(room.ID)
 		}
 		m.deliver([]string{username}, roomGoneEvent{Type: RoomGonePush, Room: room.ID})
 	}
@@ -1724,10 +1774,20 @@ func (m *Messaging) Dismiss(isAdmin bool, channelID, username string) (*ChannelR
 // Submit proposes a message to a channel. It reaches only the moderators until
 // one approves it, and takes no sequence number until then: a rejected one
 // would otherwise leave every subscriber a gap to re-request forever.
-func (m *Messaging) Submit(username, channelID, subject, body string) (*timeline.Submission, error) {
+//
+// A submission raised from a room names it: the room is where a run's
+// conversation is, so it is where a moderator is shown what waits, and where
+// the request and its decision are told.
+func (m *Messaging) Submit(username, channelID, subject, body, roomID string) (*timeline.Submission, error) {
 	channel, err := m.requireAccess(channelID, username, timeline.ChannelKind)
 	if err != nil {
 		return nil, err
+	}
+	var origin *timeline.Room
+	if roomID != "" {
+		if origin, err = m.requireAccess(roomID, username, timeline.RoomKind); err != nil {
+			return nil, err
+		}
 	}
 	moderators, err := m.moderators(channel)
 	if err != nil {
@@ -1741,7 +1801,7 @@ func (m *Messaging) Submit(username, channelID, subject, body string) (*timeline
 		return nil, err
 	}
 
-	submission, err := m.store.Submit(channelID, username, timeline.Subject(subject, body), body)
+	submission, err := m.store.Submit(channelID, username, timeline.Subject(subject, body), body, roomID)
 	if err != nil {
 		return nil, err
 	}
@@ -1750,6 +1810,10 @@ func (m *Messaging) Submit(username, channelID, subject, body string) (*timeline
 		return nil, refuse("That channel accepts no submissions")
 	}
 	m.deliver(moderators, submissionEvent{Type: SubmissionPush, Submission: submission})
+	if origin != nil {
+		m.PostEventQuietly(origin.ID, fmt.Sprintf("%s asked %s for a decision: %s",
+			username, channel.Title, submission.Subject), origin.Audience)
+	}
 	return submission, nil
 }
 
@@ -1786,6 +1850,8 @@ func (m *Messaging) Approve(username, submissionID string) (*SendReply, error) {
 	m.deliver(channel.Audience, messageEvent{Type: MessagePush, Message: message})
 	submission.State = timeline.Approved
 	m.announceSubmission(submission, m.moderatorsOrNone(channel))
+	m.tellOrigin(submission, fmt.Sprintf("%s approved %s's request: %s",
+		username, submission.Author, submission.Subject))
 	return &SendReply{Ok: true, Seq: message.Seq}, nil
 }
 
@@ -1814,6 +1880,11 @@ func (m *Messaging) Reject(username, submissionID, comment string) (*Ok, error) 
 	}
 	submission.State, submission.Comment = timeline.Rejected, note
 	m.announceSubmission(submission, m.moderatorsOrNone(channel))
+	told := fmt.Sprintf("%s rejected %s's request: %s", username, submission.Author, submission.Subject)
+	if note != nil {
+		told += " -- " + *note
+	}
+	m.tellOrigin(submission, told)
 	return &Ok{Ok: true}, nil
 }
 
@@ -1835,6 +1906,17 @@ func (m *Messaging) Acknowledge(username, submissionID string) (*Ok, error) {
 		return nil, err
 	}
 	return &Ok{Ok: true}, nil
+}
+
+// tellOrigin posts a decision to the room a submission was raised from, if
+// it still exists.
+func (m *Messaging) tellOrigin(submission *timeline.Submission, text string) {
+	if submission.Room == "" {
+		return
+	}
+	if room, err := m.store.Room(submission.Room); err == nil && room != nil {
+		m.PostEventQuietly(room.ID, text, room.Audience)
+	}
 }
 
 // pendingFor returns a submission and its channel, if this user moderates it and

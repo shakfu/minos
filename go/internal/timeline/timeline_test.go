@@ -113,6 +113,53 @@ func TestAVersion4DatabaseGainsVisits(t *testing.T) {
 	}
 }
 
+// An upgraded message has no stored author kind and is read as its author's
+// kind now; an event was always the server's.
+func TestAVersion7DatabaseGainsAuthorKinds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "timeline.db")
+	store, err := open(t, path)
+	if err != nil {
+		t.Fatalf("cannot open a new database: %v", err)
+	}
+	room, _ := store.CreateRoom("Run", "demo", RoomKind, Admin, Persisted, "", nil, Filing{})
+	for _, author := range []string{"worker", "alice"} {
+		if _, err := store.Append(room.ID, author, "", "hello", Text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Append(room.ID, "system", "", "something happened", Event); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	for _, statement := range append(slices.Clone(sinceVersion7), "PRAGMA user_version = 7") {
+		if _, err := raw(t, path).Exec(statement); err != nil {
+			t.Fatalf("cannot arrange the database: %v", err)
+		}
+	}
+
+	store, err = open(t, path)
+	if err != nil {
+		t.Fatalf("cannot upgrade a version 7 database: %v", err)
+	}
+	defer store.Close()
+	store.SetAgents(func(name string) bool { return name == "worker" })
+	log, _ := store.History(room.ID, 0)
+	var kinds []string
+	for _, message := range log {
+		kinds = append(kinds, message.AuthorKind)
+	}
+	if !slices.Equal(kinds, []string{AuthorAgent, AuthorUser, AuthorSystem}) {
+		t.Fatalf("author kinds are %v", kinds)
+	}
+	// Written now, the kind is stored and survives a change of who is an agent.
+	written, _ := store.Append(room.ID, "worker", "", "again", Text)
+	store.SetAgents(nil)
+	log, _ = store.History(room.ID, written.Seq-1)
+	if len(log) != 1 || log[0].AuthorKind != AuthorAgent {
+		t.Fatalf("a stored kind was not kept: %+v", log)
+	}
+}
+
 // A young message holds back an older one behind it, or the live tail would
 // have a hole in it.
 func TestArchivalTakesTheAgedRunFromTheOldestOnly(t *testing.T) {
@@ -169,15 +216,22 @@ func raw(t *testing.T, path string) *sql.DB {
 	return db
 }
 
-// sinceVersion6 undoes what version 7 added.
-var sinceVersion6 = []string{
+// sinceVersion7 undoes what version 8 added.
+var sinceVersion7 = []string{
+	"ALTER TABLE messages DROP COLUMN author_kind",
+	"ALTER TABLE archived_messages DROP COLUMN author_kind",
+	"ALTER TABLE submissions DROP COLUMN room",
+}
+
+// sinceVersion6 undoes what versions 7 and 8 added.
+var sinceVersion6 = append(slices.Clone(sinceVersion7),
 	"DROP TABLE project_tags",
 	"ALTER TABLE rooms DROP COLUMN scope",
 	"ALTER TABLE rooms DROP COLUMN task",
 	"ALTER TABLE rooms DROP COLUMN state",
-}
+)
 
-// sinceVersion5 undoes what versions 6 and 7 added.
+// sinceVersion5 undoes what versions 6 to 8 added.
 var sinceVersion5 = append(slices.Clone(sinceVersion6),
 	"DROP TABLE projects",
 	"ALTER TABLE rooms DROP COLUMN project",
